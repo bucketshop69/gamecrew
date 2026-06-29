@@ -1,0 +1,40 @@
+# dependencies
+node_modules/
+
+# local agent setup
+.agents/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+ios/
+android/
+
+# Logs
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+pnpm-debug.log*
+
+# macOS
+.DS_Store
+*.pem
+
+# env
+.env
+.env.*
+!.env.example
+
+# TypeScript
+*.tsbuildinfo

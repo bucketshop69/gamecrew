@@ -1,7 +1,7 @@
 import {
-  GameCrewMatch,
+  type GameCrewMatch,
+  type MatchPulseEvent,
   gameCrewTokens,
-  getMatchResultLabel,
   getMatchTitle,
 } from '@gamecrew/core';
 import { StatusBar } from 'expo-status-bar';
@@ -22,12 +22,23 @@ type LoadState =
   | { status: 'ready'; matches: readonly GameCrewMatch[] }
   | { status: 'error'; matches: readonly GameCrewMatch[]; message: string };
 
+type PulseLoadState =
+  | { status: 'loading'; events: readonly MatchPulseEvent[] }
+  | { status: 'ready'; events: readonly MatchPulseEvent[] }
+  | { status: 'error'; events: readonly MatchPulseEvent[]; message: string };
+
 const tokens = gameCrewTokens;
 const gameCrewApiUrl = process.env.EXPO_PUBLIC_GAMECREW_API_URL ?? 'http://localhost:8787';
+const maxPulseRows = 50;
 
 interface MatchesResponse {
   source: 'txline' | 'sample' | 'sample-fallback';
   matches: readonly GameCrewMatch[];
+}
+
+interface MatchPulseResponse {
+  source: 'txline';
+  events: readonly MatchPulseEvent[];
 }
 
 type PulseTone = 'major' | 'danger' | 'building' | 'quiet';
@@ -164,6 +175,18 @@ async function fetchGameCrewMatches(): Promise<readonly GameCrewMatch[]> {
 
   const parsed = JSON.parse(body) as MatchesResponse;
   return parsed.matches;
+}
+
+async function fetchMatchPulse(fixtureId: string): Promise<readonly MatchPulseEvent[]> {
+  const response = await fetch(`${gameCrewApiUrl}/matches/${encodeURIComponent(fixtureId)}/pulse`);
+  const body = await response.text();
+
+  if (!response.ok) {
+    throw new Error(body || `GameCrew API failed with ${response.status}`);
+  }
+
+  const parsed = JSON.parse(body) as MatchPulseResponse;
+  return parsed.events;
 }
 
 function HomeHeader() {
@@ -367,7 +390,40 @@ function MatchDetailPlaceholder({
   match: GameCrewMatch;
   onBack: () => void;
 }) {
-  const pulseItems = getPulseFeedItems(match);
+  const [pulseLoadState, setPulseLoadState] = useState<PulseLoadState>({
+    status: 'loading',
+    events: [],
+  });
+  const [pulseReloadKey, setPulseReloadKey] = useState(0);
+  const pulseItems =
+    pulseLoadState.status === 'ready'
+      ? getPulseFeedItems(match, pulseLoadState.events).slice(-maxPulseRows)
+      : [];
+
+  useEffect(() => {
+    let cancelled = false;
+    setPulseLoadState((current) => ({ status: 'loading', events: current.events }));
+
+    fetchMatchPulse(match.txline.fixtureId)
+      .then((events) => {
+        if (!cancelled) {
+          setPulseLoadState({ status: 'ready', events });
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setPulseLoadState((current) => ({
+            status: 'error',
+            events: current.events,
+            message: error instanceof Error ? error.message : 'Match Pulse is unavailable.',
+          }));
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [match.txline.fixtureId, pulseReloadKey]);
 
   return (
     <ScrollView
@@ -424,34 +480,20 @@ function MatchDetailPlaceholder({
       </View>
 
       <View style={styles.pulseStack}>
-        {pulseItems.map((item) => (
-          <PulseMomentRow key={item.id} item={item} />
-        ))}
-      </View>
-
-      <View style={styles.chatPanel}>
-        <Text style={styles.pulseTitle} selectable>
-          Chat
-        </Text>
-        <View style={styles.chatBubble}>
-          <Text style={styles.chatName} selectable>
-            Maya
-          </Text>
-          <Text style={styles.chatText} selectable>
-            That pressure is building.
-          </Text>
-        </View>
-        <View style={[styles.chatBubble, styles.chatBubbleAlt]}>
-          <Text style={styles.chatName} selectable>
-            Dev
-          </Text>
-          <Text style={styles.chatText} selectable>
-            Need one more clean chance.
-          </Text>
-        </View>
-        <View style={styles.chatInput}>
-          <Text style={styles.chatInputText}>Message the crew</Text>
-        </View>
+        {pulseLoadState.status === 'loading' ? (
+          <PulseStatePanel title="Loading Match Pulse" body="Fetching the TxLINE event timeline." />
+        ) : pulseLoadState.status === 'error' ? (
+          <PulseStatePanel
+            title="Match Pulse unavailable"
+            body={getPulseErrorCopy(pulseLoadState.message)}
+            actionLabel="Retry"
+            onAction={() => setPulseReloadKey((key) => key + 1)}
+          />
+        ) : pulseItems.length === 0 ? (
+          <PulseStatePanel title="No pulse events yet" body="TxLINE has no useful timeline events for this fixture." />
+        ) : (
+          pulseItems.map((item) => <PulseMomentRow key={item.id} item={item} />)
+        )}
       </View>
     </ScrollView>
   );
@@ -470,7 +512,7 @@ function PulseMomentRow({ item }: { item: PulseFeedItem }) {
           </Text>
           {item.verified ? (
             <Text style={styles.pulseVerified} selectable>
-              Verified
+              Confirmed
             </Text>
           ) : null}
         </View>
@@ -478,6 +520,34 @@ function PulseMomentRow({ item }: { item: PulseFeedItem }) {
           {item.meta}
         </Text>
       </View>
+    </View>
+  );
+}
+
+function PulseStatePanel({
+  title,
+  body,
+  actionLabel,
+  onAction,
+}: {
+  title: string;
+  body: string;
+  actionLabel?: string;
+  onAction?: () => void;
+}) {
+  return (
+    <View style={styles.pulseStatePanel}>
+      <Text style={styles.pulseStateTitle} selectable>
+        {title}
+      </Text>
+      <Text style={styles.pulseBody} selectable>
+        {body}
+      </Text>
+      {actionLabel && onAction ? (
+        <Pressable accessibilityRole="button" onPress={onAction} style={styles.pulseStateAction}>
+          <Text style={styles.pulseStateActionText}>{actionLabel}</Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }
@@ -490,26 +560,6 @@ function MiniFlag({ bands, countryCode }: { bands: readonly string[]; countryCod
       ))}
     </View>
   );
-}
-
-function getPhaseCopy(match: GameCrewMatch): string {
-  if (match.status === 'live') {
-    return match.clock.label;
-  }
-
-  if (match.status === 'upcoming') {
-    return formatKickoff(match.kickoffUtc);
-  }
-
-  if (match.status === 'replayable') {
-    return match.replay?.label ?? 'Replay ready';
-  }
-
-  if (match.status === 'hosted') {
-    return match.hosted?.label ?? match.clock.label;
-  }
-
-  return match.clock.label;
 }
 
 function getMetaLabel(match: GameCrewMatch): string {
@@ -540,82 +590,70 @@ function getDetailScoreLabel(match: GameCrewMatch, side: 'home' | 'away'): strin
   return String(side === 'home' ? match.score.home : match.score.away);
 }
 
-function getPulseFeedItems(match: GameCrewMatch): readonly PulseFeedItem[] {
-  const items: PulseFeedItem[] = [];
+function getPulseFeedItems(
+  match: GameCrewMatch,
+  events: readonly MatchPulseEvent[],
+): readonly PulseFeedItem[] {
+  return events.map((event) => {
+    const title = getPulseActionTitle(event.action);
+    const teamName = getPulseEventTeamName(match, event);
 
-  if (match.pulse) {
-    const presentation = getPulseActionPresentation(match.pulse.action, match.pulse.label);
-    items.push({
-      id: 'latest-pulse',
-      minute: getClockCardLabel(match),
-      title: presentation.title,
-      meta: presentation.meta,
-      tone: presentation.tone,
-      verified: match.pulse.verified,
-    });
-  } else {
-    items.push({
-      id: 'match-state',
-      minute: getClockCardLabel(match),
-      title: getPhaseCopy(match),
-      meta: match.status === 'upcoming' ? 'Kickoff schedule from TxLINE' : 'Current match state',
-      tone: 'quiet',
-    });
-  }
-
-  if (match.score) {
-    items.push({
-      id: 'score-state',
-      minute: match.status === 'replayable' || match.status === 'finished' ? 'FT' : getClockCardLabel(match),
-      title: `${match.homeTeam.shortName} ${match.score.home} - ${match.score.away} ${match.awayTeam.shortName}`,
-      meta: getMetaLabel(match),
-      tone: match.status === 'live' ? 'building' : 'quiet',
-    });
-  }
-
-  return items;
+    return {
+      id: event.id,
+      minute: event.clock.label,
+      title: teamName ? `${teamName}: ${title}` : title,
+      meta: event.confirmed === false ? 'Awaiting TxLINE confirmation' : 'TxLINE match event',
+      tone: event.intensity,
+      verified: event.confirmed,
+    };
+  });
 }
 
-function getPulseActionPresentation(
-  action: string | undefined,
-  fallbackLabel: string,
-): Pick<PulseFeedItem, 'title' | 'meta' | 'tone'> {
+function getPulseActionTitle(action: string): string {
   switch (action) {
     case 'goal':
-      return { title: 'Goal', meta: fallbackLabel, tone: 'major' };
+      return 'Goal';
     case 'shot':
-      return { title: 'Shot', meta: fallbackLabel, tone: 'danger' };
+      return 'Shot';
     case 'corner':
-      return { title: 'Corner', meta: fallbackLabel, tone: 'danger' };
-    case 'penalty':
-      return { title: 'Penalty moment', meta: fallbackLabel, tone: 'major' };
+      return 'Corner';
     case 'red_card':
-      return { title: 'Red card', meta: fallbackLabel, tone: 'major' };
+      return 'Red card';
     case 'yellow_card':
-      return { title: 'Yellow card', meta: fallbackLabel, tone: 'building' };
+      return 'Yellow card';
     case 'substitution':
-      return { title: 'Substitution', meta: fallbackLabel, tone: 'quiet' };
+      return 'Substitution';
     case 'free_kick':
-      return { title: 'Free kick', meta: fallbackLabel, tone: 'building' };
-    case 'attack_possession':
-      return { title: 'Attack building', meta: fallbackLabel, tone: 'building' };
+      return 'Free kick';
     case 'danger_possession':
+      return 'Danger possession';
     case 'high_danger_possession':
-      return { title: 'Danger attack', meta: fallbackLabel, tone: 'danger' };
-    case 'safe_possession':
-    case 'possession':
-      return { title: 'Possession', meta: fallbackLabel, tone: 'quiet' };
+      return 'High danger possession';
     case 'throw_in':
-      return { title: 'Throw-in', meta: fallbackLabel, tone: 'quiet' };
-    case 'goal_kick':
-      return { title: 'Goal kick', meta: fallbackLabel, tone: 'quiet' };
+      return 'Throw-in';
     case 'var':
-      return { title: 'VAR check', meta: fallbackLabel, tone: 'danger' };
+      return 'VAR check';
     case 'injury':
-      return { title: 'Injury stoppage', meta: fallbackLabel, tone: 'building' };
+      return 'Injury stoppage';
+    case 'kickoff':
+      return 'Kickoff';
+    case 'game_finalised':
+      return 'Game finalised';
     default:
-      return { title: fallbackLabel, meta: 'TxLINE match event', tone: 'quiet' };
+      return 'Match event';
   }
+}
+
+function getPulseEventTeamName(match: GameCrewMatch, event: MatchPulseEvent): string | undefined {
+  if (event.participant === 1) {
+    return match.homeTeam.shortName;
+  }
+
+  if (event.participant === 2) {
+    return match.awayTeam.shortName;
+  }
+
+  return undefined;
 }
 
 function getPulseToneStyle(tone: PulseTone) {
@@ -686,6 +724,14 @@ function getErrorCopy(message: string): string {
   }
 
   return 'The local API could not return the TxLINE match feed.';
+}
+
+function getPulseErrorCopy(message: string): string {
+  if (message.includes('Network request failed') || message.includes('Failed to fetch')) {
+    return 'Start the local GameCrew API, then retry Match Pulse.';
+  }
+
+  return 'The local API could not return the TxLINE event timeline.';
 }
 
 const styles = StyleSheet.create({
@@ -1098,15 +1144,36 @@ const styles = StyleSheet.create({
   pulseStack: {
     gap: tokens.spacing.sm,
   },
-  pulseTitle: {
+  pulseBody: {
+    color: tokens.shell.textMuted,
+    fontSize: tokens.typography.size.label,
+    lineHeight: tokens.typography.lineHeight.caption,
+  },
+  pulseStatePanel: {
+    backgroundColor: tokens.shell.surface,
+    borderRadius: tokens.radii.md,
+    gap: tokens.spacing.sm,
+    padding: tokens.spacing.lg,
+  },
+  pulseStateTitle: {
     color: tokens.shell.text,
     fontSize: tokens.typography.size.body,
     fontWeight: tokens.typography.weight.bold,
     lineHeight: tokens.typography.lineHeight.body,
   },
-  pulseBody: {
-    color: tokens.shell.textMuted,
+  pulseStateAction: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: tokens.shell.text,
+    borderRadius: tokens.radii.pill,
+    minHeight: 36,
+    justifyContent: 'center',
+    paddingHorizontal: tokens.spacing.lg,
+  },
+  pulseStateActionText: {
+    color: tokens.shell.inverseText,
     fontSize: tokens.typography.size.label,
+    fontWeight: tokens.typography.weight.bold,
     lineHeight: tokens.typography.lineHeight.caption,
   },
   pulseMoment: {
@@ -1153,6 +1220,7 @@ const styles = StyleSheet.create({
   },
   pulseMomentTitle: {
     color: tokens.shell.text,
+    flex: 1,
     fontSize: tokens.typography.size.body,
     fontWeight: tokens.typography.weight.bold,
     lineHeight: tokens.typography.lineHeight.body,
@@ -1163,48 +1231,5 @@ const styles = StyleSheet.create({
     fontWeight: tokens.typography.weight.bold,
     lineHeight: tokens.typography.lineHeight.caption,
     textTransform: 'uppercase',
-  },
-  chatPanel: {
-    backgroundColor: tokens.shell.surface,
-    borderRadius: tokens.radii.md,
-    gap: tokens.spacing.md,
-    padding: tokens.spacing.lg,
-  },
-  chatBubble: {
-    alignSelf: 'flex-start',
-    backgroundColor: tokens.shell.surfaceRaised,
-    borderRadius: tokens.radii.md,
-    gap: tokens.spacing.xs,
-    maxWidth: '82%',
-    paddingHorizontal: tokens.spacing.md,
-    paddingVertical: tokens.spacing.sm,
-  },
-  chatBubbleAlt: {
-    alignSelf: 'flex-end',
-  },
-  chatName: {
-    color: tokens.shell.textMuted,
-    fontSize: tokens.typography.size.caption,
-    fontWeight: tokens.typography.weight.bold,
-    lineHeight: tokens.typography.lineHeight.caption,
-  },
-  chatText: {
-    color: tokens.shell.text,
-    fontSize: tokens.typography.size.body,
-    lineHeight: tokens.typography.lineHeight.body,
-  },
-  chatInput: {
-    borderColor: tokens.shell.divider,
-    borderRadius: tokens.radii.pill,
-    borderWidth: 1,
-    minHeight: 42,
-    justifyContent: 'center',
-    paddingHorizontal: tokens.spacing.lg,
-  },
-  chatInputText: {
-    color: tokens.shell.textDim,
-    fontSize: tokens.typography.size.label,
-    fontWeight: tokens.typography.weight.medium,
-    lineHeight: tokens.typography.lineHeight.caption,
   },
 });

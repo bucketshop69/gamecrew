@@ -60,6 +60,43 @@ export interface MatchPulse {
   updatedAt?: string;
 }
 
+export type MatchPulseEventAction =
+  | 'kickoff'
+  | 'goal'
+  | 'shot'
+  | 'corner'
+  | 'free_kick'
+  | 'throw_in'
+  | 'danger_possession'
+  | 'high_danger_possession'
+  | 'yellow_card'
+  | 'red_card'
+  | 'substitution'
+  | 'injury'
+  | 'var'
+  | 'game_finalised';
+
+export interface MatchPulseEventClock {
+  seconds?: number;
+  minute?: number;
+  label: string;
+}
+
+export interface MatchPulseEvent {
+  id: string;
+  fixtureId: string;
+  seq: number;
+  action: MatchPulseEventAction;
+  label: string;
+  intensity: MatchPulseIntensity;
+  clock: MatchPulseEventClock;
+  participant?: 1 | 2;
+  teamId?: string;
+  teamName?: string;
+  confirmed?: boolean;
+  updatedAt?: string;
+}
+
 export interface ReplayState {
   available: boolean;
   label?: string;

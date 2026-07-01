@@ -25,6 +25,13 @@ export function createApp(config: ApiConfig) {
     return context.json(result);
   });
 
+  app.get('/matches/:fixtureId/pulse', async (context) => {
+    const fixtureId = context.req.param('fixtureId');
+    const result = await txline.listMatchPulse(fixtureId);
+
+    return context.json(result);
+  });
+
   app.notFound((context) => context.json({ error: 'Not found' }, 404));
 
   app.onError((error, context) =>

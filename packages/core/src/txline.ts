@@ -4,6 +4,8 @@ import type {
   GameCrewMatchFilter,
   GameCrewMatchStatus,
   MatchClock,
+  MatchPulseEvent,
+  MatchPulseEventAction,
   MatchPulse,
   MatchPulseIntensity,
   MatchScore,
@@ -18,6 +20,7 @@ export interface TxlineMatchQuery {
 
 export interface TxlineMatchAdapter {
   listMatches(query?: TxlineMatchQuery): Promise<readonly GameCrewMatch[]>;
+  listMatchPulse(fixtureId: string | number): Promise<readonly MatchPulseEvent[]>;
 }
 
 export interface TxlineClientConfig {
@@ -55,6 +58,8 @@ export interface TxlineFixture {
 }
 
 export interface TxlineScore {
+  seq?: number;
+  Seq?: number;
   fixtureId?: number;
   FixtureId?: number;
   id?: string | number;
@@ -79,8 +84,11 @@ export interface TxlineScore {
   Confirmed?: boolean;
   Participant?: number;
   PossessionType?: string;
+  Possession?: unknown;
   StatusId?: number;
   Stats?: Record<string, number>;
+  Data?: unknown;
+  PossibleEvent?: unknown;
   ts?: number;
   Ts?: number;
 }
@@ -212,6 +220,31 @@ export class SampleTxlineMatchAdapter implements TxlineMatchAdapter {
   async listMatches(query: TxlineMatchQuery = {}): Promise<readonly GameCrewMatch[]> {
     return applyMatchQuery(this.matches, query);
   }
+
+  async listMatchPulse(fixtureId: string | number): Promise<readonly MatchPulseEvent[]> {
+    const match = this.matches.find((candidate) => candidate.txline.fixtureId === String(fixtureId));
+    if (!match?.pulse) {
+      return [];
+    }
+
+    return [
+      {
+        id: `${match.txline.fixtureId}-latest-pulse`,
+        fixtureId: String(fixtureId),
+        seq: 0,
+        action: normalizePulseAction(match.pulse.action) ?? 'kickoff',
+        label: match.pulse.label,
+        intensity: match.pulse.intensity,
+        clock: {
+          minute: match.clock.minute,
+          label: match.clock.minute ? `${match.clock.minute}'` : match.clock.label,
+        },
+        teamId: match.pulse.teamId,
+        confirmed: match.pulse.verified,
+        updatedAt: match.pulse.updatedAt,
+      },
+    ];
+  }
 }
 
 export class TxlineApiClient {
@@ -248,6 +281,14 @@ export class TxlineApiClient {
     return this.requestJson<readonly TxlineScore[]>(`/api/scores/snapshot/${fixtureId}`, jwt);
   }
 
+  async listScoreHistory(fixtureId: string | number, jwt: string): Promise<readonly TxlineScore[]> {
+    return this.requestScoreEvents(`/api/scores/historical/${fixtureId}`, jwt);
+  }
+
+  async listScoreUpdates(fixtureId: string | number, jwt: string): Promise<readonly TxlineScore[]> {
+    return this.requestScoreEvents(`/api/scores/updates/${fixtureId}`, jwt);
+  }
+
   private async requestJson<T>(path: string, jwt: string): Promise<T> {
     const response = await this.fetcher(`${this.baseUrl}${path}`, {
       headers: {
@@ -261,6 +302,22 @@ export class TxlineApiClient {
     }
 
     return body.json as T;
+  }
+
+  private async requestScoreEvents(path: string, jwt: string): Promise<readonly TxlineScore[]> {
+    const response = await this.fetcher(`${this.baseUrl}${path}`, {
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+        'X-Api-Token': this.apiToken,
+        Accept: 'text/event-stream, application/json',
+      },
+    });
+    const body = await readResponseBody(response);
+    if (!response.ok) {
+      throw new Error(`TxLINE request failed (${response.status} ${path}): ${body.text}`);
+    }
+
+    return parseTxlineScoreEvents(body.text);
   }
 }
 
@@ -281,6 +338,14 @@ export class LiveTxlineMatchAdapter implements TxlineMatchAdapter {
     );
 
     return applyMatchQuery(matches, query);
+  }
+
+  async listMatchPulse(fixtureId: string | number): Promise<readonly MatchPulseEvent[]> {
+    const { jwt } = await this.client.startGuestSession();
+    const history = await this.client.listScoreHistory(fixtureId, jwt);
+    const scores = history.length > 0 ? history : await this.client.listScoreUpdates(fixtureId, jwt);
+
+    return mapTxlineScoresToMatchPulseEvents(String(fixtureId), scores);
   }
 }
 
@@ -337,6 +402,94 @@ export function applyMatchQuery(
   return typeof query.limit === 'number' ? filteredMatches.slice(0, query.limit) : filteredMatches;
 }
 
+export function parseTxlineScoreEvents(text: string): readonly TxlineScore[] {
+  const directJson = parseScoreEventPayload(text.trim());
+  if (directJson.length > 0) {
+    return directJson;
+  }
+
+  const events: TxlineScore[] = [];
+  let dataLines: string[] = [];
+
+  const flush = () => {
+    if (dataLines.length === 0) {
+      return;
+    }
+
+    const payload = dataLines.join('\n').trim();
+    events.push(...parseScoreEventPayload(payload));
+    dataLines = [];
+  };
+
+  for (const line of text.split(/\r?\n/)) {
+    if (line.trim() === '') {
+      flush();
+      continue;
+    }
+
+    const normalizedLine = line.replace(/^\uFEFF/, '');
+    if (normalizedLine.startsWith(':')) {
+      continue;
+    }
+
+    const separator = normalizedLine.indexOf(':');
+    const field = separator === -1 ? normalizedLine : normalizedLine.slice(0, separator);
+    if (field !== 'data') {
+      continue;
+    }
+
+    const value = separator === -1 ? '' : normalizedLine.slice(separator + 1).replace(/^ /, '');
+    if (value.trim() !== '[DONE]') {
+      dataLines.push(value);
+    }
+  }
+
+  flush();
+  return events;
+}
+
+export function mapTxlineScoresToMatchPulseEvents(
+  fixtureId: string,
+  scores: readonly TxlineScore[],
+): readonly MatchPulseEvent[] {
+  const sortedScores = [...scores].sort((left, right) => getScoreSeq(left) - getScoreSeq(right));
+  const deduped = new Map<string, TxlineScore>();
+
+  for (const score of sortedScores) {
+    const action = normalizeScorePulseAction(score);
+    if (!action || !usefulPulseActions.has(action)) {
+      continue;
+    }
+
+    const dedupeKey = `${action}:${getScoreClockSeconds(score) ?? 'none'}:${score.Participant ?? 'none'}`;
+    const existing = deduped.get(dedupeKey);
+    if (!existing || (!existing.Confirmed && score.Confirmed)) {
+      deduped.set(dedupeKey, score);
+    }
+  }
+
+  return [...deduped.values()]
+    .sort((left, right) => getScoreSeq(left) - getScoreSeq(right))
+    .map((score, index) => {
+      const action = normalizeScorePulseAction(score) ?? 'kickoff';
+      const participant = getPulseParticipant(score.Participant);
+      const clockSeconds = getScoreClockSeconds(score);
+
+      return {
+        id: `${fixtureId}-${getScoreSeq(score)}-${action}-${index}`,
+        fixtureId,
+        seq: getScoreSeq(score),
+        action,
+        label: getPulseEventLabel(action, participant),
+        intensity: getPulseIntensity(action),
+        clock: getPulseEventClock(clockSeconds),
+        participant,
+        confirmed: score.Confirmed,
+        updatedAt: score.Ts ? new Date(score.Ts).toISOString() : undefined,
+      };
+    });
+}
+
 export const sampleTxlineMatchAdapter = new SampleTxlineMatchAdapter();
 
 function getGlobalFetch(): TxlineFetcher {
@@ -355,6 +508,60 @@ async function readResponseBody(response: TxlineResponse): Promise<{ text: strin
   } catch {
     return { text };
   }
+}
+
+function parseScoreEventPayload(payload: string): readonly TxlineScore[] {
+  if (!payload) {
+    return [];
+  }
+
+  try {
+    return collectScoreEvents(JSON.parse(payload));
+  } catch {
+    return payload
+      .split(/\r?\n/)
+      .flatMap((line) => {
+        try {
+          return collectScoreEvents(JSON.parse(line.trim()));
+        } catch {
+          return [];
+        }
+      });
+  }
+}
+
+function collectScoreEvents(value: unknown): readonly TxlineScore[] {
+  if (Array.isArray(value)) {
+    return value.flatMap(collectScoreEvents);
+  }
+
+  if (typeof value === 'string') {
+    return parseScoreEventPayload(value);
+  }
+
+  if (!value || typeof value !== 'object') {
+    return [];
+  }
+
+  const record = value as Record<string, unknown>;
+  if (
+    'Seq' in record ||
+    'seq' in record ||
+    'Action' in record ||
+    'action' in record ||
+    'Clock' in record
+  ) {
+    return [record as unknown as TxlineScore];
+  }
+
+  for (const key of ['scores', 'Scores', 'events', 'Events', 'items', 'Items', 'data', 'payload']) {
+    const childEvents = collectScoreEvents(record[key]);
+    if (childEvents.length > 0) {
+      return childEvents;
+    }
+  }
+
+  return [];
 }
 
 function getMatchStatus(startTimeMs: number, latestScore?: TxlineScore): GameCrewMatchStatus {
@@ -479,7 +686,7 @@ function isPulseEvent(score: TxlineScore): boolean {
     return false;
   }
 
-  return !ignoredPulseActions.has(action);
+  return !ignoredPulseActions.has(toSnakeCase(action));
 }
 
 const ignoredPulseActions = new Set([
@@ -495,8 +702,48 @@ const ignoredPulseActions = new Set([
   'weather',
 ]);
 
+const usefulPulseActions = new Set<MatchPulseEventAction>([
+  'kickoff',
+  'goal',
+  'shot',
+  'corner',
+  'free_kick',
+  'throw_in',
+  'danger_possession',
+  'high_danger_possession',
+  'yellow_card',
+  'red_card',
+  'substitution',
+  'injury',
+  'var',
+  'game_finalised',
+]);
+
 function getScoreTimestamp(score: TxlineScore): number {
   return score.Ts ?? score.ts ?? 0;
+}
+
+function getScoreSeq(score: TxlineScore): number {
+  return score.Seq ?? score.seq ?? getScoreTimestamp(score);
+}
+
+function getScoreClockSeconds(score: TxlineScore): number | undefined {
+  return typeof score.Clock?.Seconds === 'number' ? score.Clock.Seconds : undefined;
+}
+
+function getPulseEventClock(seconds?: number): MatchPulseEvent['clock'] {
+  if (typeof seconds !== 'number') {
+    return {
+      label: 'Match',
+    };
+  }
+
+  const minute = Math.max(1, Math.floor(seconds / 60) + 1);
+  return {
+    seconds,
+    minute,
+    label: `${minute}'`,
+  };
 }
 
 function getMatchScore(score?: TxlineScore): MatchScore | undefined {
@@ -521,6 +768,60 @@ function getScoreId(score?: TxlineScore): string | undefined {
 
 function getGameState(score?: TxlineScore): string | undefined {
   return score?.GameState ?? score?.gameState;
+}
+
+function normalizeScorePulseAction(score: TxlineScore): MatchPulseEventAction | undefined {
+  return normalizePulseAction(score.Action ?? score.action, score.PossessionType);
+}
+
+function normalizePulseAction(
+  action: string | undefined,
+  possessionType?: string,
+): MatchPulseEventAction | undefined {
+  const normalizedAction = toSnakeCase(action);
+  const normalizedPossessionType = toSnakeCase(possessionType);
+
+  if (
+    normalizedAction === 'possession' &&
+    (normalizedPossessionType === 'danger_possession' ||
+      normalizedPossessionType === 'high_danger_possession')
+  ) {
+    return normalizedPossessionType;
+  }
+
+  if (usefulPulseActions.has(normalizedAction as MatchPulseEventAction)) {
+    return normalizedAction as MatchPulseEventAction;
+  }
+
+  return undefined;
+}
+
+function toSnakeCase(value: string | undefined): string {
+  if (!value) {
+    return '';
+  }
+
+  return value
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+    .replace(/[\s-]+/g, '_')
+    .replace(/[^a-zA-Z0-9_]/g, '')
+    .replace(/_+/g, '_')
+    .toLowerCase();
+}
+
+function getPulseParticipant(participant: number | undefined): 1 | 2 | undefined {
+  return participant === 1 || participant === 2 ? participant : undefined;
+}
+
+function getPulseEventLabel(action: MatchPulseEventAction, participant?: 1 | 2): string {
+  const label = getReadableAction(action);
+  if (!participant) {
+    return label;
+  }
+
+  return `${participant === 1 ? 'Home' : 'Away'}: ${label}`;
 }
 
 function getClockMinute(score?: TxlineScore): number | undefined {
@@ -598,7 +899,7 @@ function getPulseIntensity(action: string, possessionType?: string): MatchPulseI
     return 'danger';
   }
 
-  if (action === 'attack_possession' || action === 'free_kick') {
+  if (action === 'attack_possession' || action === 'free_kick' || action === 'yellow_card' || action === 'injury') {
     return 'building';
   }
 

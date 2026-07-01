@@ -11,6 +11,9 @@ export type {
   MatchClock,
   MatchPhase,
   MatchPulse,
+  MatchPulseEvent,
+  MatchPulseEventAction,
+  MatchPulseEventClock,
   MatchPulseIntensity,
   MatchScore,
   MatchTeam,
@@ -26,6 +29,8 @@ export {
   TxlineApiClient,
   applyMatchQuery,
   mapTxlineFixtureToGameCrewMatch,
+  mapTxlineScoresToMatchPulseEvents,
+  parseTxlineScoreEvents,
   sampleTxlineMatchAdapter,
 } from './txline';
 export type {

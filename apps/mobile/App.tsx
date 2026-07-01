@@ -30,6 +30,17 @@ interface MatchesResponse {
   matches: readonly GameCrewMatch[];
 }
 
+type PulseTone = 'major' | 'danger' | 'building' | 'quiet';
+
+interface PulseFeedItem {
+  id: string;
+  minute: string;
+  title: string;
+  meta: string;
+  tone: PulseTone;
+  verified?: boolean;
+}
+
 export default function App() {
   const { height, width } = useWindowDimensions();
   const [activeIndex, setActiveIndex] = useState(0);
@@ -356,6 +367,8 @@ function MatchDetailPlaceholder({
   match: GameCrewMatch;
   onBack: () => void;
 }) {
+  const pulseItems = getPulseFeedItems(match);
+
   return (
     <ScrollView
       style={styles.root}
@@ -368,17 +381,35 @@ function MatchDetailPlaceholder({
       </Pressable>
 
       <View style={styles.detailHeader}>
-        <FlagField bands={match.homeTeam.flag.bands} align="left" />
-        <FlagField bands={match.awayTeam.flag.bands} align="right" />
-        <View style={styles.detailHeaderCopy}>
-          <Text style={styles.detailKicker} selectable>
-            Match Detail
+        <View style={styles.detailTeamColumn}>
+          <MiniFlag bands={match.homeTeam.flag.bands} countryCode={match.homeTeam.countryCode} />
+          <Text style={styles.detailTeamName} selectable>
+            {match.homeTeam.shortName}
+          </Text>
+          <Text style={styles.detailTeamScore} selectable>
+            {getDetailScoreLabel(match, 'home')}
+          </Text>
+        </View>
+
+        <View style={styles.detailCenterColumn}>
+          <Text style={styles.detailClock} selectable>
+            {getClockCardLabel(match)}
           </Text>
           <Text style={styles.detailTitle} selectable>
             {getMatchTitle(match)}
           </Text>
-          <Text style={styles.detailScore} selectable>
-            {getMatchResultLabel(match)}
+          <Text style={styles.detailMeta} selectable>
+            {getMetaLabel(match)}
+          </Text>
+        </View>
+
+        <View style={styles.detailTeamColumn}>
+          <MiniFlag bands={match.awayTeam.flag.bands} countryCode={match.awayTeam.countryCode} />
+          <Text style={styles.detailTeamName} selectable>
+            {match.awayTeam.shortName}
+          </Text>
+          <Text style={styles.detailTeamScore} selectable>
+            {getDetailScoreLabel(match, 'away')}
           </Text>
         </View>
       </View>
@@ -392,15 +423,72 @@ function MatchDetailPlaceholder({
         </View>
       </View>
 
-      <View style={styles.pulsePanel}>
+      <View style={styles.pulseStack}>
+        {pulseItems.map((item) => (
+          <PulseMomentRow key={item.id} item={item} />
+        ))}
+      </View>
+
+      <View style={styles.chatPanel}>
         <Text style={styles.pulseTitle} selectable>
-          {getPhaseCopy(match)}
+          Chat
         </Text>
-        <Text style={styles.pulseBody} selectable>
-          {match.pulse?.label ?? 'Match Pulse will appear as TxLINE moments arrive.'}
-        </Text>
+        <View style={styles.chatBubble}>
+          <Text style={styles.chatName} selectable>
+            Maya
+          </Text>
+          <Text style={styles.chatText} selectable>
+            That pressure is building.
+          </Text>
+        </View>
+        <View style={[styles.chatBubble, styles.chatBubbleAlt]}>
+          <Text style={styles.chatName} selectable>
+            Dev
+          </Text>
+          <Text style={styles.chatText} selectable>
+            Need one more clean chance.
+          </Text>
+        </View>
+        <View style={styles.chatInput}>
+          <Text style={styles.chatInputText}>Message the crew</Text>
+        </View>
       </View>
     </ScrollView>
+  );
+}
+
+function PulseMomentRow({ item }: { item: PulseFeedItem }) {
+  return (
+    <View style={[styles.pulseMoment, getPulseToneStyle(item.tone)]}>
+      <Text style={styles.pulseMinute} selectable>
+        {item.minute}
+      </Text>
+      <View style={styles.pulseCopy}>
+        <View style={styles.pulseMomentHeader}>
+          <Text style={styles.pulseMomentTitle} selectable>
+            {item.title}
+          </Text>
+          {item.verified ? (
+            <Text style={styles.pulseVerified} selectable>
+              Verified
+            </Text>
+          ) : null}
+        </View>
+        <Text style={styles.pulseBody} selectable>
+          {item.meta}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+function MiniFlag({ bands, countryCode }: { bands: readonly string[]; countryCode?: string }) {
+  return (
+    <View style={[styles.miniFlag, getFlagDirection(countryCode) === 'horizontal' && styles.miniFlagHorizontal]}>
+      {bands.map((band, index) => (
+        <View key={`${band}-${index}`} style={[styles.flagMarkBand, { backgroundColor: band }]} />
+      ))}
+    </View>
   );
 }
 
@@ -442,6 +530,108 @@ function getTeamCardLabel(match: GameCrewMatch, side: 'home' | 'away'): string {
   }
 
   return side === 'home' ? match.homeTeam.shortName : match.awayTeam.shortName;
+}
+
+function getDetailScoreLabel(match: GameCrewMatch, side: 'home' | 'away'): string {
+  if (!match.score) {
+    return '-';
+  }
+
+  return String(side === 'home' ? match.score.home : match.score.away);
+}
+
+function getPulseFeedItems(match: GameCrewMatch): readonly PulseFeedItem[] {
+  const items: PulseFeedItem[] = [];
+
+  if (match.pulse) {
+    const presentation = getPulseActionPresentation(match.pulse.action, match.pulse.label);
+    items.push({
+      id: 'latest-pulse',
+      minute: getClockCardLabel(match),
+      title: presentation.title,
+      meta: presentation.meta,
+      tone: presentation.tone,
+      verified: match.pulse.verified,
+    });
+  } else {
+    items.push({
+      id: 'match-state',
+      minute: getClockCardLabel(match),
+      title: getPhaseCopy(match),
+      meta: match.status === 'upcoming' ? 'Kickoff schedule from TxLINE' : 'Current match state',
+      tone: 'quiet',
+    });
+  }
+
+  if (match.score) {
+    items.push({
+      id: 'score-state',
+      minute: match.status === 'replayable' || match.status === 'finished' ? 'FT' : getClockCardLabel(match),
+      title: `${match.homeTeam.shortName} ${match.score.home} - ${match.score.away} ${match.awayTeam.shortName}`,
+      meta: getMetaLabel(match),
+      tone: match.status === 'live' ? 'building' : 'quiet',
+    });
+  }
+
+  return items;
+}
+
+function getPulseActionPresentation(
+  action: string | undefined,
+  fallbackLabel: string,
+): Pick<PulseFeedItem, 'title' | 'meta' | 'tone'> {
+  switch (action) {
+    case 'goal':
+      return { title: 'Goal', meta: fallbackLabel, tone: 'major' };
+    case 'shot':
+      return { title: 'Shot', meta: fallbackLabel, tone: 'danger' };
+    case 'corner':
+      return { title: 'Corner', meta: fallbackLabel, tone: 'danger' };
+    case 'penalty':
+      return { title: 'Penalty moment', meta: fallbackLabel, tone: 'major' };
+    case 'red_card':
+      return { title: 'Red card', meta: fallbackLabel, tone: 'major' };
+    case 'yellow_card':
+      return { title: 'Yellow card', meta: fallbackLabel, tone: 'building' };
+    case 'substitution':
+      return { title: 'Substitution', meta: fallbackLabel, tone: 'quiet' };
+    case 'free_kick':
+      return { title: 'Free kick', meta: fallbackLabel, tone: 'building' };
+    case 'attack_possession':
+      return { title: 'Attack building', meta: fallbackLabel, tone: 'building' };
+    case 'danger_possession':
+    case 'high_danger_possession':
+      return { title: 'Danger attack', meta: fallbackLabel, tone: 'danger' };
+    case 'safe_possession':
+    case 'possession':
+      return { title: 'Possession', meta: fallbackLabel, tone: 'quiet' };
+    case 'throw_in':
+      return { title: 'Throw-in', meta: fallbackLabel, tone: 'quiet' };
+    case 'goal_kick':
+      return { title: 'Goal kick', meta: fallbackLabel, tone: 'quiet' };
+    case 'var':
+      return { title: 'VAR check', meta: fallbackLabel, tone: 'danger' };
+    case 'injury':
+      return { title: 'Injury stoppage', meta: fallbackLabel, tone: 'building' };
+    default:
+      return { title: fallbackLabel, meta: 'TxLINE match event', tone: 'quiet' };
+  }
+}
+
+function getPulseToneStyle(tone: PulseTone) {
+  if (tone === 'major') {
+    return styles.pulseMomentMajor;
+  }
+
+  if (tone === 'danger') {
+    return styles.pulseMomentDanger;
+  }
+
+  if (tone === 'building') {
+    return styles.pulseMomentBuilding;
+  }
+
+  return styles.pulseMomentQuiet;
 }
 
 function getClockCardLabel(match: GameCrewMatch): string {
@@ -807,36 +997,74 @@ const styles = StyleSheet.create({
     lineHeight: tokens.typography.lineHeight.caption,
   },
   detailHeader: {
-    backgroundColor: tokens.shell.surface,
-    borderRadius: tokens.radii.lg,
-    minHeight: 260,
-    overflow: 'hidden',
-  },
-  detailHeaderCopy: {
-    flex: 1,
+    alignItems: 'center',
+    backgroundColor: tokens.shell.background,
+    flexDirection: 'row',
     gap: tokens.spacing.md,
-    justifyContent: 'center',
-    padding: tokens.spacing.xl,
+    justifyContent: 'space-between',
+    minHeight: 176,
+    overflow: 'hidden',
+    paddingVertical: tokens.spacing.lg,
   },
-  detailKicker: {
+  detailTeamColumn: {
+    alignItems: 'center',
+    flex: 1,
+    gap: tokens.spacing.sm,
+    justifyContent: 'center',
+  },
+  detailCenterColumn: {
+    alignItems: 'center',
+    flex: 1.35,
+    gap: tokens.spacing.sm,
+    justifyContent: 'center',
+  },
+  miniFlag: {
+    borderRadius: tokens.radii.sm,
+    flexDirection: 'row',
+    height: 50,
+    overflow: 'hidden',
+    width: 78,
+  },
+  miniFlagHorizontal: {
+    flexDirection: 'column',
+  },
+  detailTeamName: {
     color: tokens.shell.textMuted,
-    fontSize: tokens.typography.size.label,
+    fontSize: tokens.typography.size.caption,
     fontWeight: tokens.typography.weight.bold,
     lineHeight: tokens.typography.lineHeight.caption,
     textTransform: 'uppercase',
   },
-  detailTitle: {
+  detailTeamScore: {
     color: tokens.shell.text,
-    fontSize: tokens.typography.size.title,
-    fontWeight: tokens.typography.weight.bold,
-    lineHeight: tokens.typography.lineHeight.title,
-  },
-  detailScore: {
-    color: tokens.shell.text,
-    fontSize: tokens.typography.size.display,
+    fontSize: 48,
     fontVariant: ['tabular-nums'],
     fontWeight: tokens.typography.weight.bold,
-    lineHeight: tokens.typography.lineHeight.display,
+    lineHeight: 52,
+    textAlign: 'center',
+  },
+  detailClock: {
+    color: tokens.shell.text,
+    fontSize: tokens.typography.size.title,
+    fontVariant: ['tabular-nums'],
+    fontWeight: tokens.typography.weight.bold,
+    lineHeight: tokens.typography.lineHeight.title,
+    textAlign: 'center',
+  },
+  detailTitle: {
+    color: tokens.shell.text,
+    fontSize: tokens.typography.size.label,
+    fontWeight: tokens.typography.weight.bold,
+    lineHeight: tokens.typography.lineHeight.caption,
+    textAlign: 'center',
+  },
+  detailMeta: {
+    color: tokens.shell.textDim,
+    fontSize: tokens.typography.size.caption,
+    fontWeight: tokens.typography.weight.bold,
+    lineHeight: tokens.typography.lineHeight.caption,
+    textAlign: 'center',
+    textTransform: 'uppercase',
   },
   detailTabs: {
     backgroundColor: tokens.shell.surface,
@@ -867,11 +1095,8 @@ const styles = StyleSheet.create({
     fontWeight: tokens.typography.weight.bold,
     lineHeight: tokens.typography.lineHeight.caption,
   },
-  pulsePanel: {
-    backgroundColor: tokens.shell.surface,
-    borderRadius: tokens.radii.md,
+  pulseStack: {
     gap: tokens.spacing.sm,
-    padding: tokens.spacing.lg,
   },
   pulseTitle: {
     color: tokens.shell.text,
@@ -881,7 +1106,105 @@ const styles = StyleSheet.create({
   },
   pulseBody: {
     color: tokens.shell.textMuted,
+    fontSize: tokens.typography.size.label,
+    lineHeight: tokens.typography.lineHeight.caption,
+  },
+  pulseMoment: {
+    alignItems: 'center',
+    borderRadius: tokens.radii.md,
+    flexDirection: 'row',
+    gap: tokens.spacing.md,
+    padding: tokens.spacing.md,
+  },
+  pulseMomentQuiet: {
+    backgroundColor: tokens.shell.surface,
+  },
+  pulseMomentBuilding: {
+    backgroundColor: '#151515',
+  },
+  pulseMomentDanger: {
+    backgroundColor: '#1D1D1D',
+  },
+  pulseMomentMajor: {
+    backgroundColor: '#262626',
+  },
+  pulseMinute: {
+    color: tokens.shell.text,
+    backgroundColor: tokens.shell.surfaceRaised,
+    borderRadius: tokens.radii.sm,
+    fontSize: tokens.typography.size.label,
+    fontVariant: ['tabular-nums'],
+    fontWeight: tokens.typography.weight.bold,
+    lineHeight: tokens.typography.lineHeight.caption,
+    minWidth: 48,
+    overflow: 'hidden',
+    paddingHorizontal: tokens.spacing.sm,
+    paddingVertical: tokens.spacing.sm,
+    textAlign: 'center',
+  },
+  pulseCopy: {
+    flex: 1,
+    gap: tokens.spacing.xs,
+  },
+  pulseMomentHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: tokens.spacing.sm,
+  },
+  pulseMomentTitle: {
+    color: tokens.shell.text,
+    fontSize: tokens.typography.size.body,
+    fontWeight: tokens.typography.weight.bold,
+    lineHeight: tokens.typography.lineHeight.body,
+  },
+  pulseVerified: {
+    color: tokens.shell.textDim,
+    fontSize: tokens.typography.size.caption,
+    fontWeight: tokens.typography.weight.bold,
+    lineHeight: tokens.typography.lineHeight.caption,
+    textTransform: 'uppercase',
+  },
+  chatPanel: {
+    backgroundColor: tokens.shell.surface,
+    borderRadius: tokens.radii.md,
+    gap: tokens.spacing.md,
+    padding: tokens.spacing.lg,
+  },
+  chatBubble: {
+    alignSelf: 'flex-start',
+    backgroundColor: tokens.shell.surfaceRaised,
+    borderRadius: tokens.radii.md,
+    gap: tokens.spacing.xs,
+    maxWidth: '82%',
+    paddingHorizontal: tokens.spacing.md,
+    paddingVertical: tokens.spacing.sm,
+  },
+  chatBubbleAlt: {
+    alignSelf: 'flex-end',
+  },
+  chatName: {
+    color: tokens.shell.textMuted,
+    fontSize: tokens.typography.size.caption,
+    fontWeight: tokens.typography.weight.bold,
+    lineHeight: tokens.typography.lineHeight.caption,
+  },
+  chatText: {
+    color: tokens.shell.text,
     fontSize: tokens.typography.size.body,
     lineHeight: tokens.typography.lineHeight.body,
+  },
+  chatInput: {
+    borderColor: tokens.shell.divider,
+    borderRadius: tokens.radii.pill,
+    borderWidth: 1,
+    minHeight: 42,
+    justifyContent: 'center',
+    paddingHorizontal: tokens.spacing.lg,
+  },
+  chatInputText: {
+    color: tokens.shell.textDim,
+    fontSize: tokens.typography.size.label,
+    fontWeight: tokens.typography.weight.medium,
+    lineHeight: tokens.typography.lineHeight.caption,
   },
 });

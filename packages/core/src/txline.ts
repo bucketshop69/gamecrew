@@ -557,6 +557,7 @@ function getMatchPulse(
   const readableAction = getReadableAction(action, score.PossessionType);
 
   return {
+    action,
     label: team ? `${team.shortName}: ${readableAction}` : readableAction,
     intensity: getPulseIntensity(action, score.PossessionType),
     verified: score.Confirmed,

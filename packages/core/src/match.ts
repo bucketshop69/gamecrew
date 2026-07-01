@@ -52,6 +52,7 @@ export interface MatchClock {
 export type MatchPulseIntensity = 'quiet' | 'building' | 'danger' | 'major';
 
 export interface MatchPulse {
+  action?: string;
   label: string;
   intensity: MatchPulseIntensity;
   verified?: boolean;

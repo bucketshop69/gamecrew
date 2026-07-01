@@ -36,7 +36,7 @@ export default function App() {
   const [selectedMatch, setSelectedMatch] = useState<GameCrewMatch | null>(null);
   const [loadState, setLoadState] = useState<LoadState>({ status: 'loading', matches: [] });
   const carouselWidth = Math.max(1, width - tokens.spacing.lg * 2);
-  const carouselHeight = Math.max(520, height - 150);
+  const carouselHeight = Math.max(560, height - 130);
 
   const loadMatches = () => {
     setLoadState((current) => ({ status: 'loading', matches: current.matches }));
@@ -127,9 +127,7 @@ export default function App() {
               windowSize={3}
               width={carouselWidth}
             />
-            <Text style={styles.carouselCount} selectable>
-              {activeIndex + 1} / {loadState.matches.length}
-            </Text>
+            <CarouselDots activeIndex={activeIndex} count={loadState.matches.length} />
           </View>
         ) : (
           <StateMessage
@@ -184,6 +182,7 @@ function MatchPoster({
   const posterMinHeight = Math.max(430, Math.min(560, width * 1.2));
   const homeBands = match.homeTeam.flag.bands;
   const awayBands = match.awayTeam.flag.bands;
+  const isUpcoming = match.status === 'upcoming' && !match.score;
 
   return (
     <Pressable
@@ -195,46 +194,87 @@ function MatchPoster({
         { height, minHeight: height ?? posterMinHeight, opacity: pressed ? 0.92 : 1 },
       ]}
     >
-      <View style={styles.posterBackdrop}>
-        <View
-          style={[
-            styles.identityGlow,
-            {
-              backgroundColor: match.homeTeam.colors.primary,
-              left: -80,
-              top: 20,
-            },
-          ]}
-        />
-        <View
-          style={[
-            styles.identityGlow,
-            {
-              backgroundColor: match.awayTeam.colors.primary,
-              right: -80,
-              bottom: 24,
-            },
-          ]}
-        />
-      </View>
+      <View style={styles.posterBackdrop} />
 
       <View style={styles.posterChrome}>
-        <FlagMark bands={homeBands} />
-        <Text style={styles.competitionText} selectable>
-          {match.competition}
-          {match.round ? ` - ${match.round}` : ''}
-        </Text>
-        <View style={styles.scoreBlock}>
-          <Text style={styles.scoreText} selectable>
-            {getMatchResultLabel(match)}
-          </Text>
-          <Text style={styles.phaseText} selectable>
-            {getPhaseCopy(match)}
-          </Text>
-        </View>
-        <FlagMark bands={awayBands} />
+        {isUpcoming ? (
+          <UpcomingPosterContent match={match} />
+        ) : (
+          <LivePosterContent homeBands={homeBands} awayBands={awayBands} match={match} />
+        )}
       </View>
     </Pressable>
+  );
+}
+
+function LivePosterContent({
+  awayBands,
+  homeBands,
+  match,
+}: {
+  awayBands: readonly string[];
+  homeBands: readonly string[];
+  match: GameCrewMatch;
+}) {
+  return (
+    <View style={styles.posterStack}>
+      <FlagMark bands={homeBands} countryCode={match.homeTeam.countryCode} />
+      <Text style={styles.teamScoreText} selectable>
+        {getTeamCardLabel(match, 'home')}
+      </Text>
+      <Text style={styles.clockText} selectable>
+        {getClockCardLabel(match)}
+      </Text>
+      <Text style={styles.matchupText} selectable>
+        {getMatchTitle(match)}
+      </Text>
+      <Text style={styles.competitionText} selectable>
+        {getMetaLabel(match)}
+      </Text>
+      <Text style={styles.teamScoreText} selectable>
+        {getTeamCardLabel(match, 'away')}
+      </Text>
+      <FlagMark bands={awayBands} countryCode={match.awayTeam.countryCode} />
+    </View>
+  );
+}
+
+function UpcomingPosterContent({ match }: { match: GameCrewMatch }) {
+  return (
+    <View style={styles.posterStack}>
+      <FlagMark bands={match.homeTeam.flag.bands} countryCode={match.homeTeam.countryCode} />
+      <Text style={styles.kickoffDateText} selectable>
+        {formatKickoffDate(match.kickoffUtc)}
+      </Text>
+      <Text style={styles.kickoffTimeText} selectable>
+        {formatKickoffTime(match.kickoffUtc)}
+      </Text>
+      <Text style={styles.matchupText} selectable>
+        {getMatchTitle(match)}
+      </Text>
+      <Text style={styles.competitionText} selectable>
+        {getMetaLabel(match)}
+      </Text>
+      <FlagMark bands={match.awayTeam.flag.bands} countryCode={match.awayTeam.countryCode} />
+    </View>
+  );
+}
+
+function CarouselDots({ activeIndex, count }: { activeIndex: number; count: number }) {
+  const dotCount = Math.min(3, Math.max(1, count));
+
+  return (
+    <View style={styles.carouselDots}>
+      {Array.from({ length: dotCount }).map((_, index) => (
+        <View
+          key={index}
+          style={[
+            styles.carouselDot,
+            index === Math.min(activeIndex, dotCount - 1) && styles.carouselDotActive,
+          ]}
+        />
+      ))}
+    </View>
   );
 }
 
@@ -248,9 +288,9 @@ function FlagField({ bands, align }: { bands: readonly string[]; align: 'left' |
   );
 }
 
-function FlagMark({ bands }: { bands: readonly string[] }) {
+function FlagMark({ bands, countryCode }: { bands: readonly string[]; countryCode?: string }) {
   return (
-    <View style={styles.flagMark}>
+    <View style={[styles.flagMark, getFlagDirection(countryCode) === 'horizontal' && styles.flagMarkHorizontal]}>
       {bands.map((band, index) => (
         <View key={`${band}-${index}`} style={[styles.flagMarkBand, { backgroundColor: band }]} />
       ))}
@@ -357,8 +397,7 @@ function MatchDetailPlaceholder({
           {getPhaseCopy(match)}
         </Text>
         <Text style={styles.pulseBody} selectable>
-          Match Pulse placeholder for the selected fixture. TxLINE-backed moments will appear here
-          once the live adapter is connected.
+          {match.pulse?.label ?? 'Match Pulse will appear as TxLINE moments arrive.'}
         </Text>
       </View>
     </ScrollView>
@@ -385,6 +424,42 @@ function getPhaseCopy(match: GameCrewMatch): string {
   return match.clock.label;
 }
 
+function getMetaLabel(match: GameCrewMatch): string {
+  if (!match.round || match.round === match.competition) {
+    return match.competition;
+  }
+
+  return `${match.competition} - ${match.round}`;
+}
+
+function getTeamCardLabel(match: GameCrewMatch, side: 'home' | 'away'): string {
+  if (match.score) {
+    return String(side === 'home' ? match.score.home : match.score.away);
+  }
+
+  if (match.status === 'live') {
+    return '-';
+  }
+
+  return side === 'home' ? match.homeTeam.shortName : match.awayTeam.shortName;
+}
+
+function getClockCardLabel(match: GameCrewMatch): string {
+  if (match.status === 'live') {
+    if (match.clock.phase === 'half_time') {
+      return 'HT';
+    }
+
+    return match.clock.minute ? `${match.clock.minute}'` : match.clock.label;
+  }
+
+  if (match.status === 'replayable' || match.status === 'finished') {
+    return 'FT';
+  }
+
+  return formatKickoff(match.kickoffUtc);
+}
+
 function formatKickoff(kickoffUtc: string): string {
   return new Intl.DateTimeFormat(undefined, {
     weekday: 'short',
@@ -393,6 +468,27 @@ function formatKickoff(kickoffUtc: string): string {
     timeZoneName: 'short',
   }).format(new Date(kickoffUtc));
 }
+
+function formatKickoffDate(kickoffUtc: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  }).format(new Date(kickoffUtc));
+}
+
+function formatKickoffTime(kickoffUtc: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(kickoffUtc));
+}
+
+function getFlagDirection(countryCode?: string): 'horizontal' | 'vertical' {
+  return horizontalFlagCodes.has(countryCode ?? '') ? 'horizontal' : 'vertical';
+}
+
+const horizontalFlagCodes = new Set(['AR', 'CO', 'DE', 'EC', 'NL', 'SN']);
 
 function getErrorCopy(message: string): string {
   if (message.includes('Network request failed') || message.includes('Failed to fetch')) {
@@ -446,19 +542,11 @@ const styles = StyleSheet.create({
   },
   poster: {
     borderRadius: tokens.radii.lg,
-    boxShadow: tokens.shadows.matchGlow,
     overflow: 'hidden',
   },
   posterBackdrop: {
     ...StyleSheet.absoluteFill,
     backgroundColor: tokens.shell.background,
-  },
-  identityGlow: {
-    borderRadius: 140,
-    height: 150,
-    opacity: 0.18,
-    position: 'absolute',
-    width: 150,
   },
   flagField: {
     height: '58%',
@@ -483,28 +571,75 @@ const styles = StyleSheet.create({
   posterChrome: {
     flex: 1,
     alignItems: 'center',
-    gap: tokens.spacing.xl,
-    justifyContent: 'space-between',
-    padding: tokens.spacing.xl,
+    justifyContent: 'center',
+    paddingHorizontal: tokens.spacing.lg,
+    paddingBottom: 48,
+    paddingTop: 42,
   },
   competitionText: {
     color: tokens.shell.textMuted,
     fontSize: tokens.typography.size.label,
-    fontWeight: tokens.typography.weight.medium,
+    fontWeight: tokens.typography.weight.bold,
     lineHeight: tokens.typography.lineHeight.caption,
     textAlign: 'center',
     textTransform: 'uppercase',
   },
   flagMark: {
     borderRadius: tokens.radii.md,
-    boxShadow: '0 0 34px rgba(255, 255, 255, 0.12)',
     flexDirection: 'row',
-    height: 104,
+    height: 120,
     overflow: 'hidden',
-    width: 178,
+    width: 234,
+  },
+  flagMarkHorizontal: {
+    flexDirection: 'column',
   },
   flagMarkBand: {
     flex: 1,
+  },
+  posterStack: {
+    alignItems: 'center',
+    gap: tokens.spacing.md,
+    width: '100%',
+  },
+  teamScoreText: {
+    color: tokens.shell.text,
+    fontSize: 62,
+    fontVariant: ['tabular-nums'],
+    fontWeight: tokens.typography.weight.bold,
+    lineHeight: 66,
+    textAlign: 'center',
+  },
+  clockText: {
+    color: tokens.shell.text,
+    fontSize: 54,
+    fontVariant: ['tabular-nums'],
+    fontWeight: tokens.typography.weight.bold,
+    lineHeight: 58,
+    textAlign: 'center',
+  },
+  matchupText: {
+    color: tokens.shell.text,
+    fontSize: tokens.typography.size.caption,
+    fontWeight: tokens.typography.weight.bold,
+    lineHeight: tokens.typography.lineHeight.caption,
+    textAlign: 'center',
+  },
+  kickoffDateText: {
+    color: tokens.shell.textMuted,
+    fontSize: tokens.typography.size.body,
+    fontWeight: tokens.typography.weight.bold,
+    lineHeight: tokens.typography.lineHeight.body,
+    textAlign: 'center',
+    textTransform: 'uppercase',
+  },
+  kickoffTimeText: {
+    color: tokens.shell.text,
+    fontSize: 54,
+    fontVariant: ['tabular-nums'],
+    fontWeight: tokens.typography.weight.bold,
+    lineHeight: 62,
+    textAlign: 'center',
   },
   scoreBlock: {
     alignItems: 'center',
@@ -527,16 +662,30 @@ const styles = StyleSheet.create({
   },
   carousel: {
     alignItems: 'center',
-    gap: tokens.spacing.md,
+    gap: tokens.spacing.sm,
   },
   carouselPage: {
     justifyContent: 'center',
   },
-  carouselCount: {
-    color: tokens.shell.textMuted,
-    fontSize: tokens.typography.size.label,
-    fontVariant: ['tabular-nums'],
-    lineHeight: tokens.typography.lineHeight.caption,
+  carouselDots: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+    height: 12,
+    justifyContent: 'center',
+  },
+  carouselDot: {
+    backgroundColor: tokens.shell.textDim,
+    borderRadius: tokens.radii.pill,
+    height: 6,
+    opacity: 0.7,
+    width: 6,
+  },
+  carouselDotActive: {
+    backgroundColor: tokens.shell.text,
+    height: 4,
+    opacity: 1,
+    width: 24,
   },
   skeletonPoster: {
     alignItems: 'center',

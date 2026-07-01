@@ -49,6 +49,16 @@ export interface MatchClock {
   phase: MatchPhase;
 }
 
+export type MatchPulseIntensity = 'quiet' | 'building' | 'danger' | 'major';
+
+export interface MatchPulse {
+  label: string;
+  intensity: MatchPulseIntensity;
+  verified?: boolean;
+  teamId?: string;
+  updatedAt?: string;
+}
+
 export interface ReplayState {
   available: boolean;
   label?: string;
@@ -78,6 +88,7 @@ export interface GameCrewMatch {
   awayTeam: MatchTeam;
   score?: MatchScore;
   clock: MatchClock;
+  pulse?: MatchPulse;
   replay?: ReplayState;
   hosted?: HostedState;
 }

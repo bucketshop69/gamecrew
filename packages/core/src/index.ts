@@ -10,6 +10,8 @@ export type {
   HostedState,
   MatchClock,
   MatchPhase,
+  MatchPulse,
+  MatchPulseIntensity,
   MatchScore,
   MatchTeam,
   ReplayState,

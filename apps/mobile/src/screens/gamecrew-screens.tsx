@@ -5,8 +5,7 @@ import {
   getMatchTitle,
 } from '@gamecrew/core';
 import { StatusBar } from 'expo-status-bar';
-import { useCallback, useEffect, useState } from 'react';
-import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { useEffect, useState } from 'react';
 import Carousel from 'react-native-reanimated-carousel';
 import {
   Pressable,
@@ -17,30 +16,11 @@ import {
   View,
 } from 'react-native';
 
-type LoadState =
-  | { status: 'loading'; matches: readonly GameCrewMatch[] }
-  | { status: 'ready'; matches: readonly GameCrewMatch[] }
-  | { status: 'error'; matches: readonly GameCrewMatch[]; message: string };
-
-type PulseLoadState =
-  | { status: 'loading'; events: readonly MatchPulseEvent[] }
-  | { status: 'ready'; events: readonly MatchPulseEvent[] }
-  | { status: 'error'; events: readonly MatchPulseEvent[]; message: string };
+import { useGameCrewMatches } from '../hooks/use-gamecrew-matches';
+import { useMatchPulse } from '../hooks/use-match-pulse';
 
 const tokens = gameCrewTokens;
-const gameCrewApiUrl = process.env.EXPO_PUBLIC_GAMECREW_API_URL ?? 'http://localhost:8787';
 const maxPulseRows = 50;
-const matchRefreshIntervalMs = 10_000;
-
-interface MatchesResponse {
-  source: 'txline' | 'sample' | 'sample-fallback';
-  matches: readonly GameCrewMatch[];
-}
-
-interface MatchPulseResponse {
-  source: 'txline';
-  events: readonly MatchPulseEvent[];
-}
 
 type PulseTone = 'major' | 'danger' | 'building' | 'quiet';
 
@@ -53,37 +33,12 @@ interface PulseFeedItem {
   verified?: boolean;
 }
 
-export default function App() {
+export function HomeScreen({ onOpenMatch }: { onOpenMatch: (match: GameCrewMatch) => void }) {
   const { height, width } = useWindowDimensions();
   const [activeIndex, setActiveIndex] = useState(0);
-  const [selectedMatch, setSelectedMatch] = useState<GameCrewMatch | null>(null);
-  const [loadState, setLoadState] = useState<LoadState>({ status: 'loading', matches: [] });
+  const { loadState, reload } = useGameCrewMatches();
   const carouselWidth = Math.max(1, width - tokens.spacing.lg * 2);
   const carouselHeight = Math.max(560, height - 130);
-
-  const loadMatches = useCallback((showLoading = false) => {
-    setLoadState((current) =>
-      showLoading || current.matches.length === 0 ? { status: 'loading', matches: current.matches } : current,
-    );
-
-    fetchGameCrewMatches()
-      .then((matches) => setLoadState({ status: 'ready', matches }))
-      .catch((error: unknown) =>
-        setLoadState((current) => ({
-          status: 'error',
-          matches: current.matches,
-          message: error instanceof Error ? error.message : 'GameCrew API is unavailable.',
-        })),
-      );
-  }, []);
-
-  useEffect(() => {
-    loadMatches(true);
-
-    const intervalId = setInterval(() => loadMatches(false), matchRefreshIntervalMs);
-
-    return () => clearInterval(intervalId);
-  }, [loadMatches]);
 
   useEffect(() => {
     setActiveIndex((current) =>
@@ -91,31 +46,10 @@ export default function App() {
     );
   }, [loadState.matches.length]);
 
-  useEffect(() => {
-    setSelectedMatch((current) => {
-      if (!current) {
-        return current;
-      }
-
-      return (
-        loadState.matches.find((match) => match.txline.fixtureId === current.txline.fixtureId) ??
-        current
-      );
-    });
-  }, [loadState.matches]);
-
   const activeMatch = loadState.matches[activeIndex] ?? loadState.matches[0];
 
-  if (selectedMatch) {
-    return (
-      <GestureHandlerRootView style={styles.root}>
-        <MatchDetailPlaceholder match={selectedMatch} onBack={() => setSelectedMatch(null)} />
-      </GestureHandlerRootView>
-    );
-  }
-
   return (
-    <GestureHandlerRootView style={styles.root}>
+    <View style={styles.root}>
       <StatusBar style="light" />
       <View style={styles.homeContent}>
         <HomeHeader />
@@ -127,7 +61,7 @@ export default function App() {
             body="Retry when the local GameCrew API is back online."
             actionLabel="Retry"
             compact
-            onAction={() => loadMatches(true)}
+            onAction={reload}
           />
         ) : null}
 
@@ -139,7 +73,7 @@ export default function App() {
             title="Could not load matches."
             body={getErrorCopy(loadState.message)}
             actionLabel="Retry"
-            onAction={() => loadMatches(true)}
+            onAction={reload}
           />
         ) : activeMatch ? (
           <View style={styles.carousel}>
@@ -164,7 +98,7 @@ export default function App() {
                   <MatchPoster
                     height={carouselHeight}
                     match={item}
-                    onPress={() => setSelectedMatch(item)}
+                    onPress={() => onOpenMatch(item)}
                   />
                 </View>
               )}
@@ -179,36 +113,12 @@ export default function App() {
             title="No matches found."
             body="Refresh the TxLINE feed to check for available fixtures."
             actionLabel="Refresh"
-            onAction={() => loadMatches(true)}
+            onAction={reload}
           />
         )}
       </View>
-    </GestureHandlerRootView>
+    </View>
   );
-}
-
-async function fetchGameCrewMatches(): Promise<readonly GameCrewMatch[]> {
-  const response = await fetch(`${gameCrewApiUrl}/matches`);
-  const body = await response.text();
-
-  if (!response.ok) {
-    throw new Error(body || `GameCrew API failed with ${response.status}`);
-  }
-
-  const parsed = JSON.parse(body) as MatchesResponse;
-  return parsed.matches;
-}
-
-async function fetchMatchPulse(fixtureId: string): Promise<readonly MatchPulseEvent[]> {
-  const response = await fetch(`${gameCrewApiUrl}/matches/${encodeURIComponent(fixtureId)}/pulse`);
-  const body = await response.text();
-
-  if (!response.ok) {
-    throw new Error(body || `GameCrew API failed with ${response.status}`);
-  }
-
-  const parsed = JSON.parse(body) as MatchPulseResponse;
-  return parsed.events;
 }
 
 function HomeHeader() {
@@ -405,65 +315,18 @@ function StateMessage({
   );
 }
 
-function MatchDetailPlaceholder({
+export function MatchDetailScreen({
   match,
   onBack,
 }: {
   match: GameCrewMatch;
   onBack: () => void;
 }) {
-  const [pulseLoadState, setPulseLoadState] = useState<PulseLoadState>({
-    status: 'loading',
-    events: [],
-  });
-  const [pulseReloadKey, setPulseReloadKey] = useState(0);
+  const { pulseLoadState, reload } = useMatchPulse(match.txline.fixtureId);
   const pulseItems =
     pulseLoadState.status === 'ready'
       ? getPulseFeedItems(match, pulseLoadState.events).slice(-maxPulseRows).reverse()
       : [];
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const loadPulse = (showLoading = false) => {
-      setPulseLoadState((current) =>
-        showLoading || current.events.length === 0
-          ? { status: 'loading', events: current.events }
-          : current,
-      );
-
-      fetchMatchPulse(match.txline.fixtureId)
-        .then((events) => {
-          if (!cancelled) {
-            setPulseLoadState({ status: 'ready', events });
-          }
-        })
-        .catch((error: unknown) => {
-          if (!cancelled) {
-            setPulseLoadState((current) => {
-              if (!showLoading && current.events.length > 0) {
-                return current;
-              }
-
-              return {
-                status: 'error',
-                events: current.events,
-                message: error instanceof Error ? error.message : 'Match Pulse is unavailable.',
-              };
-            });
-          }
-        });
-    };
-
-    loadPulse(true);
-
-    const intervalId = setInterval(() => loadPulse(false), matchRefreshIntervalMs);
-
-    return () => {
-      cancelled = true;
-      clearInterval(intervalId);
-    };
-  }, [match.txline.fixtureId, pulseReloadKey]);
 
   return (
     <View style={styles.detailScreen}>
@@ -529,7 +392,7 @@ function MatchDetailPlaceholder({
             title="Match Pulse unavailable"
             body={getPulseErrorCopy(pulseLoadState.message)}
             actionLabel="Retry"
-            onAction={() => setPulseReloadKey((key) => key + 1)}
+            onAction={reload}
           />
         ) : pulseItems.length === 0 ? (
           <PulseStatePanel title="No pulse events yet" body="TxLINE has no useful timeline events for this fixture." />
@@ -537,6 +400,38 @@ function MatchDetailPlaceholder({
           pulseItems.map((item) => <PulseMomentRow key={item.id} item={item} />)
         )}
       </ScrollView>
+    </View>
+  );
+}
+
+export function MatchDetailStateScreen({
+  actionLabel,
+  body,
+  eyebrow,
+  onAction,
+  onBack,
+  title,
+}: {
+  actionLabel: string;
+  body?: string;
+  eyebrow?: string;
+  onAction: () => void;
+  onBack: () => void;
+  title: string;
+}) {
+  return (
+    <View style={styles.detailScreen}>
+      <StatusBar style="light" />
+      <Pressable accessibilityRole="button" onPress={onBack} style={styles.backButton}>
+        <Text style={styles.backButtonText}>Back</Text>
+      </Pressable>
+      <StateMessage
+        actionLabel={actionLabel}
+        body={body}
+        eyebrow={eyebrow}
+        onAction={onAction}
+        title={title}
+      />
     </View>
   );
 }

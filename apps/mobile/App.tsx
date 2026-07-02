@@ -5,7 +5,7 @@ import {
   getMatchTitle,
 } from '@gamecrew/core';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import Carousel from 'react-native-reanimated-carousel';
 import {
@@ -30,6 +30,7 @@ type PulseLoadState =
 const tokens = gameCrewTokens;
 const gameCrewApiUrl = process.env.EXPO_PUBLIC_GAMECREW_API_URL ?? 'http://localhost:8787';
 const maxPulseRows = 50;
+const matchRefreshIntervalMs = 10_000;
 
 interface MatchesResponse {
   source: 'txline' | 'sample' | 'sample-fallback';
@@ -60,8 +61,10 @@ export default function App() {
   const carouselWidth = Math.max(1, width - tokens.spacing.lg * 2);
   const carouselHeight = Math.max(560, height - 130);
 
-  const loadMatches = () => {
-    setLoadState((current) => ({ status: 'loading', matches: current.matches }));
+  const loadMatches = useCallback((showLoading = false) => {
+    setLoadState((current) =>
+      showLoading || current.matches.length === 0 ? { status: 'loading', matches: current.matches } : current,
+    );
 
     fetchGameCrewMatches()
       .then((matches) => setLoadState({ status: 'ready', matches }))
@@ -72,14 +75,33 @@ export default function App() {
           message: error instanceof Error ? error.message : 'GameCrew API is unavailable.',
         })),
       );
-  };
-
-  useEffect(() => {
-    loadMatches();
   }, []);
 
   useEffect(() => {
-    setActiveIndex(0);
+    loadMatches(true);
+
+    const intervalId = setInterval(() => loadMatches(false), matchRefreshIntervalMs);
+
+    return () => clearInterval(intervalId);
+  }, [loadMatches]);
+
+  useEffect(() => {
+    setActiveIndex((current) =>
+      loadState.matches.length === 0 ? 0 : Math.min(current, loadState.matches.length - 1),
+    );
+  }, [loadState.matches.length]);
+
+  useEffect(() => {
+    setSelectedMatch((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return (
+        loadState.matches.find((match) => match.txline.fixtureId === current.txline.fixtureId) ??
+        current
+      );
+    });
   }, [loadState.matches]);
 
   const activeMatch = loadState.matches[activeIndex] ?? loadState.matches[0];
@@ -105,7 +127,7 @@ export default function App() {
             body="Retry when the local GameCrew API is back online."
             actionLabel="Retry"
             compact
-            onAction={loadMatches}
+            onAction={() => loadMatches(true)}
           />
         ) : null}
 
@@ -117,7 +139,7 @@ export default function App() {
             title="Could not load matches."
             body={getErrorCopy(loadState.message)}
             actionLabel="Retry"
-            onAction={loadMatches}
+            onAction={() => loadMatches(true)}
           />
         ) : activeMatch ? (
           <View style={styles.carousel}>
@@ -157,7 +179,7 @@ export default function App() {
             title="No matches found."
             body="Refresh the TxLINE feed to check for available fixtures."
             actionLabel="Refresh"
-            onAction={loadMatches}
+            onAction={() => loadMatches(true)}
           />
         )}
       </View>
@@ -397,89 +419,109 @@ function MatchDetailPlaceholder({
   const [pulseReloadKey, setPulseReloadKey] = useState(0);
   const pulseItems =
     pulseLoadState.status === 'ready'
-      ? getPulseFeedItems(match, pulseLoadState.events).slice(-maxPulseRows)
+      ? getPulseFeedItems(match, pulseLoadState.events).slice(-maxPulseRows).reverse()
       : [];
 
   useEffect(() => {
     let cancelled = false;
-    setPulseLoadState((current) => ({ status: 'loading', events: current.events }));
 
-    fetchMatchPulse(match.txline.fixtureId)
-      .then((events) => {
-        if (!cancelled) {
-          setPulseLoadState({ status: 'ready', events });
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setPulseLoadState((current) => ({
-            status: 'error',
-            events: current.events,
-            message: error instanceof Error ? error.message : 'Match Pulse is unavailable.',
-          }));
-        }
-      });
+    const loadPulse = (showLoading = false) => {
+      setPulseLoadState((current) =>
+        showLoading || current.events.length === 0
+          ? { status: 'loading', events: current.events }
+          : current,
+      );
+
+      fetchMatchPulse(match.txline.fixtureId)
+        .then((events) => {
+          if (!cancelled) {
+            setPulseLoadState({ status: 'ready', events });
+          }
+        })
+        .catch((error: unknown) => {
+          if (!cancelled) {
+            setPulseLoadState((current) => {
+              if (!showLoading && current.events.length > 0) {
+                return current;
+              }
+
+              return {
+                status: 'error',
+                events: current.events,
+                message: error instanceof Error ? error.message : 'Match Pulse is unavailable.',
+              };
+            });
+          }
+        });
+    };
+
+    loadPulse(true);
+
+    const intervalId = setInterval(() => loadPulse(false), matchRefreshIntervalMs);
 
     return () => {
       cancelled = true;
+      clearInterval(intervalId);
     };
   }, [match.txline.fixtureId, pulseReloadKey]);
 
   return (
-    <ScrollView
-      style={styles.root}
-      contentContainerStyle={styles.detailContent}
-      contentInsetAdjustmentBehavior="automatic"
-    >
+    <View style={styles.detailScreen}>
       <StatusBar style="light" />
-      <Pressable accessibilityRole="button" onPress={onBack} style={styles.backButton}>
-        <Text style={styles.backButtonText}>Back</Text>
-      </Pressable>
+      <View style={styles.detailFixed}>
+        <Pressable accessibilityRole="button" onPress={onBack} style={styles.backButton}>
+          <Text style={styles.backButtonText}>Back</Text>
+        </Pressable>
 
-      <View style={styles.detailHeader}>
-        <View style={styles.detailTeamColumn}>
-          <MiniFlag bands={match.homeTeam.flag.bands} countryCode={match.homeTeam.countryCode} />
-          <Text style={styles.detailTeamName} selectable>
-            {match.homeTeam.shortName}
-          </Text>
-          <Text style={styles.detailTeamScore} selectable>
-            {getDetailScoreLabel(match, 'home')}
-          </Text>
+        <View style={styles.detailHeader}>
+          <View style={styles.detailTeamColumn}>
+            <MiniFlag bands={match.homeTeam.flag.bands} countryCode={match.homeTeam.countryCode} />
+            <Text style={styles.detailTeamName} selectable>
+              {match.homeTeam.shortName}
+            </Text>
+            <Text style={styles.detailTeamScore} selectable>
+              {getDetailScoreLabel(match, 'home')}
+            </Text>
+          </View>
+
+          <View style={styles.detailCenterColumn}>
+            <Text style={styles.detailClock} selectable>
+              {getClockCardLabel(match)}
+            </Text>
+            <Text style={styles.detailTitle} selectable>
+              {getMatchTitle(match)}
+            </Text>
+            <Text style={styles.detailMeta} selectable>
+              {getMetaLabel(match)}
+            </Text>
+          </View>
+
+          <View style={styles.detailTeamColumn}>
+            <MiniFlag bands={match.awayTeam.flag.bands} countryCode={match.awayTeam.countryCode} />
+            <Text style={styles.detailTeamName} selectable>
+              {match.awayTeam.shortName}
+            </Text>
+            <Text style={styles.detailTeamScore} selectable>
+              {getDetailScoreLabel(match, 'away')}
+            </Text>
+          </View>
         </View>
 
-        <View style={styles.detailCenterColumn}>
-          <Text style={styles.detailClock} selectable>
-            {getClockCardLabel(match)}
-          </Text>
-          <Text style={styles.detailTitle} selectable>
-            {getMatchTitle(match)}
-          </Text>
-          <Text style={styles.detailMeta} selectable>
-            {getMetaLabel(match)}
-          </Text>
-        </View>
-
-        <View style={styles.detailTeamColumn}>
-          <MiniFlag bands={match.awayTeam.flag.bands} countryCode={match.awayTeam.countryCode} />
-          <Text style={styles.detailTeamName} selectable>
-            {match.awayTeam.shortName}
-          </Text>
-          <Text style={styles.detailTeamScore} selectable>
-            {getDetailScoreLabel(match, 'away')}
-          </Text>
+        <View style={styles.detailTabs} accessibilityRole="tablist">
+          <View style={[styles.detailTab, styles.detailTabSelected]}>
+            <Text style={styles.detailTabSelectedText}>Match Pulse</Text>
+          </View>
+          <View style={styles.detailTab}>
+            <Text style={styles.detailTabText}>Chat</Text>
+          </View>
         </View>
       </View>
 
-      <View style={styles.detailTabs} accessibilityRole="tablist">
-        <View style={[styles.detailTab, styles.detailTabSelected]}>
-          <Text style={styles.detailTabSelectedText}>Match Pulse</Text>
-        </View>
-        <View style={styles.detailTab}>
-          <Text style={styles.detailTabText}>Chat</Text>
-        </View>
-      </View>
-
-      <View style={styles.pulseStack}>
+      <ScrollView
+        style={styles.pulseScroll}
+        contentContainerStyle={styles.pulseStack}
+        contentInsetAdjustmentBehavior="automatic"
+      >
         {pulseLoadState.status === 'loading' ? (
           <PulseStatePanel title="Loading Match Pulse" body="Fetching the TxLINE event timeline." />
         ) : pulseLoadState.status === 'error' ? (
@@ -494,8 +536,8 @@ function MatchDetailPlaceholder({
         ) : (
           pulseItems.map((item) => <PulseMomentRow key={item.id} item={item} />)
         )}
-      </View>
-    </ScrollView>
+      </ScrollView>
+    </View>
   );
 }
 
@@ -1022,11 +1064,18 @@ const styles = StyleSheet.create({
     fontWeight: tokens.typography.weight.bold,
     lineHeight: tokens.typography.lineHeight.caption,
   },
-  detailContent: {
-    flexGrow: 1,
-    gap: tokens.spacing.lg,
+  detailScreen: {
+    backgroundColor: tokens.shell.background,
+    flex: 1,
     padding: tokens.spacing.lg,
-    paddingBottom: tokens.spacing.xxl,
+    paddingBottom: 0,
+  },
+  detailFixed: {
+    gap: tokens.spacing.lg,
+    paddingBottom: tokens.spacing.lg,
+  },
+  pulseScroll: {
+    flex: 1,
   },
   backButton: {
     alignSelf: 'flex-start',
@@ -1143,6 +1192,7 @@ const styles = StyleSheet.create({
   },
   pulseStack: {
     gap: tokens.spacing.sm,
+    paddingBottom: tokens.spacing.xxl,
   },
   pulseBody: {
     color: tokens.shell.textMuted,

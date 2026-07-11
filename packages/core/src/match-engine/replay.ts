@@ -4,6 +4,7 @@ import type {
   MatchEngineContext,
   MatchEngineLifecycle,
   MatchEngineParticipant,
+  MatchEnginePhase,
   MatchEnginePressure,
   MatchEngineProvenance,
   MatchEngineReplayResult,
@@ -14,7 +15,10 @@ import type {
   TxlineMatchEngineRecord,
 } from './types';
 
-const INCIDENT_ACTIONS = new Set(['free_kick', 'shot', 'goal']);
+const INCIDENT_ACTIONS = new Set([
+  'free_kick', 'shot', 'goal', 'yellow_card', 'red_card', 'substitution',
+  'injury', 'throw_in', 'corner', 'goal_kick', 'additional_time', 'var', 'var_end',
+]);
 const PRESSURE_BY_ACTION: Record<string, MatchEnginePressure> = {
   safe_possession: 'safe',
   attack_possession: 'attack',
@@ -35,6 +39,21 @@ function lifecycleFor(record: TxlineMatchEngineRecord, stateSignal = false): Mat
   if (record.Confirmed === false) return 'provisional';
   if (stateSignal) return 'observed';
   return 'unresolved';
+}
+
+function incidentAction(action: string): string {
+  return action === 'var_end' ? 'var' : action;
+}
+
+function statusPhase(statusId: number | undefined): MatchEnginePhase | undefined {
+  switch (statusId) {
+    case 1: return 'pre_match';
+    case 2: return 'first_half_ready';
+    case 3: return 'half_time';
+    case 4: return 'second_half_ready';
+    case 5: return 'full_time_pending';
+    default: return undefined;
+  }
 }
 
 function pressureFrom(
@@ -124,21 +143,24 @@ function canonicalIncident(
   context: MatchEngineContext,
   record: TxlineMatchEngineRecord,
 ): CanonicalIncident {
-  const key = `${record.FixtureId}:${record.Action}:${record.Id}`;
+  const normalizedAction = incidentAction(record.Action);
+  const key = `${record.FixtureId}:${normalizedAction}:${record.Id}`;
   const previous = state.incidents[key];
-  const actor = participant(record.Participant) ?? previous?.participant;
   const data = {
     ...(previous?.data ?? {}),
     ...(record.Data && typeof record.Data === 'object' ? record.Data : {}),
   };
+  const actor = participant(record.Participant) ?? participant(data.Participant) ?? previous?.participant;
   const playerId = typeof data.PlayerId === 'number' ? data.PlayerId : undefined;
   const score = scoreFrom(record, previous?.score ?? state.confirmedScore) ?? previous?.score;
   const comparable = {
     key,
     fixtureId: record.FixtureId,
-    action: record.Action,
+    action: normalizedAction,
     sourceId: record.Id,
-    lifecycle: lifecycleFor(record),
+    lifecycle: previous?.lifecycle === 'confirmed' && record.Confirmed !== true
+      ? 'confirmed' as const
+      : lifecycleFor(record, record.Confirmed === undefined),
     basis: 'direct' as const,
     sourceSeqs: [...(previous?.sourceSeqs ?? []), record.Seq],
     firstSeenSeq: previous?.firstSeenSeq ?? record.Seq,
@@ -181,7 +203,9 @@ function normalizeLedger(records: readonly TxlineMatchEngineRecord[], context: M
     }
     ignoredDuplicateCount += 1;
     if (stable(previous) !== stable(record)) {
-      warnings.push(`Conflicting duplicate for fixture ${record.FixtureId}, Seq ${record.Seq}; kept first record.`);
+      const selected = stable(previous) <= stable(record) ? previous : record;
+      bySequence.set(record.Seq, selected);
+      warnings.push(`Conflicting duplicate for fixture ${record.FixtureId}, Seq ${record.Seq}; selected deterministic canonical payload.`);
     }
   }
   return {
@@ -189,6 +213,61 @@ function normalizeLedger(records: readonly TxlineMatchEngineRecord[], context: M
     ignoredDuplicateCount,
     warnings,
   };
+}
+
+function recomputePlayers(state: CanonicalMatchState, context: MatchEngineContext) {
+  const active: Record<string, Set<number>> = { '1': new Set(), '2': new Set() };
+  for (const player of Object.values(context.players ?? {})) {
+    if (player.starter) active[String(player.participant)]?.add(player.normativeId);
+  }
+  const discipline: CanonicalMatchState['disciplineByPlayerId'] = {};
+  const incidents = Object.values(state.incidents).sort((a, b) => a.lastUpdatedSeq - b.lastUpdatedSeq);
+  for (const incident of incidents) {
+    if (incident.lifecycle !== 'confirmed') continue;
+    if (incident.action === 'substitution') {
+      const owner = incident.participant;
+      const incoming = incident.data.PlayerInId;
+      const outgoing = incident.data.PlayerOutId;
+      if (owner && typeof incoming === 'number' && typeof outgoing === 'number') {
+        const team = active[String(owner)];
+        if (team?.has(outgoing)) {
+          team.delete(outgoing);
+          team.add(incoming);
+        } else {
+          state.integrityWarnings.push(`Substitution ${incident.key} references inactive outgoing player ${outgoing}.`);
+        }
+      }
+    }
+    if ((incident.action === 'yellow_card' || incident.action === 'red_card') && incident.player) {
+      const id = String(incident.player.normativeId);
+      const entry = discipline[id] ?? { yellowCards: 0, redCards: 0, sourceIncidentKeys: [] };
+      if (incident.action === 'yellow_card') entry.yellowCards += 1;
+      else {
+        entry.redCards += 1;
+        active[String(incident.player.participant)]?.delete(incident.player.normativeId);
+      }
+      entry.sourceIncidentKeys.push(incident.key);
+      discipline[id] = entry;
+    }
+  }
+  state.activePlayerIdsByParticipant = Object.fromEntries(
+    Object.entries(active).map(([key, ids]) => [key, [...ids].sort((a, b) => a - b)]),
+  );
+  state.disciplineByPlayerId = discipline;
+}
+
+function cueKindFor(record: TxlineMatchEngineRecord): SimulationCue['kind'] {
+  switch (incidentAction(record.Action)) {
+    case 'free_kick': case 'corner': case 'throw_in': case 'goal_kick': return 'set_piece';
+    case 'shot': return record.Confirmed === true ? 'shot_outcome' : 'shot_attempt';
+    case 'goal': return record.Confirmed === true ? 'goal_confirmed' : 'goal_pending';
+    case 'yellow_card': case 'red_card': return 'card';
+    case 'substitution': return 'substitution';
+    case 'injury': return 'injury';
+    case 'additional_time': return 'additional_time';
+    case 'var': return 'var';
+    default: return 'incident';
+  }
 }
 
 export function replayMatchEngine(
@@ -200,23 +279,30 @@ export function replayMatchEngine(
     fixtureId: context.fixtureId,
     lastAppliedSeq: context.sequenceBefore ?? -1,
     stateRevision: 0,
+    phase: context.phase ?? 'pre_match',
     confirmedScore: { ...context.confirmedScore },
     possibleEvents: {},
+    activePlayerIdsByParticipant: {},
+    disciplineByPlayerId: {},
     incidents: {},
     supportedFacts: {},
     simulationCues: {},
     integrityWarnings: [...normalized.warnings],
   };
+  recomputePlayers(state, context);
   const frames: SemanticFrame[] = [];
 
   for (const record of normalized.ledger) {
     state.lastAppliedSeq = record.Seq;
     state.stateRevision += 1;
-    if (typeof record.Clock?.Seconds === 'number') {
+    if (typeof record.Clock?.Seconds === 'number' && record.Action !== 'clock_adjustment') {
       state.lastMeaningfulElapsedSeconds = Math.max(
         state.lastMeaningfulElapsedSeconds ?? 0,
         record.Clock.Seconds,
       );
+      if (state.phase === 'first_half' || state.phase === 'second_half') {
+        state.lastPlayingElapsedSeconds = Math.max(state.lastPlayingElapsedSeconds ?? 0, record.Clock.Seconds);
+      }
     }
     const frame: SemanticFrame = {
       id: `${context.fixtureId}:${record.Seq}`,
@@ -228,8 +314,55 @@ export function replayMatchEngine(
       facts: [],
       simulationCues: [],
     };
-    const actor = participant(record.Participant);
+    const actor = participant(record.Participant) ?? participant(record.Data?.Participant);
     const sourceSeqs = [record.Seq];
+
+    const directStatus = record.Action === 'status'
+      ? statusPhase(typeof record.Data?.StatusId === 'number' ? record.Data.StatusId : record.StatusId)
+      : undefined;
+    let nextPhase = directStatus;
+    if (record.Action === 'kickoff' && record.Confirmed === true) {
+      if (state.phase === 'first_half_ready') nextPhase = 'first_half';
+      if (state.phase === 'second_half_ready') nextPhase = 'second_half';
+    }
+    if (record.Action === 'game_finalised') nextPhase = 'finalised';
+    if (nextPhase && nextPhase !== state.phase) {
+      state.phase = nextPhase;
+      if (state.liveClock) state.liveClock = { ...state.liveClock, phase: nextPhase };
+      const phaseFact = emitFact(state, frame, {
+        id: `fact:${context.fixtureId}:phase`, kind: 'phase', lifecycle: 'observed', basis: 'direct',
+        value: { phase: nextPhase, statusId: record.StatusId ?? record.Data?.StatusId },
+        occurrenceSeconds: record.Clock?.Seconds, sourceSeqs, provenance: provenance(record),
+      });
+      emitCue(state, frame, {
+        id: `cue:${context.fixtureId}:phase`, kind: 'phase_change', updateMode: 'state_replace',
+        lifecycle: 'observed', basis: 'direct', value: { phase: nextPhase },
+        occurrenceSeconds: record.Clock?.Seconds, sourceSeqs, factIds: [phaseFact.id],
+      });
+    }
+    if (record.Clock && (record.Action === 'clock_adjustment' || typeof record.Clock.Seconds === 'number')) {
+      const previousClock = state.liveClock;
+      const regressesWithinPhase = record.Action !== 'clock_adjustment'
+        && previousClock?.phase === state.phase
+        && typeof previousClock.seconds === 'number'
+        && typeof record.Clock.Seconds === 'number'
+        && record.Clock.Seconds < previousClock.seconds;
+      if (!regressesWithinPhase) {
+        state.liveClock = {
+          phase: state.phase,
+          running: record.Clock.Running === true,
+          seconds: record.Clock.Seconds,
+          seq: record.Seq,
+        };
+      } else {
+        const revisionKey = `${record.FixtureId}:${incidentAction(record.Action)}:${record.Id}`;
+        const isDiscardRevision = record.Action === 'action_discarded'
+          && Object.values(state.incidents).some((incident) => String(incident.sourceId) === String(record.Id));
+        if (!state.incidents[revisionKey] && !isDiscardRevision) {
+          state.integrityWarnings.push(`Clock regression at Seq ${record.Seq} ignored outside clock_adjustment.`);
+        }
+      }
+    }
 
     if (record.Possession !== undefined || PRESSURE_BY_ACTION[record.Action]) {
       const owner = participant(record.Possession) ?? actor;
@@ -293,36 +426,65 @@ export function replayMatchEngine(
 
     if (record.Action === 'possible') {
       const possible = possibleEventData(record);
-      if (actor && possible) {
-        state.possibleEvents[String(actor)] = {
-          ...(state.possibleEvents[String(actor)] ?? {}),
+      if (possible) {
+        const scope = actor ? String(actor) : 'global';
+        state.possibleEvents[scope] = {
+          ...(state.possibleEvents[scope] ?? {}),
           ...possible,
         };
         const fact = emitFact(state, frame, {
-          id: `fact:${context.fixtureId}:possible:${actor}`,
+          id: `fact:${context.fixtureId}:possible:${scope}`,
           kind: 'possible_event',
           lifecycle: 'observed',
           basis: 'direct',
           participant: actor,
           teamId: teamIdFor(context, actor),
-          value: { ...state.possibleEvents[String(actor)] },
+          value: { ...state.possibleEvents[scope] },
           occurrenceSeconds: record.Clock?.Seconds,
           sourceSeqs,
           provenance: provenance(record),
         });
         emitCue(state, frame, {
-          id: `cue:${context.fixtureId}:possible:${actor}`,
+          id: `cue:${context.fixtureId}:possible:${scope}`,
           kind: 'possible_event',
           updateMode: 'state_replace',
           lifecycle: 'observed',
           basis: 'direct',
           participant: actor,
           teamId: teamIdFor(context, actor),
-          value: { ...state.possibleEvents[String(actor)] },
+          value: { ...state.possibleEvents[scope] },
           occurrenceSeconds: record.Clock?.Seconds,
           sourceSeqs,
           factIds: [fact.id],
         });
+      }
+    }
+
+    if (record.Action === 'action_discarded') {
+      const candidates = Object.values(state.incidents).filter(
+        (incident) => String(incident.sourceId) === String(record.Id) && incident.lifecycle !== 'retracted',
+      );
+      if (candidates.length === 1) {
+        const incident = candidates[0];
+        incident.lifecycle = 'retracted';
+        incident.revision += 1;
+        incident.lastUpdatedSeq = record.Seq;
+        incident.sourceSeqs.push(record.Seq);
+        const fact = emitFact(state, frame, {
+          id: `fact:${incident.key}`, kind: 'incident', lifecycle: 'retracted', basis: 'direct',
+          participant: incident.participant, teamId: incident.teamId, player: incident.player,
+          value: { action: incident.action, sourceId: incident.sourceId, ...incident.data },
+          occurrenceSeconds: incident.occurrenceSeconds, sourceSeqs: [...incident.sourceSeqs], provenance: provenance(record),
+        });
+        emitCue(state, frame, {
+          id: `cue:${incident.key}`, kind: 'incident_retracted', updateMode: 'incident_upsert',
+          lifecycle: 'retracted', basis: 'direct', participant: incident.participant, teamId: incident.teamId,
+          value: { action: incident.action, sourceId: incident.sourceId }, occurrenceSeconds: incident.occurrenceSeconds,
+          sourceSeqs: [...incident.sourceSeqs], factIds: [fact.id],
+        });
+        recomputePlayers(state, context);
+      } else {
+        state.integrityWarnings.push(`Discard ${record.Seq} could not resolve unique incident Id ${record.Id}.`);
       }
     }
 
@@ -343,10 +505,7 @@ export function replayMatchEngine(
         provenance: provenance(record),
       });
 
-      let cueKind: SimulationCue['kind'];
-      if (record.Action === 'free_kick') cueKind = 'set_piece';
-      else if (record.Action === 'shot') cueKind = record.Confirmed === true ? 'shot_outcome' : 'shot_attempt';
-      else cueKind = record.Confirmed === true ? 'goal_confirmed' : 'goal_pending';
+      const cueKind = cueKindFor(record);
       emitCue(state, frame, {
         id: `cue:${incident.key}`,
         kind: cueKind,
@@ -414,6 +573,17 @@ export function replayMatchEngine(
           });
         }
       }
+      recomputePlayers(state, context);
+    }
+
+    if (record.Action === 'game_finalised') {
+      const finalScore = scoreFrom(record, state.confirmedScore) ?? { ...state.confirmedScore };
+      if (stable(finalScore) !== stable(state.confirmedScore)) {
+        state.integrityWarnings.push(`Final score ${stable(finalScore)} differs from confirmed score ${stable(state.confirmedScore)}.`);
+      }
+      state.confirmedScore = { ...finalScore };
+      state.finalScore = { ...finalScore };
+      state.provisionalScore = undefined;
     }
 
     if (record.Action === 'kickoff') {

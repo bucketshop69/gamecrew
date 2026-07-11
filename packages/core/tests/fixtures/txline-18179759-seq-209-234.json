@@ -18,6 +18,7 @@
   },
   "baseline": {
     "sequenceBefore": 209,
+    "phase": "first_half",
     "confirmedScore": {
       "participant1": 0,
       "participant2": 0

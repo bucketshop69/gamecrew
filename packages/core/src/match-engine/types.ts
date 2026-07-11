@@ -9,6 +9,16 @@ export type MatchEngineLifecycle =
 
 export type MatchEngineBasis = 'direct' | 'derived_probable';
 
+export type MatchEnginePhase =
+  | 'pre_match'
+  | 'first_half_ready'
+  | 'first_half'
+  | 'half_time'
+  | 'second_half_ready'
+  | 'second_half'
+  | 'full_time_pending'
+  | 'finalised';
+
 export type MatchEnginePressure =
   | 'neutral'
   | 'safe'
@@ -29,6 +39,15 @@ export interface MatchEnginePlayer {
   teamId: number | string;
   sourcePreferredName: string;
   displayName?: string;
+  fixturePlayerId?: number;
+  sourceId?: string;
+  starter?: boolean;
+  positionId?: number;
+  statusId?: number;
+  unitId?: number;
+  rosterNumber?: string;
+  starred?: boolean;
+  raw?: Record<string, unknown>;
 }
 
 export interface MatchEngineContext {
@@ -40,6 +59,7 @@ export interface MatchEngineContext {
     participant2: number;
   };
   players?: Record<string, MatchEnginePlayer>;
+  phase?: MatchEnginePhase;
 }
 
 export interface TxlineMatchEngineRecord {
@@ -49,6 +69,7 @@ export interface TxlineMatchEngineRecord {
   Action: string;
   Ts?: number;
   Confirmed?: boolean;
+  StatusId?: number;
   Participant?: number;
   Possession?: number;
   PossessionType?: string;
@@ -108,9 +129,22 @@ export interface MatchEnginePossessionState {
   seq: number;
 }
 
+export interface MatchEngineLiveClock {
+  phase: MatchEnginePhase;
+  running: boolean;
+  seconds?: number;
+  seq: number;
+}
+
+export interface MatchEnginePlayerDiscipline {
+  yellowCards: number;
+  redCards: number;
+  sourceIncidentKeys: string[];
+}
+
 export interface SupportedFact {
   id: string;
-  kind: 'incident' | 'score' | 'possession' | 'possible_event' | 'restart';
+  kind: 'incident' | 'score' | 'possession' | 'possible_event' | 'restart' | 'phase';
   lifecycle: MatchEngineLifecycle;
   basis: MatchEngineBasis;
   revision: number;
@@ -136,7 +170,15 @@ export interface SimulationCue {
     | 'goal_confirmed'
     | 'player_highlight'
     | 'score_commit'
-    | 'restart';
+    | 'restart'
+    | 'card'
+    | 'substitution'
+    | 'injury'
+    | 'additional_time'
+    | 'var'
+    | 'incident'
+    | 'incident_retracted'
+    | 'phase_change';
   updateMode: 'incident_upsert' | 'state_replace';
   lifecycle: MatchEngineLifecycle;
   basis: MatchEngineBasis;
@@ -172,11 +214,17 @@ export interface CanonicalMatchState {
   fixtureId: number | string;
   lastAppliedSeq: number;
   stateRevision: number;
+  phase: MatchEnginePhase;
+  liveClock?: MatchEngineLiveClock;
   lastMeaningfulElapsedSeconds?: number;
+  lastPlayingElapsedSeconds?: number;
   confirmedScore: MatchEngineScore;
   provisionalScore?: MatchEngineScore;
+  finalScore?: MatchEngineScore;
   possession?: MatchEnginePossessionState;
   possibleEvents: Record<string, Record<string, boolean>>;
+  activePlayerIdsByParticipant: Record<string, number[]>;
+  disciplineByPlayerId: Record<string, MatchEnginePlayerDiscipline>;
   incidents: Record<string, CanonicalIncident>;
   supportedFacts: Record<string, SupportedFact>;
   simulationCues: Record<string, SimulationCue>;

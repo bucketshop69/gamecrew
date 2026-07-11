@@ -17,6 +17,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "demo:match-engine": "tsx scripts/replay-match-engine-slice.mjs",
+    "demo:match-lifecycle": "tsx scripts/replay-match-engine-lifecycle.mjs",
     "test": "tsx --test tests/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

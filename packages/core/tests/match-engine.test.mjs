@@ -18,6 +18,7 @@ const context = {
   participants: fixture.fixture.participants,
   confirmedScore: fixture.baseline.confirmedScore,
   players: fixture.players,
+  phase: fixture.baseline.phase,
 };
 
 function replayThrough(seq) {
@@ -46,6 +47,7 @@ test('replays all 26 source sequences into one deterministic frame each', () => 
   assert.equal(records.length, 26);
   assert.equal(result.ledger.length, 26);
   assert.equal(result.frames.length, 26);
+  assert.equal(result.state.phase, 'first_half');
   assert.deepEqual(result.ledger.map((record) => record.Seq),
     Array.from({ length: 26 }, (_, index) => 209 + index));
   assert.deepEqual(result.frames.map((frame) => frame.seq),
@@ -184,6 +186,7 @@ test('late shot detail at Seq 223 does not regress the meaningful match clock', 
   assert.equal(frameAt(throughLateShot, 223).matchClockSeconds, 1275);
   assert.equal(throughStandby.state.lastMeaningfulElapsedSeconds, 1276);
   assert.equal(throughLateShot.state.lastMeaningfulElapsedSeconds, 1276);
+  assert.equal(throughLateShot.state.liveClock?.seconds, 1276);
 });
 
 test('orders shuffled input, ignores exact duplicates, and reaches identical canonical state', () => {

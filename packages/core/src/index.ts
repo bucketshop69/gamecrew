@@ -40,6 +40,26 @@ export type {
 } from './match';
 
 export { sampleTxlineMatches } from './sample-data';
+export { replayMatchEngine } from './match-engine';
+export type {
+  CanonicalIncident,
+  CanonicalMatchState,
+  MatchEngineBasis,
+  MatchEngineContext,
+  MatchEngineLifecycle,
+  MatchEngineParticipant,
+  MatchEnginePlayer,
+  MatchEnginePossessionState,
+  MatchEnginePressure,
+  MatchEngineProvenance,
+  MatchEngineReplayResult,
+  MatchEngineScore,
+  MatchEngineTeam,
+  SemanticFrame,
+  SimulationCue,
+  SupportedFact,
+  TxlineMatchEngineRecord,
+} from './match-engine';
 export {
   LiveTxlineMatchAdapter,
   SampleTxlineMatchAdapter,

@@ -3,6 +3,8 @@ node_modules/
 
 # local agent setup
 .agents/
+.local/
+.data/
 
 # Expo
 .expo/

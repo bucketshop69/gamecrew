@@ -6,6 +6,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/server.ts",
+    "match-pulse:live-test": "tsx src/live-match-pulse-test.ts",
+    "match-pulse:replay": "tsx src/replay-match-pulse.ts",
     "start": "tsx src/server.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

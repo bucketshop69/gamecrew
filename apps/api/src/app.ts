@@ -32,6 +32,20 @@ export function createApp(config: ApiConfig) {
     return context.json(result);
   });
 
+  app.get('/matches/:fixtureId/pulse/commentary', async (context) => {
+    const fixtureId = context.req.param('fixtureId');
+    const result = await txline.listMatchPulseCommentary(fixtureId);
+
+    return context.json(result);
+  });
+
+  app.get('/matches/:fixtureId/pulse/moments', async (context) => {
+    const fixtureId = context.req.param('fixtureId');
+    const result = await txline.listMatchPulseMoments(fixtureId);
+
+    return context.json(result);
+  });
+
   app.notFound((context) => context.json({ error: 'Not found' }, 404));
 
   app.onError((error, context) =>

@@ -1,11 +1,16 @@
 export { LiveTxlineMatchAdapter, SampleTxlineMatchAdapter, sampleTxlineMatchAdapter } from './txline/adapters';
-export { TxlineApiClient } from './txline/client';
+export { TxlineApiClient, TxlineTransportError } from './txline/client';
 export {
   admitTxlineMatchPulseMoments,
   buildTxlineMatchPulseCommentaryEntries,
 } from './txline/admission';
 export { applyMatchQuery, mapTxlineFixtureToGameCrewMatch } from './txline/match-mapper';
-export { parseTxlineScoreEvents } from './txline/parser';
+export {
+  parseTxlineScoreEventData,
+  parseTxlineScoreEvents,
+  parseTxlineSseBlock,
+  TxlineSseDecoder,
+} from './txline/parser';
 export { mapTxlineScoresToMatchPulseEvents } from './txline/pulse';
 export { buildTxlineMatchPulseSourceContext } from './txline/source-context';
 export {
@@ -43,9 +48,11 @@ export type {
 
 export type {
   BuildTxlineMatchPulseSourceContextOptions,
+  TxlineAbortSignal,
   TxlineClientConfig,
   TxlineFetcher,
   TxlineFixture,
+  TxlineFixtureSnapshotOptions,
   TxlineGuestSession,
   TxlineMatchAdapter,
   TxlineMatchPulseEventTeam,
@@ -57,6 +64,13 @@ export type {
   TxlineMatchPulseSourceCounts,
   TxlineMatchPulseSourceEvent,
   TxlineMatchQuery,
+  TxlineReadableBody,
   TxlineResponse,
   TxlineScore,
+  TxlineScoreIntervalOptions,
+  TxlineScoreSnapshotOptions,
+  TxlineScoreStreamEvent,
+  TxlineScoreStreamOptions,
+  TxlineSseMessage,
+  TxlineStreamReader,
 } from './txline/types';

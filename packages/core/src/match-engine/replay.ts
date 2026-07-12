@@ -221,7 +221,8 @@ function recomputePlayers(state: CanonicalMatchState, context: MatchEngineContex
     if (player.starter) active[String(player.participant)]?.add(player.normativeId);
   }
   const discipline: CanonicalMatchState['disciplineByPlayerId'] = {};
-  const incidents = Object.values(state.incidents).sort((a, b) => a.lastUpdatedSeq - b.lastUpdatedSeq);
+  const incidents = Object.values(state.incidents).sort((a, b) =>
+    a.firstSeenSeq - b.firstSeenSeq || a.lastUpdatedSeq - b.lastUpdatedSeq);
   for (const incident of incidents) {
     if (incident.lifecycle !== 'confirmed') continue;
     if (incident.action === 'substitution') {
@@ -256,11 +257,11 @@ function recomputePlayers(state: CanonicalMatchState, context: MatchEngineContex
   state.disciplineByPlayerId = discipline;
 }
 
-function cueKindFor(record: TxlineMatchEngineRecord): SimulationCue['kind'] {
-  switch (incidentAction(record.Action)) {
+function cueKindFor(incident: CanonicalIncident): SimulationCue['kind'] {
+  switch (incident.action) {
     case 'free_kick': case 'corner': case 'throw_in': case 'goal_kick': return 'set_piece';
-    case 'shot': return record.Confirmed === true ? 'shot_outcome' : 'shot_attempt';
-    case 'goal': return record.Confirmed === true ? 'goal_confirmed' : 'goal_pending';
+    case 'shot': return incident.lifecycle === 'confirmed' ? 'shot_outcome' : 'shot_attempt';
+    case 'goal': return incident.lifecycle === 'confirmed' ? 'goal_confirmed' : 'goal_pending';
     case 'yellow_card': case 'red_card': return 'card';
     case 'substitution': return 'substitution';
     case 'injury': return 'injury';
@@ -466,6 +467,13 @@ export function replayMatchEngine(
       );
       if (candidates.length === 1) {
         const incident = candidates[0];
+        if (incident.lifecycle === 'confirmed') {
+          state.integrityWarnings.push(
+            `Discard ${record.Seq} ignored for confirmed incident ${incident.key}.`,
+          );
+          frames.push(frame);
+          continue;
+        }
         incident.lifecycle = 'retracted';
         incident.revision += 1;
         incident.lastUpdatedSeq = record.Seq;
@@ -505,7 +513,7 @@ export function replayMatchEngine(
         provenance: provenance(record),
       });
 
-      const cueKind = cueKindFor(record);
+      const cueKind = cueKindFor(incident);
       emitCue(state, frame, {
         id: `cue:${incident.key}`,
         kind: cueKind,
@@ -522,7 +530,7 @@ export function replayMatchEngine(
       });
 
       if (record.Action === 'goal') {
-        const candidateScore = scoreFrom(record, state.confirmedScore);
+        const candidateScore = incident.score;
         if (record.Confirmed === false && candidateScore) state.provisionalScore = candidateScore;
         if (record.Confirmed === true && candidateScore) {
           const scoreChanged = stable(state.confirmedScore) !== stable(candidateScore);
@@ -581,7 +589,6 @@ export function replayMatchEngine(
       if (stable(finalScore) !== stable(state.confirmedScore)) {
         state.integrityWarnings.push(`Final score ${stable(finalScore)} differs from confirmed score ${stable(state.confirmedScore)}.`);
       }
-      state.confirmedScore = { ...finalScore };
       state.finalScore = { ...finalScore };
       state.provisionalScore = undefined;
     }

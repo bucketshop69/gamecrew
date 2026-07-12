@@ -1,6 +1,6 @@
 # Match Pulse VPS + SQLite Architecture
 
-Match Pulse V1 runs on a GameCrew-controlled VPS. TxLINE remains the source of match facts, while the GameCrew server persists the saved commentary feed in SQLite. Clients read the saved feed through the API; they do not process TxLINE directly.
+Match Pulse V1 runs on a GameCrew-controlled VPS. TxLINE remains the source of match facts, while the GameCrew server persists raw source evidence, canonical match state, semantic frames, and the saved commentary feed in SQLite. Match Pulse and the probable game simulation consume the same shared match engine. Clients read GameCrew-owned projections through the API; they do not process TxLINE directly.
 
 ```mermaid
 flowchart TD
@@ -12,8 +12,11 @@ flowchart TD
   subgraph VPS["GameCrew VPS"]
     Caddy["Caddy / HTTPS Reverse Proxy"]
     API["GameCrew API<br/>Hono + TypeScript"]
-    Worker["Match Pulse Worker<br/>polls live/replay fixtures"]
-    DB[("SQLite DB<br/>source of truth")]
+    Worker["Fixture Ingestion<br/>SSE + recovery"]
+    Engine["Shared Match Engine<br/>canonical state + semantic frames"]
+    Commentary["Match Pulse Consumer"]
+    Simulation["Probable Simulation Consumer"]
+    DB[("SQLite DB<br/>evidence + projections")]
     Docs["Developer Docs<br/>static Starlight site"]
   end
 
@@ -28,11 +31,15 @@ flowchart TD
   Caddy -->|api.gamecrew.app| API
   Caddy -->|docs.gamecrew.app| Docs
 
-  Worker -->|poll confirmed updates| TX
-  Worker -->|save fallback entries| DB
-  Worker -->|send saved entry context| LLM
-  LLM -->|enriched commentary| Worker
-  Worker -->|update same entry| DB
+  Worker -->|stream, history, snapshot, recovery| TX
+  Worker -->|append raw evidence| DB
+  Worker --> Engine
+  Engine -->|checkpoint + frames| DB
+  Engine --> Commentary
+  Engine --> Simulation
+  Commentary -->|grounded fallback context| LLM
+  LLM -->|presentation-only enrichment| Commentary
+  Commentary -->|save same entry| DB
 
   API -->|read matches/feed| DB
   API -->|optional direct TxLINE debug/admin| TX
@@ -41,10 +48,12 @@ flowchart TD
 Core ownership rule:
 
 ```text
-TxLINE is the source of match facts.
-SQLite is GameCrew's source of truth for the saved Match Pulse feed.
+TxLINE is the source of external match facts.
+SQLite is GameCrew's durable source of evidence and product projections.
+The shared match engine interprets each source event once for both consumers.
+The LLM may improve presentation but never changes match truth.
 The client never processes TxLINE.
-The client only reads saved commentary from the API.
+The client only reads saved state, frames, and commentary from the API.
 ```
 
 Live match flow:
@@ -58,10 +67,13 @@ sequenceDiagram
   participant API as GameCrew API
   participant App as Mobile App
 
-  W->>TX: Poll fixture updates
-  TX-->>W: Confirmed updates only
-  W->>DB: Insert source update + fallback commentary
-  W->>LLM: Enrich fallback commentary
+  W->>TX: Stream fixture with history/recovery fallback
+  TX-->>W: Source updates
+  W->>DB: Append durable raw evidence
+  W->>W: Replay shared match engine
+  W->>DB: Commit canonical state + semantic frames
+  W->>DB: Insert grounded fallback commentary
+  W->>LLM: Enrich presentation from saved facts
   LLM-->>W: Natural commentary
   W->>DB: Update same commentary row
   App->>API: Fetch match feed
@@ -76,6 +88,20 @@ Persistence direction:
 File store today = proof
 SQLite store next = V1 production
 Postgres/Supabase later = scale-up option
+```
+
+Recovery and finalisation rules:
+
+```text
+A snapshot baseline is temporary recovery state when GameCrew starts late.
+If complete history from Seq 0 becomes available, the engine replaces the
+baseline and rebuilds the fixture from the full timeline.
+
+After game_finalised, ingestion remains open for a bounded correction window
+(15 minutes by default, configured by TXLINE_FINALISATION_CORRECTION_MS).
+Corrections inside that window are persisted and projected. Any correction that
+rewrites earlier projection history advances the generation; consumers reset
+their prior generation before applying that corrected replay.
 ```
 
 Runtime note:

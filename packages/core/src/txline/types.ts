@@ -27,10 +27,75 @@ export interface TxlineClientConfig {
   fetcher?: TxlineFetcher;
 }
 
+export interface TxlineFixtureSnapshotOptions {
+  startEpochDay?: number;
+  competitionId?: number;
+}
+
+export interface TxlineScoreSnapshotOptions {
+  asOf?: number;
+}
+
+export interface TxlineScoreIntervalOptions {
+  fixtureId?: string | number;
+}
+
+export interface TxlineSseMessage {
+  id?: string;
+  event?: string;
+  retry?: number;
+  data: string;
+}
+
+export type TxlineScoreStreamEvent =
+  | {
+      kind: 'score';
+      message: TxlineSseMessage;
+      score: TxlineScore;
+      scoreIndex: number;
+      scoreCount: number;
+      isLastInMessage: boolean;
+    }
+  | {
+      kind: 'heartbeat';
+      message: TxlineSseMessage;
+      timestamp?: number;
+    }
+  | {
+      kind: 'control';
+      message: TxlineSseMessage;
+    };
+
+/** Structural subset implemented by the platform AbortSignal. */
+export interface TxlineAbortSignal {
+  readonly aborted: boolean;
+  readonly reason?: unknown;
+}
+
+export interface TxlineScoreStreamOptions {
+  lastEventId?: string;
+  signal?: TxlineAbortSignal;
+  onEvent?: (event: TxlineScoreStreamEvent) => void | Promise<void>;
+  onScore?: (score: TxlineScore, message: TxlineSseMessage) => void | Promise<void>;
+  onHeartbeat?: (event: Extract<TxlineScoreStreamEvent, { kind: 'heartbeat' }>) => void | Promise<void>;
+  onOpen?: () => void | Promise<void>;
+}
+
+export interface TxlineStreamReader {
+  read(): Promise<{ done: boolean; value?: Uint8Array }>;
+  cancel?(reason?: unknown): Promise<void>;
+  releaseLock?(): void;
+}
+
+export interface TxlineReadableBody {
+  getReader(): TxlineStreamReader;
+}
+
 export interface TxlineResponse {
   ok: boolean;
   status: number;
   text(): Promise<string>;
+  body?: TxlineReadableBody | null;
 }
 
 export type TxlineFetcher = (
@@ -38,6 +103,7 @@ export type TxlineFetcher = (
   init?: {
     method?: string;
     headers?: Record<string, string>;
+    signal?: TxlineAbortSignal;
   },
 ) => Promise<TxlineResponse>;
 

@@ -15,6 +15,7 @@ export interface ApiConfig {
   port: number;
   txlineApiToken: string;
   txlineBaseUrl: string;
+  txlineFinalisationCorrectionMs: number;
 }
 
 export function loadConfig(): ApiConfig {
@@ -45,11 +46,22 @@ export function loadConfig(): ApiConfig {
     port: Number(process.env.PORT ?? env.PORT ?? 8787),
     txlineApiToken,
     txlineBaseUrl: process.env.TXLINE_BASE_URL ?? env.TXLINE_BASE_URL ?? 'https://txline.txodds.com',
+    txlineFinalisationCorrectionMs: parseNonNegativeNumber(
+      process.env.TXLINE_FINALISATION_CORRECTION_MS
+        ?? env.TXLINE_FINALISATION_CORRECTION_MS,
+      15 * 60_000,
+    ),
   };
 }
 
 function parseBoolean(value?: string): boolean {
   return value === '1' || value === 'true' || value === 'yes';
+}
+
+function parseNonNegativeNumber(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function normalizeOptionalUrl(value?: string): string | undefined {

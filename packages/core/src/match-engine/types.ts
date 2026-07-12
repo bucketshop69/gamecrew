@@ -210,6 +210,53 @@ export interface SemanticFrame {
   simulationCues: SimulationCue[];
 }
 
+export type CommentaryBeatKind = 'routine' | 'pressure' | 'major';
+export type CommentaryRestartContext = 'initial' | 'second_half' | 'after_goal' | 'restart';
+
+/** Exact semantic-frame evidence retained when revisions are collapsed into one beat. */
+export interface CommentaryBeatSource {
+  frameId: string;
+  seq: number;
+  cueIds: string[];
+  cues: Array<{ cueId: string; action: string }>;
+  factIds: string[];
+}
+
+/**
+ * A deterministic, source-grounded unit of narration. The LLM may rewrite the
+ * fallback, but it must cover only the facts and cues carried by this beat.
+ */
+export interface CommentaryBeat {
+  id: string;
+  fixtureId: number | string;
+  /** Projection generation supplied by the durable consumer. */
+  projectionGeneration: number;
+  kind: CommentaryBeatKind;
+  /** Major beats must survive LLM omission or validation failure. */
+  mustCover: boolean;
+  fromSeq: number;
+  toSeq: number;
+  matchClockSeconds?: number;
+  participant?: MatchEngineParticipant;
+  teamId?: number | string;
+  restartContext?: CommentaryRestartContext;
+  sourceFrameIds: string[];
+  /** Per-frame associations; consumers must use these seqs rather than reconstructing them. */
+  sources: CommentaryBeatSource[];
+  factIds: string[];
+  cueIds: string[];
+  facts: SupportedFact[];
+  simulationCues: SimulationCue[];
+  fallbackCommentary: string;
+}
+
+export interface CommentaryBeatPlanningOptions {
+  /** Keeps corrected projections distinct from frames already seen by clients. */
+  projectionGeneration: number;
+  teams?: readonly MatchEngineTeam[];
+  pressureWindowSeconds?: number;
+}
+
 export interface CanonicalMatchState {
   fixtureId: number | string;
   lastAppliedSeq: number;

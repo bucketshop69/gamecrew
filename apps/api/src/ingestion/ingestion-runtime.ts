@@ -1,5 +1,14 @@
-import { TxlineApiClient, type TxlineFixture, type TxlineScore } from '@gamecrew/core';
+import {
+  TxlineApiClient,
+  type MatchEngineContext,
+  type MatchEngineTeam,
+  type TxlineFixture,
+  type TxlineScore,
+} from '@gamecrew/core';
 import type { ApiConfig } from '../config.js';
+import { createMatchPulseCommentaryStore } from '../match-pulse-commentary-store.js';
+import { createMatchPulseEnrichmentService } from '../match-pulse-llm.js';
+import { CommentaryProjectionConsumer } from './commentary-projection-consumer.js';
 import { FixtureIngestionSession } from './fixture-ingestion-session.js';
 import { IngestionSupervisor } from './ingestion-supervisor.js';
 import { buildMatchEngineContext } from './match-engine-context.js';
@@ -16,6 +25,22 @@ export function createIngestionRuntime(config: ApiConfig) {
   const store = new SqliteIngestionStore(config.matchPulseSqlitePath);
   const hub = new SemanticFrameHub(store);
   const projector = new MatchEngineProjector(store, { publisher: hub });
+  const commentaryStore = createMatchPulseCommentaryStore({
+    driver: config.matchPulseStoreDriver,
+    filePath: config.matchPulseStorePath,
+    sqlitePath: config.matchPulseSqlitePath,
+  });
+  const commentary = new CommentaryProjectionConsumer(store, hub, commentaryStore, {
+    enrichment: createMatchPulseEnrichmentService(config),
+    enrichmentBatchSize: config.llmBatchSize,
+    onEnrichmentError(error, fixtureId) {
+      console.error(JSON.stringify({
+        event: 'match_pulse_background_enrichment_failed',
+        fixtureId,
+        reason: error instanceof Error ? error.message : String(error),
+      }));
+    },
+  });
   const supervisor = new IngestionSupervisor(async (fixtureId) => {
     const existingCheckpoint = await store.getCheckpoint(fixtureId);
     const correctionWindowMs = remainingCorrectionWindowMs(
@@ -23,12 +48,23 @@ export function createIngestionRuntime(config: ApiConfig) {
       config.txlineFinalisationCorrectionMs,
     );
     const local = await store.listRawCandidates(fixtureId);
+    const storedFixtureContext = await store.getFixtureContext(fixtureId);
     const localScores = local.flatMap(({ payloadJson }) => {
       try { return [JSON.parse(payloadJson) as TxlineScore]; } catch { return []; }
     });
     const localFixture = reconstructFixture(fixtureId, localScores);
     if (localFixture) {
-      const context = buildMatchEngineContext(localFixture, localScores);
+      const sourceFixture = hasNamedParticipants(storedFixtureContext?.participants)
+        ? localFixture
+        : await findFixtureMetadata(feed, fixtureId, localScores).catch(() => localFixture);
+      const context = withStoredParticipants(
+        buildMatchEngineContext(sourceFixture, localScores),
+        hasNamedParticipants(storedFixtureContext?.participants)
+          ? storedFixtureContext?.participants
+          : undefined,
+      );
+      await persistFixtureContext(store, context);
+      await commentary.ensureFixture(fixtureId, context.participants);
       return new FixtureIngestionSession({
         fixtureId, context, feed, store, projector,
         finalisationCorrectionWindowMs: correctionWindowMs,
@@ -42,6 +78,8 @@ export function createIngestionRuntime(config: ApiConfig) {
       ?? reconstructFixture(fixtureId, snapshot);
     if (!fixture) throw new Error(`TxLINE fixture ${fixtureId} could not be reconstructed.`);
     const context = buildMatchEngineContext(fixture, snapshot);
+    await persistFixtureContext(store, context);
+    await commentary.ensureFixture(fixtureId, context.participants);
     return new FixtureIngestionSession({
       fixtureId, context, feed, store, projector,
       finalisationCorrectionWindowMs: correctionWindowMs,
@@ -52,11 +90,34 @@ export function createIngestionRuntime(config: ApiConfig) {
     ensureFixture: (fixtureId: string) => supervisor.ensureFixture(fixtureId),
     getCheckpoint: (fixtureId: string) => store.getCheckpoint(fixtureId),
     listFramesAfter: (fixtureId: string, revision: number) => store.listFramesAfter(fixtureId, revision),
+    listCommentaryEntries: (fixtureId: string) => commentaryStore.listEntries(fixtureId),
     subscribe: hub.subscribe.bind(hub),
     activeFixtureCount: () => supervisor.activeFixtureCount(),
     async restore() {
       const fixtureIds = await store.listFixtureIds();
       await Promise.allSettled(fixtureIds.map(async (fixtureId) => {
+        const local = await store.listRawCandidates(fixtureId);
+        const storedFixtureContext = await store.getFixtureContext(fixtureId);
+        const localScores = local.flatMap(({ payloadJson }) => {
+          try { return [JSON.parse(payloadJson) as TxlineScore]; } catch { return []; }
+        });
+        const localFixture = reconstructFixture(fixtureId, localScores);
+        if (localFixture) {
+          const sourceFixture = hasNamedParticipants(storedFixtureContext?.participants)
+            ? localFixture
+            : await findFixtureMetadata(feed, fixtureId, localScores).catch(() => localFixture);
+          const restoredContext = withStoredParticipants(
+            buildMatchEngineContext(sourceFixture, localScores),
+            hasNamedParticipants(storedFixtureContext?.participants)
+              ? storedFixtureContext?.participants
+              : undefined,
+          );
+          await persistFixtureContext(store, restoredContext);
+          await commentary.ensureFixture(
+            fixtureId,
+            restoredContext.participants,
+          );
+        }
         const checkpoint = await store.getCheckpoint(fixtureId);
         const finalisedAt = checkpoint?.finalisedAt ? Date.parse(checkpoint.finalisedAt) : Number.NaN;
         const correctionWindowOpen = checkpoint?.phase === 'finalised'
@@ -69,12 +130,33 @@ export function createIngestionRuntime(config: ApiConfig) {
     },
     async close() {
       await supervisor.stop();
+      await commentary.close();
+      const closeableCommentaryStore = commentaryStore as typeof commentaryStore & { close?: () => void };
+      closeableCommentaryStore.close?.();
       store.close();
     },
   };
 }
 
 export type IngestionRuntime = ReturnType<typeof createIngestionRuntime>;
+
+function withStoredParticipants<T extends { participants: readonly MatchEngineTeam[] }>(
+  context: T,
+  participants?: readonly MatchEngineTeam[],
+): T {
+  return participants?.length ? { ...context, participants } : context;
+}
+
+async function persistFixtureContext(
+  store: SqliteIngestionStore,
+  context: Pick<MatchEngineContext, 'fixtureId' | 'participants'>,
+): Promise<void> {
+  await store.saveFixtureContext({
+    fixtureId: String(context.fixtureId),
+    participants: context.participants,
+    updatedAt: new Date().toISOString(),
+  });
+}
 
 function remainingCorrectionWindowMs(finalisedAt: string | undefined, configuredMs: number): number {
   if (!finalisedAt) return configuredMs;
@@ -101,4 +183,23 @@ function reconstructFixture(fixtureId: string, scores: readonly TxlineScore[]): 
     FixtureId: Number(fixtureId),
     Participant1IsHome: score.Participant1IsHome ?? true,
   };
+}
+
+async function findFixtureMetadata(
+  feed: TxlineFeedSource,
+  fixtureId: string,
+  scores: readonly TxlineScore[],
+): Promise<TxlineFixture> {
+  const startTime = scores.find((score) => typeof score.StartTime === 'number')?.StartTime;
+  const fixtures = await feed.fetchFixtures({
+    ...(typeof startTime === 'number' ? { startEpochDay: Math.floor(startTime / 86_400_000) } : {}),
+  });
+  return fixtures.find((fixture) => String(fixture.FixtureId) === fixtureId)
+    ?? reconstructFixture(fixtureId, scores)
+    ?? Promise.reject(new Error(`Fixture ${fixtureId} metadata was unavailable.`));
+}
+
+function hasNamedParticipants(participants?: readonly MatchEngineTeam[]): boolean {
+  return Boolean(participants?.length && participants.every((team) =>
+    team.name.trim().length > 0 && !/^Participant\s+\d+$/i.test(team.name)));
 }

@@ -6,6 +6,7 @@ import type { IngestionStore } from './ingestion-store.js';
 import type {
   AppendRawCandidatesResult,
   EngineCheckpoint,
+  FixtureContextSnapshot,
   IngestionCursor,
   ProjectionCommit,
   RawLedgerCandidate,
@@ -115,6 +116,12 @@ export class SqliteIngestionStore implements IngestionStore {
         timeline_complete INTEGER,
         session_status TEXT,
         last_error TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS match_engine_fixture_contexts (
+        fixture_id TEXT PRIMARY KEY,
+        context_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
 
@@ -288,9 +295,30 @@ export class SqliteIngestionStore implements IngestionStore {
       SELECT fixture_id FROM txline_raw_records
       UNION
       SELECT fixture_id FROM txline_ingestion_cursors
+      UNION
+      SELECT fixture_id FROM match_engine_fixture_contexts
       ORDER BY fixture_id ASC
     `).all() as { fixture_id: string }[];
     return rows.map((row) => row.fixture_id);
+  }
+
+  async getFixtureContext(fixtureId: string): Promise<FixtureContextSnapshot | undefined> {
+    const row = this.db.prepare(`
+      SELECT context_json
+      FROM match_engine_fixture_contexts
+      WHERE fixture_id = ?
+    `).get(fixtureId) as { context_json: string } | undefined;
+    return row ? JSON.parse(row.context_json) as FixtureContextSnapshot : undefined;
+  }
+
+  async saveFixtureContext(context: FixtureContextSnapshot): Promise<void> {
+    this.db.prepare(`
+      INSERT INTO match_engine_fixture_contexts (fixture_id, context_json, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(fixture_id) DO UPDATE SET
+        context_json = excluded.context_json,
+        updated_at = excluded.updated_at
+    `).run(context.fixtureId, JSON.stringify(context), context.updatedAt);
   }
 
   async getCursor(fixtureId: string): Promise<IngestionCursor | undefined> {

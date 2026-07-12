@@ -2,6 +2,7 @@ import {
   TxlineApiClient,
   TxlineTransportError,
   type TxlineFixture,
+  type TxlineFixtureSnapshotOptions,
   type TxlineScore,
   type TxlineScoreStreamEvent,
 } from '@gamecrew/core';
@@ -19,8 +20,8 @@ export class TxlineFeedSource {
     private readonly auth: TxlineAuthSession,
   ) {}
 
-  fetchFixtures(): Promise<readonly TxlineFixture[]> {
-    return this.auth.request((jwt) => this.client.listFixtures(jwt));
+  fetchFixtures(options: TxlineFixtureSnapshotOptions = {}): Promise<readonly TxlineFixture[]> {
+    return this.auth.request((jwt) => this.client.listFixtures(jwt, options));
   }
 
   fetchSnapshot(fixtureId: string): Promise<readonly TxlineScore[]> {

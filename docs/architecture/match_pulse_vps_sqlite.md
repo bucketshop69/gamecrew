@@ -104,6 +104,32 @@ rewrites earlier projection history advances the generation; consumers reset
 their prior generation before applying that corrected replay.
 ```
 
+Commentary projection rules:
+
+```text
+Semantic frames are deterministically grouped into routine, pressure, and major
+commentary beats. Every beat stores its projection generation and exact
+frame/sequence/cue/action/fact provenance. When a later incident revision adds
+a player or other detail, the beat remains anchored to the original incident
+but retains the later contributing frame as evidence.
+
+The background worker saves grounded fallback commentary immediately, then
+enriches pending beats asynchronously with the LLM. Feed GET requests only read
+saved entries; they do not start TxLINE ingestion or LLM work.
+
+The LLM must echo the beat identity and generation, cover every required frame,
+and pass closed-world action, team attribution, all-score, semantic cue,
+repetition, and unsupported-claim validation. A major beat may receive one
+validation-only repair attempt.
+
+SQLite workers atomically claim pending beats using an owner, lease, attempt
+count, and retry timestamp. Provider failures use persisted exponential retry;
+validation failures are terminal. Expired leases are recoverable after a crash,
+and two workers cannot enrich the same active claim. Corrections replace the old
+commentary generation atomically, stale in-flight LLM responses are discarded,
+and burst frame delivery is coalesced into a rebuild at the latest checkpoint.
+```
+
 Runtime note:
 
 ```text

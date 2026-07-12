@@ -89,7 +89,19 @@ export function createApp(config: ApiConfig, ingestion?: IngestionRuntime) {
   });
 
   app.get('/matches/:fixtureId/pulse/commentary', async (context) => {
-    const fixtureId = context.req.param('fixtureId');
+    const fixtureId = normalizeFixtureId(context.req.param('fixtureId'));
+    if (ingestion) {
+      return context.json({
+        entries: await ingestion.listCommentaryEntries(fixtureId),
+        source: 'engine',
+        persistence: {
+          inserted: 0,
+          updated: 0,
+          unchanged: 0,
+          store: config.matchPulseStoreDriver,
+        },
+      });
+    }
     const result = await txline.listMatchPulseCommentary(fixtureId);
 
     return context.json(result);

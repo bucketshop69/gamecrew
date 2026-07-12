@@ -204,6 +204,14 @@ test('cursor, raw ledger, checkpoint, and frames survive a filesystem close and 
       payloadJson: JSON.stringify({ FixtureId: Number(fixtureId), Seq: 0, Id: 0, Action: 'coverage_update' }),
     }]);
     await first.saveCursor({ fixtureId, lastSeenSeq: 0, lastEventId: 'event-0', updatedAt: receivedAt });
+    await first.saveFixtureContext({
+      fixtureId,
+      participants: [
+        { participant: 1, teamId: 10, name: 'Home FC', isHome: true },
+        { participant: 2, teamId: 20, name: 'Away FC', isHome: false },
+      ],
+      updatedAt: receivedAt,
+    });
     await first.commitProjection({
       checkpoint: {
         fixtureId, engineVersion: 'engine-v1', lastAppliedSeq: 0, stateRevision: 1,
@@ -218,6 +226,7 @@ test('cursor, raw ledger, checkpoint, and frames survive a filesystem close and 
     const reopened = new SqliteIngestionStore(path);
     assert.equal((await reopened.listRawCandidates(fixtureId)).length, 1);
     assert.equal((await reopened.getCursor(fixtureId)).lastEventId, 'event-0');
+    assert.deepEqual((await reopened.getFixtureContext(fixtureId)).participants.map(({ name }) => name), ['Home FC', 'Away FC']);
     assert.equal((await reopened.getCheckpoint(fixtureId)).stateHash, 'durable-hash');
     assert.equal((await reopened.listFramesAfter(fixtureId, 0)).length, 1);
     reopened.close();

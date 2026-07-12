@@ -39,6 +39,7 @@ pnpm --filter @gamecrew/core test
 pnpm --filter @gamecrew/api test
 pnpm typecheck
 pnpm --filter @gamecrew/api ingestion:smoke -- 18179759
+pnpm --filter @gamecrew/api commentary:smoke -- 18179759
 git diff --check
 ```
 

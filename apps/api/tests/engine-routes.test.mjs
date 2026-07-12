@@ -101,3 +101,25 @@ test('serves a durable checkpoint even when background upstream recovery fails',
   assert.equal(response.status, 200);
   assert.equal((await response.json()).checkpoint.phase, 'second_half');
 });
+
+test('commentary reads return the saved engine projection without starting fixture or LLM work', async () => {
+  let ensureCalls = 0;
+  const saved = [{ id: 'engine-beat-1', fixtureId: '99', commentary: 'Saved before the listener arrived.' }];
+  const ingestion = {
+    async ensureFixture() { ensureCalls += 1; },
+    async getCheckpoint() { return undefined; },
+    async listFramesAfter() { return []; },
+    async listCommentaryEntries(fixtureId) {
+      assert.equal(fixtureId, '99');
+      return saved;
+    },
+    activeFixtureCount() { return 0; },
+  };
+  const response = await createApp(config, ingestion)
+    .request('/matches/txline-99/pulse/commentary');
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body.entries, saved);
+  assert.equal(body.source, 'engine');
+  assert.equal(ensureCalls, 0);
+});

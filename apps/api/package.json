@@ -7,6 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/server.ts",
     "ingestion:smoke": "tsx src/match-ingestion-smoke.ts",
+    "commentary:smoke": "tsx src/match-commentary-smoke.ts",
     "match-pulse:live-test": "tsx src/live-match-pulse-test.ts",
     "match-pulse:replay": "tsx src/replay-match-pulse.ts",
     "start": "tsx src/server.ts",

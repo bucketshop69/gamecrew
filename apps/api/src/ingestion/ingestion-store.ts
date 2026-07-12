@@ -1,6 +1,7 @@
 import type {
   AppendRawCandidatesResult,
   EngineCheckpoint,
+  FixtureContextSnapshot,
   IngestionCursor,
   ProjectionCommit,
   RawLedgerCandidate,
@@ -14,6 +15,8 @@ export interface IngestionStore {
   ): Promise<AppendRawCandidatesResult>;
   listRawCandidates(fixtureId: string, afterSeq?: number): Promise<readonly RawLedgerCandidate[]>;
   listFixtureIds(): Promise<readonly string[]>;
+  getFixtureContext(fixtureId: string): Promise<FixtureContextSnapshot | undefined>;
+  saveFixtureContext(context: FixtureContextSnapshot): Promise<void>;
   getCursor(fixtureId: string): Promise<IngestionCursor | undefined>;
   listCursors(): Promise<readonly IngestionCursor[]>;
   saveCursor(cursor: IngestionCursor): Promise<void>;
@@ -36,6 +39,7 @@ export interface IngestionStore {
 export type {
   AppendRawCandidatesResult,
   EngineCheckpoint,
+  FixtureContextSnapshot,
   IngestionCursor,
   ProjectionCommit,
   RawLedgerCandidate,

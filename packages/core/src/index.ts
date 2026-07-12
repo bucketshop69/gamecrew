@@ -18,6 +18,7 @@ export type {
   MatchPulseBoardZone,
   MatchPulseCommentaryEntry,
   MatchPulseCommentaryEntryKind,
+  MatchPulseCommentaryGroundedFact,
   MatchPulseEnrichmentStatus,
   MatchPulseEvent,
   MatchPulseEventAction,
@@ -40,10 +41,14 @@ export type {
 } from './match';
 
 export { sampleTxlineMatches } from './sample-data';
-export { replayMatchEngine } from './match-engine';
+export { planCommentaryBeats, replayMatchEngine } from './match-engine';
 export type {
   CanonicalIncident,
   CanonicalMatchState,
+  CommentaryBeat,
+  CommentaryBeatSource,
+  CommentaryBeatKind,
+  CommentaryBeatPlanningOptions,
   MatchEngineBasis,
   MatchEngineContext,
   MatchEngineLifecycle,

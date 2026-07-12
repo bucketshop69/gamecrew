@@ -1,8 +1,15 @@
 import type {
   CanonicalMatchState,
+  MatchEngineTeam,
   MatchEnginePhase,
   SemanticFrame,
 } from '@gamecrew/core';
+
+export interface FixtureContextSnapshot {
+  fixtureId: string;
+  participants: readonly MatchEngineTeam[];
+  updatedAt: string;
+}
 
 export type RawIngestionSource =
   | 'snapshot'

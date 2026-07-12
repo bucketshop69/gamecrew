@@ -1,7 +1,12 @@
 export { replayMatchEngine } from './replay';
+export { planCommentaryBeats } from './commentary';
 export type {
   CanonicalIncident,
   CanonicalMatchState,
+  CommentaryBeat,
+  CommentaryBeatSource,
+  CommentaryBeatKind,
+  CommentaryBeatPlanningOptions,
   MatchEngineBasis,
   MatchEngineContext,
   MatchEngineLifecycle,

@@ -279,6 +279,31 @@ export interface MatchPulseCommentaryEntry {
   fallbackCommentary: string;
   enrichmentStatus: MatchPulseEnrichmentStatus;
   boardHint?: MatchPulseBoardHint;
+  /** Optional engine grounding for durable, generation-safe commentary. */
+  projectionGeneration?: number;
+  commentaryBeatKind?: 'routine' | 'pressure' | 'major';
+  mustCover?: boolean;
+  sourceFrameIds?: readonly string[];
+  factIds?: readonly string[];
+  cueIds?: readonly string[];
+  groundedFacts?: readonly MatchPulseCommentaryGroundedFact[];
+  coveredFrameIds?: readonly string[];
+  enrichmentPromptVersion?: string;
+}
+
+export interface MatchPulseCommentaryGroundedFact {
+  id: string;
+  kind: string;
+  action?: string;
+  lifecycle?: string;
+  basis?: 'direct' | 'derived_probable';
+  participant?: number;
+  teamId?: string;
+  playerName?: string;
+  pressure?: string;
+  probableZone?: string;
+  value: Record<string, unknown>;
+  sourceSeqs: readonly number[];
 }
 
 export interface ReplayState {

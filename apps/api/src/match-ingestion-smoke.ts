@@ -14,8 +14,11 @@ const config = loadConfig();
 const client = new TxlineApiClient({ baseUrl: config.txlineBaseUrl, apiToken: config.txlineApiToken });
 const auth = new TxlineAuthSession(client);
 const feed = new TxlineFeedSource(client, auth);
-const fixtures = await feed.fetchFixtures();
 const history = await feed.fetchHistorical(fixtureId);
+const startTime = history.find((score) => typeof score.StartTime === 'number')?.StartTime;
+const fixtures = await feed.fetchFixtures({
+  ...(typeof startTime === 'number' ? { startEpochDay: Math.floor(startTime / 86_400_000) } : {}),
+});
 const fixture = fixtures.find((candidate) => String(candidate.FixtureId) === fixtureId) ?? buildFixture(history);
 if (!fixture) throw new Error(`Fixture ${fixtureId} could not be reconstructed.`);
 
@@ -27,11 +30,35 @@ const projector = new MatchEngineProjector(store, { publisher: hub });
 const session = new FixtureIngestionSession({ fixtureId, context, feed, store, projector });
 
 try {
+  await store.saveFixtureContext({
+    fixtureId,
+    participants: context.participants,
+    updatedAt: new Date().toISOString(),
+  });
   await session.start();
   const checkpoint = await store.getCheckpoint(fixtureId);
   const cursor = await store.getCursor(fixtureId);
   const raw = await store.listRawCandidates(fixtureId);
   if (!checkpoint) throw new Error('No engine checkpoint was created.');
+  if (fixtureId === '18179759') {
+    const failures = [
+      raw.length === 886 ? undefined : `expected 886 raw candidates, received ${raw.length}`,
+      cursor?.lastSeenSeq === 885 ? undefined : `expected last contiguous Seq 885, received ${cursor?.lastSeenSeq ?? 'none'}`,
+      checkpoint.state.phase === 'finalised' ? undefined : `expected finalised phase, received ${checkpoint.state.phase}`,
+      checkpoint.state.confirmedScore.participant1 === 2 && checkpoint.state.confirmedScore.participant2 === 0
+        ? undefined
+        : `expected confirmed score 2-0, received ${checkpoint.state.confirmedScore.participant1}-${checkpoint.state.confirmedScore.participant2}`,
+      checkpoint.state.finalScore?.participant1 === 2 && checkpoint.state.finalScore?.participant2 === 0
+        ? undefined
+        : 'expected final score 2-0',
+      checkpoint.state.integrityWarnings.length === 0
+        ? undefined
+        : `expected zero integrity warnings, received ${checkpoint.state.integrityWarnings.length}`,
+    ].filter((failure): failure is string => failure !== undefined);
+    if (failures.length > 0) {
+      throw new Error(`Fixture 18179759 ingestion acceptance failed: ${failures.join('; ')}.`);
+    }
+  }
   console.log(JSON.stringify({
     fixtureId,
     databasePath,

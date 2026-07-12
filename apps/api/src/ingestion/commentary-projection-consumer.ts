@@ -246,18 +246,39 @@ export class CommentaryProjectionConsumer {
         .filter((entry) => !firstPending || compareCommentaryEntries(entry, firstPending) < 0)
         .sort(compareCommentaryEntries);
       const requestCursor = claim.cursor;
-      let result;
+      const leaseMs = this.options.enrichmentLeaseMs ?? 30_000;
+      let leaseOwned = true;
+      let renewalQueue = Promise.resolve();
+      const queueRenewal = () => {
+        renewalQueue = renewalQueue.then(async () => {
+          if (leaseOwned) leaseOwned = await this.commentary.renewEnrichmentClaim(claim, leaseMs);
+        });
+      };
+      const heartbeat = setInterval(queueRenewal, Math.max(5, Math.floor(leaseMs / 3)));
+      let result: Awaited<ReturnType<MatchPulseEnrichmentService['enrichCommentaryEntries']>> | undefined;
+      let processingError: unknown;
       try {
         result = await enrichment.enrichCommentaryEntries(
           commentaryGroundingContext(state.teams, entries), pending, previous,
         );
       } catch (error) {
+        processingError = error;
+      } finally {
+        clearInterval(heartbeat);
+        await renewalQueue;
+      }
+      if (leaseOwned) leaseOwned = await this.commentary.renewEnrichmentClaim(claim, leaseMs);
+      if (!leaseOwned) {
+        state.enrichmentRequested = true;
+        continue;
+      }
+      if (processingError !== undefined) {
         const terminal = claim.attempt >= (this.options.enrichmentMaxAttempts ?? 3);
         const delay = (this.options.enrichmentRetryBaseMs ?? 1_000) * (2 ** Math.max(0, claim.attempt - 1));
         await this.commentary.releaseEnrichmentClaim(
           claim, terminal ? 'terminal' : 'retry', Date.now() + delay,
         );
-        this.options.onEnrichmentError?.(error, fixtureId);
+        this.options.onEnrichmentError?.(processingError, fixtureId);
         if (!terminal && this.fixtures.has(fixtureId)) {
           state.retryTimer = setTimeout(() => {
             state.retryTimer = undefined;
@@ -266,6 +287,7 @@ export class CommentaryProjectionConsumer {
         }
         return;
       }
+      if (!result) return;
       if (result.entries.length === 0) {
         await this.commentary.releaseEnrichmentClaim(claim, 'terminal');
         return;

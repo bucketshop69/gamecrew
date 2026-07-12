@@ -27,6 +27,11 @@ export interface MatchPulseCommentaryStore {
     leaseMs: number,
     now?: number,
   ): Promise<MatchPulseCommentaryEnrichmentClaim | undefined>;
+  renewEnrichmentClaim(
+    claim: MatchPulseCommentaryEnrichmentClaim,
+    leaseMs: number,
+    now?: number,
+  ): Promise<boolean>;
   releaseEnrichmentClaim(
     claim: MatchPulseCommentaryEnrichmentClaim,
     outcome: 'complete' | 'terminal' | 'retry',
@@ -265,6 +270,23 @@ export class FileMatchPulseCommentaryStore implements MatchPulseCommentaryStore 
         });
       }
       await this.persist();
+    });
+  }
+
+  async renewEnrichmentClaim(
+    claim: MatchPulseCommentaryEnrichmentClaim,
+    leaseMs: number,
+    now = Date.now(),
+  ): Promise<boolean> {
+    await this.load();
+    return this.withMutation(async () => {
+      const jobs = claim.entries.map((entry) => this.enrichmentJobs.get(entry.id));
+      if (jobs.some((job) => job?.owner !== claim.owner || job.status !== 'in_progress')) return false;
+      for (const [index, entry] of claim.entries.entries()) {
+        this.enrichmentJobs.set(entry.id, { ...jobs[index]!, leaseUntil: now + leaseMs });
+      }
+      await this.persist();
+      return true;
     });
   }
 
@@ -545,6 +567,40 @@ export class SqliteMatchPulseCommentaryStore implements MatchPulseCommentaryStor
         }
       }
       this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  async renewEnrichmentClaim(
+    claim: MatchPulseCommentaryEnrichmentClaim,
+    leaseMs: number,
+    now = Date.now(),
+  ): Promise<boolean> {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const getJob = this.db.prepare(`
+        SELECT owner, status
+        FROM match_pulse_commentary_enrichment_jobs
+        WHERE entry_id = ?
+      `);
+      const owned = claim.entries.every((entry) => {
+        const job = getJob.get(entry.id) as { owner?: string; status?: string } | undefined;
+        return job?.owner === claim.owner && job.status === 'in_progress';
+      });
+      if (!owned) {
+        this.db.exec('ROLLBACK');
+        return false;
+      }
+      const renew = this.db.prepare(`
+        UPDATE match_pulse_commentary_enrichment_jobs
+        SET lease_until = ?
+        WHERE entry_id = ? AND owner = ? AND status = 'in_progress'
+      `);
+      for (const entry of claim.entries) renew.run(now + leaseMs, entry.id, claim.owner);
+      this.db.exec('COMMIT');
+      return true;
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;

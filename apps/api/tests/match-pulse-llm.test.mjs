@@ -352,7 +352,7 @@ test('commentary validator requires lifecycle meaning for every narrated cue fam
   }
 });
 
-test('major beats get one grounded repair attempt after validation failure', async () => {
+test('major beats reflect once and revise an invalid draft', async () => {
   const major = entry({
     kind: 'goal',
     intensity: 'major',
@@ -396,12 +396,55 @@ test('major beats get one grounded repair attempt after validation failure', asy
     const result = await service.enrichCommentaryEntries(context, [major], []);
 
     assert.equal(requests.length, 2);
+    assert.match(requests[1].messages.at(-1).content, /"reflection":true/);
     assert.match(requests[1].messages.at(-1).content, /validationFailure/);
     assert.equal(result.completed, 1);
     assert.equal(result.failed, 0);
     assert.equal(result.entries[0].commentary, 'Goal for Home! They have the breakthrough.');
     assert.deepEqual(result.entries[0].coveredFrameIds, ['semantic-frame-20']);
-    assert.equal(result.entries[0].enrichmentPromptVersion, 'engine-commentary-v1');
+    assert.equal(result.entries[0].enrichmentPromptVersion, 'engine-commentary-v2-reflection');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('pressure beats reflect a valid draft once before saving the improved line', async () => {
+  const current = entry();
+  const responses = [
+    {
+      entryId: current.id, batchId: current.batchId, projectionGeneration: 4,
+      commentary: 'Home have a corner and an effort.',
+      coveredFrameIds: current.sourceFrameIds,
+    },
+    {
+      entryId: current.id, batchId: current.batchId, projectionGeneration: 4,
+      commentary: 'That spell now brings a corner and an effort for Home.',
+      coveredFrameIds: current.sourceFrameIds,
+    },
+  ];
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(responses.shift()) } }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  try {
+    const service = createMatchPulseEnrichmentService({
+      host: '127.0.0.1', llmBaseUrl: 'https://llm.invalid', llmEnabled: true, llmBatchSize: 4,
+      llmModel: 'test-model', llmTimeoutMs: 1_000, matchPulseStoreDriver: 'sqlite',
+      matchPulseStorePath: 'unused', matchPulseSqlitePath: 'unused', port: 8787,
+      txlineApiToken: 'unused', txlineBaseUrl: 'https://txline.invalid', txlineFinalisationCorrectionMs: 0,
+    });
+    const result = await service.enrichCommentaryEntries(workerContext, [current], []);
+    assert.equal(requests.length, 2);
+    const reflection = JSON.parse(requests[1].messages.at(-1).content);
+    assert.equal(reflection.reflection, true);
+    assert.equal(reflection.validationFailure, undefined);
+    assert.equal(result.entries[0].commentary, 'That spell now brings a corner and an effort for Home.');
+    assert.equal(result.entries[0].enrichmentPromptVersion, 'engine-commentary-v2-reflection');
   } finally {
     globalThis.fetch = originalFetch;
   }

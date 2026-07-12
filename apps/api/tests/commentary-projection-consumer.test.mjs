@@ -407,6 +407,56 @@ test('atomically leases one SQLite enrichment batch to only one worker', async (
   }
 });
 
+test('renews a lease throughout slow two-stage reflection so a second worker cannot reclaim it', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gamecrew-commentary-reflection-lease-'));
+  const path = join(directory, 'commentary.sqlite');
+  const frames = [cornerFrame(1)];
+  const frameStore = {
+    async getCheckpoint() { return { phase: 'first_half', projectionGeneration: 0, stateRevision: 1 }; },
+    async listFramesAfter(_fixtureId, afterRevision) { return frames.filter((item) => item.stateRevision > afterRevision); },
+  };
+  const hub = new SemanticFrameHub(frameStore);
+  let calls = 0;
+  let signalStarted;
+  const started = new Promise((resolve) => { signalStarted = resolve; });
+  const enrichment = {
+    async enrichCommentaryEntries(_context, pending) {
+      calls += 1;
+      signalStarted();
+      await wait(20); // Draft request.
+      await wait(20); // Reflection request; total work exceeds the 15 ms lease.
+      return {
+        entries: pending.map((entry) => ({
+          ...entry, commentary: 'Reflected once.', generation: 'llm', enrichmentStatus: 'complete',
+        })),
+        provider: 'openai-compatible', attempted: pending.length, completed: pending.length, failed: 0,
+      };
+    },
+  };
+  const firstStore = new SqliteMatchPulseCommentaryStore(path);
+  const secondStore = new SqliteMatchPulseCommentaryStore(path);
+  const first = new CommentaryProjectionConsumer(frameStore, hub, firstStore, {
+    enrichment, workerId: 'reflection-worker-a', enrichmentLeaseMs: 15, enrichmentRetryBaseMs: 5,
+  });
+  const second = new CommentaryProjectionConsumer(frameStore, hub, secondStore, {
+    enrichment, workerId: 'reflection-worker-b', enrichmentLeaseMs: 15, enrichmentRetryBaseMs: 5,
+  });
+  try {
+    await first.ensureFixture(fixtureId, teams);
+    await started;
+    await wait(20);
+    await second.ensureFixture(fixtureId, teams);
+    await wait(50);
+    assert.equal(calls, 1);
+    assert.equal((await firstStore.listEntries(fixtureId))[0].commentary, 'Reflected once.');
+  } finally {
+    await Promise.all([first.close(), second.close()]);
+    firstStore.close();
+    secondStore.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('persists retry backoff so another consumer resumes after restart', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'gamecrew-commentary-retry-'));
   const path = join(directory, 'commentary.sqlite');

@@ -60,6 +60,7 @@ interface MatchPulseCommentaryLlmJson {
 
 type CommentaryImportance = 'routine' | 'developing' | 'major';
 const COMMENTARY_PROMPT_VERSION = 'engine-commentary-v1';
+const COMMENTARY_REFLECTION_PROMPT_VERSION = 'engine-commentary-v2-reflection';
 
 class CommentaryValidationError extends Error {
   override name = 'CommentaryValidationError';
@@ -135,23 +136,36 @@ class OpenAiCompatibleMatchPulseEnrichmentService implements MatchPulseEnrichmen
       try {
         const prompt = buildCommentaryEnrichmentPrompt(context, entry, previousContext);
         const content = await this.createChatCompletion(prompt);
-        const llmJson = parseCommentaryLlmJson(content);
-        let enriched: MatchPulseCommentaryEntry;
+        let draft: MatchPulseCommentaryEntry | undefined;
+        let draftFailure: Error | undefined;
         try {
-          enriched = applyCommentaryLlmJson(context, entry, llmJson, previousContext);
+          draft = applyCommentaryLlmJson(
+            context,
+            entry,
+            parseCommentaryLlmJson(content),
+            previousContext,
+          );
         } catch (error) {
-          if (!(error instanceof CommentaryValidationError) || getCommentaryImportance(entry) !== 'major') {
-            throw error;
-          }
+          draftFailure = error instanceof Error ? error : new Error(String(error));
+        }
 
-          const repairPrompt = buildCommentaryRepairPrompt(prompt, content, error.message);
-          const repairedContent = await this.createChatCompletion(repairPrompt);
+        let enriched = draft;
+        if (shouldReflectCommentary(entry)) {
+          const reflectionPrompt = buildCommentaryReflectionPrompt(
+            prompt,
+            content,
+            draftFailure?.message,
+          );
+          const reflectedContent = await this.createChatCompletion(reflectionPrompt);
           enriched = applyCommentaryLlmJson(
             context,
             entry,
-            parseCommentaryLlmJson(repairedContent),
+            parseCommentaryLlmJson(reflectedContent),
             previousContext,
+            COMMENTARY_REFLECTION_PROMPT_VERSION,
           );
+        } else if (!enriched) {
+          throw draftFailure ?? new CommentaryValidationError('Commentary draft could not be validated.');
         }
         enrichedEntries.push(enriched);
         previousContext.push(enriched);
@@ -360,23 +374,35 @@ export function buildCommentaryEnrichmentPrompt(
   ];
 }
 
-function buildCommentaryRepairPrompt(
+export function buildCommentaryReflectionPrompt(
   original: readonly { role: 'system' | 'user'; content: string }[],
-  rejectedContent: string,
-  reason: string,
+  draftContent: string,
+  validationFailure?: string,
 ): readonly { role: 'system' | 'user'; content: string }[] {
   return [
     ...original,
     {
       role: 'user',
       content: JSON.stringify({
-        repair: true,
-        validationFailure: reason,
-        rejectedOutput: rejectedContent,
-        instruction: 'Return one corrected JSON object. Use only the originally supplied facts and echo the contract metadata exactly.',
+        reflection: true,
+        draftOutput: draftContent,
+        ...(validationFailure ? { validationFailure } : {}),
+        checklist: [
+          'Cover every originally supplied fact and lifecycle meaning.',
+          'Use only grounded teams, players, scores, actions, and continuity.',
+          'Sound like natural live football commentary rather than an event log.',
+          'Connect naturally with the supplied broadcast memory without repeating recent phrasing.',
+          'Match the beat importance and remain concise.',
+        ],
+        instruction: 'Critique the draft silently, then return only one improved final JSON object. Echo the original contract metadata and requiredCoveredFrameIds exactly.',
       }),
     },
   ];
+}
+
+function shouldReflectCommentary(entry: MatchPulseCommentaryEntry): boolean {
+  const importance = getCommentaryImportance(entry);
+  return importance === 'major' || importance === 'developing';
 }
 
 function compareSourceEventsBySeq(
@@ -485,6 +511,7 @@ function applyCommentaryLlmJson(
   entry: MatchPulseCommentaryEntry,
   llmJson: MatchPulseCommentaryLlmJson,
   previousEntries: readonly MatchPulseCommentaryEntry[],
+  promptVersion = COMMENTARY_PROMPT_VERSION,
 ): MatchPulseCommentaryEntry {
   validateCommentaryLlmJson(context, entry, llmJson, previousEntries);
 
@@ -496,7 +523,7 @@ function applyCommentaryLlmJson(
     enrichmentStatus: 'complete',
     fallbackCommentary: entry.fallbackCommentary,
     coveredFrameIds: llmJson.coveredFrameIds,
-    enrichmentPromptVersion: COMMENTARY_PROMPT_VERSION,
+    enrichmentPromptVersion: promptVersion,
   };
 }
 

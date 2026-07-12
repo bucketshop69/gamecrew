@@ -125,9 +125,17 @@ validation-only repair attempt.
 SQLite workers atomically claim pending beats using an owner, lease, attempt
 count, and retry timestamp. Provider failures use persisted exponential retry;
 validation failures are terminal. Expired leases are recoverable after a crash,
-and two workers cannot enrich the same active claim. Corrections replace the old
-commentary generation atomically, stale in-flight LLM responses are discarded,
-and burst frame delivery is coalesced into a rebuild at the latest checkpoint.
+and two workers cannot enrich the same active claim. A worker renews its lease
+while provider calls and reflection are running, then verifies ownership again
+before committing the result. Corrections replace the old commentary generation
+atomically, stale in-flight LLM responses are discarded, and burst frame
+delivery is coalesced into a rebuild at the latest checkpoint.
+
+Routine beats use one grounded generation request. Pressure and major beats use
+one additional grounded reflection request: the model silently critiques its
+draft for coverage, continuity, repetition, importance, and natural broadcast
+voice, then returns revised JSON. The revised result still passes the same
+deterministic truth validator before it can replace the saved fallback.
 ```
 
 Runtime note:

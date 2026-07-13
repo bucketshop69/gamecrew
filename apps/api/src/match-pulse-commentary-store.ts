@@ -354,6 +354,15 @@ export class FileMatchPulseCommentaryStore implements MatchPulseCommentaryStore 
         this.projectionCursors.set(cursor.fixtureId, cursor);
       }
       for (const job of payload.enrichmentJobs ?? []) this.enrichmentJobs.set(job.entryId, job);
+      let repairedTerminalEntry = false;
+      for (const job of this.enrichmentJobs.values()) {
+        const entry = this.entriesById.get(job.entryId);
+        if (job.status === 'terminal' && entry?.enrichmentStatus === 'pending') {
+          this.entriesById.set(entry.id, { ...entry, enrichmentStatus: 'failed' });
+          repairedTerminalEntry = true;
+        }
+      }
+      if (repairedTerminalEntry) await this.persist();
     } catch {
       // Missing or invalid local store should not block live fallback generation.
     }
@@ -455,6 +464,18 @@ export class SqliteMatchPulseCommentaryStore implements MatchPulseCommentaryStor
 
       CREATE INDEX IF NOT EXISTS idx_commentary_enrichment_claim
         ON match_pulse_commentary_enrichment_jobs (fixture_id, status, next_attempt_at, lease_until);
+    `);
+    this.db.exec(`
+      UPDATE match_pulse_commentary_entries
+      SET enrichment_status = 'failed',
+          entry_json = json_set(entry_json, '$.enrichmentStatus', 'failed'),
+          updated_at = datetime('now')
+      WHERE enrichment_status = 'pending'
+        AND id IN (
+          SELECT entry_id
+          FROM match_pulse_commentary_enrichment_jobs
+          WHERE status = 'terminal'
+        );
     `);
   }
 

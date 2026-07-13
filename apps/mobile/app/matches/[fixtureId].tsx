@@ -1,6 +1,7 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { useGameCrewMatches } from '../../src/hooks/use-gamecrew-matches';
+import { resolveMatchDetail } from '../../src/screens/match-detail-route-state';
 import { MatchDetailScreen, MatchDetailStateScreen } from '../../src/screens/gamecrew-screens';
 
 export default function MatchDetailRoute() {
@@ -8,9 +9,7 @@ export default function MatchDetailRoute() {
   const params = useLocalSearchParams<{ fixtureId?: string | string[] }>();
   const fixtureId = Array.isArray(params.fixtureId) ? params.fixtureId[0] : params.fixtureId;
   const { loadState, reload } = useGameCrewMatches();
-  const match = fixtureId
-    ? loadState.matches.find((candidate) => candidate.txline.fixtureId === fixtureId)
-    : undefined;
+  const resolution = resolveMatchDetail(loadState, fixtureId);
 
   const goBack = () => {
     if (router.canGoBack()) {
@@ -21,11 +20,11 @@ export default function MatchDetailRoute() {
     router.replace('/');
   };
 
-  if (match) {
-    return <MatchDetailScreen match={match} onBack={goBack} />;
+  if (resolution.status === 'ready') {
+    return <MatchDetailScreen match={resolution.match} onBack={goBack} />;
   }
 
-  if (loadState.status === 'error') {
+  if (resolution.status === 'error') {
     return (
       <MatchDetailStateScreen
         actionLabel="Retry"
@@ -34,6 +33,19 @@ export default function MatchDetailRoute() {
         onAction={reload}
         onBack={goBack}
         title="Could not load match."
+      />
+    );
+  }
+
+  if (resolution.status === 'not_found') {
+    return (
+      <MatchDetailStateScreen
+        actionLabel="Refresh"
+        body="This fixture is not available in GameCrew's saved matches."
+        eyebrow="Match unavailable"
+        onAction={reload}
+        onBack={goBack}
+        title="Match not found."
       />
     );
   }

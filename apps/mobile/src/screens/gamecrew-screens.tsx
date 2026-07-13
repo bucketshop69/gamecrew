@@ -394,8 +394,12 @@ export function MatchDetailScreen({
           />
         ) : pulseItems.length === 0 ? (
           <PulseStatePanel
-            title="No match updates yet"
-            body="There is no Match Pulse story available for this fixture yet."
+            title={match.status === 'live' ? 'No match updates yet' : 'No saved Match Pulse yet'}
+            body={match.status === 'live'
+              ? 'The match story will appear here as moments are confirmed.'
+              : 'Refresh to check whether this completed match has been added to the archive.'}
+            actionLabel="Refresh"
+            onAction={reload}
           />
         ) : (
           <>

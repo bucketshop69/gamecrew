@@ -1,10 +1,8 @@
 # Project-scoped defaults for the main Codex task and inherited sub-agents.
-model = "gpt-5.6-luna"
-model_reasoning_effort = "high"
 
 [agents]
 # Root orchestrator plus at most three concurrent sub-agents.
-max_threads = 4
+max_threads = 3
 # Keep orchestration centralized in the root task.
 max_depth = 1
 interrupt_message = true

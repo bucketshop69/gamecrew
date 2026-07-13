@@ -1,4 +1,3 @@
-import type { MatchPulseCommentaryEntry } from '@gamecrew/core';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
@@ -6,24 +5,17 @@ import {
   isAbortError,
   matchRefreshIntervalMs,
 } from '../api/gamecrew';
+import { getVisiblePulseLoadState, type PulseLoadState } from './match-pulse-state';
 
-interface PulseData {
-  entries: readonly MatchPulseCommentaryEntry[];
-  projectionGeneration?: number;
-}
-
-export type PulseLoadState =
-  | ({ status: 'loading' } & PulseData)
-  | ({ status: 'ready' } & PulseData)
-  | ({ status: 'error'; message: string } & PulseData);
+export type { PulseLoadState } from './match-pulse-state';
 
 export function useMatchPulse(fixtureId: string, isLive: boolean) {
   const [pulseLoadState, setPulseLoadState] = useState<PulseLoadState>({
     status: 'loading',
     entries: [],
+    fixtureId,
   });
   const activeRequestRef = useRef<AbortController | null>(null);
-  const activeFixtureIdRef = useRef(fixtureId);
   const mountedRef = useRef(false);
 
   const loadPulse = useCallback(
@@ -34,10 +26,17 @@ export function useMatchPulse(fixtureId: string, isLive: boolean) {
       activeRequestRef.current = controller;
 
       setPulseLoadState((current) =>
-        showLoading && current.entries.length === 0
+        current.fixtureId !== fixtureId
+          ? {
+              status: 'loading',
+              entries: [],
+              fixtureId,
+            }
+          : showLoading && current.entries.length === 0
           ? {
               status: 'loading',
               entries: current.entries,
+              fixtureId,
               projectionGeneration: current.projectionGeneration,
             }
           : current,
@@ -49,6 +48,7 @@ export function useMatchPulse(fixtureId: string, isLive: boolean) {
             setPulseLoadState({
               status: 'ready',
               entries: result.entries,
+              fixtureId,
               projectionGeneration: result.projectionGeneration,
             });
           }
@@ -61,6 +61,7 @@ export function useMatchPulse(fixtureId: string, isLive: boolean) {
           setPulseLoadState((current) => ({
             status: 'error',
             entries: current.entries,
+            fixtureId,
             projectionGeneration: current.projectionGeneration,
             message: error instanceof Error ? error.message : 'Match Pulse is unavailable.',
           }));
@@ -76,11 +77,6 @@ export function useMatchPulse(fixtureId: string, isLive: boolean) {
 
   useEffect(() => {
     mountedRef.current = true;
-
-    if (activeFixtureIdRef.current !== fixtureId) {
-      activeFixtureIdRef.current = fixtureId;
-      setPulseLoadState({ status: 'loading', entries: [] });
-    }
 
     loadPulse(true);
 
@@ -98,5 +94,7 @@ export function useMatchPulse(fixtureId: string, isLive: boolean) {
     };
   }, [isLive, loadPulse]);
 
-  return { pulseLoadState, reload: () => loadPulse(true) };
+  const visiblePulseLoadState = getVisiblePulseLoadState(pulseLoadState, fixtureId);
+
+  return { pulseLoadState: visiblePulseLoadState, reload: () => loadPulse(true) };
 }

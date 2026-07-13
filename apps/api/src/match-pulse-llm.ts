@@ -76,8 +76,8 @@ interface MatchPulseCommentaryLlmJson {
 }
 
 type CommentaryImportance = 'routine' | 'developing' | 'major';
-const COMMENTARY_PROMPT_VERSION = 'engine-commentary-v1';
-const COMMENTARY_REFLECTION_PROMPT_VERSION = 'engine-commentary-v2-reflection';
+export const COMMENTARY_PROMPT_VERSION = 'engine-commentary-v1';
+export const COMMENTARY_REFLECTION_PROMPT_VERSION = 'engine-commentary-v2-reflection';
 
 class CommentaryValidationError extends Error {
   override name = 'CommentaryValidationError';
@@ -436,7 +436,7 @@ export function buildCommentaryEnrichmentPrompt(
         'The currentBeat and its mustCoverFacts are the only authority for what happened now. Broadcast memory is continuity context, not evidence for a new current fact.',
         'Cover every mustCoverFact in its supplied seq order. coveredFrameIds is an auditable claim of which supplied facts the line covers, not permission to add facts.',
         'Sparse event data is not full play-by-play. Do not invent causal links, player names, formations, injuries, exact locations, possession, chance quality, or event outcomes.',
-        'Do not invent crowd, stadium, celebration, referee-action, score-state, or atmosphere details. Mention a lead or score only when currentBeat.score supplies it.',
+        'Do not invent crowd, stadium, celebration, referee-action, score-state, or atmosphere details. Do not describe what can be heard or say that the place lifts or erupts. Mention a lead or score only when currentBeat.score supplies it.',
         'Do not mention the box, goalkeeper, save, miss, block, clearance, delivery, cross, header, goal, card, penalty, VAR, or score change unless that fact is explicitly supplied for the current entry.',
         'In particular, when current events contain only shots, corners, free kicks, or throw-ins, do not use goal, goalward, goalmouth, net, scorer, opener, breakthrough, or scoring language.',
         'Never expose confidence, verification, source, validation, action-label, or schema terminology to the supporter.',
@@ -701,11 +701,27 @@ export function validateCommentaryLlmJson(
     ['right wing', false],
     ['penalty area', false],
     ['six-yard box', false],
+    ['own half', false],
+    ['opposition half', false],
+    ['own third', false],
+    ['opposition third', false],
+    ['final third', false],
+    ['attacking third', false],
+    ['defensive third', false],
+    ['byline', false],
+    ['pushing high', false],
+    ['pressing high', false],
+    ['high up the pitch', false],
     ['near post', false],
     ['far post', false],
     ['centre circle', false],
   ] as const) {
     assertNoUnsupportedClaim(combined, phrase, allowed);
+  }
+  for (const teamName of [context.homeTeam.name, context.awayTeam.name]) {
+    if (new RegExp(`\\b${escapeRegExp(teamName)} (?:half|third)\\b`, 'i').test(combined)) {
+      throw new CommentaryValidationError('Commentary made an unsupported team-zone location claim.');
+    }
   }
   assertNoUnsupportedClaim(
     combined,
@@ -723,7 +739,7 @@ export function validateCommentaryLlmJson(
   if (!entry.scoreAtMoment && /\b(?:leads?|leading|trails?|trailing|level|ahead|behind)\b/i.test(combined)) {
     throw new CommentaryValidationError('Commentary cannot state a score relationship without grounded score context.');
   }
-  if (/\b(?:crowd|fans?|stadium|supporters?)\b/i.test(combined)) {
+  if (/\b(?:crowd|fans?|stadium|supporters?|hear the place|place (?:lifts?|erupts?))\b/i.test(combined)) {
     throw new CommentaryValidationError('Commentary cannot invent crowd or stadium atmosphere.');
   }
   if (/\b(?:puts?|raises?) (?:the )?whistle\b|\bwhistle to (?:his|her|their) lips\b|\b(?:the )?referee blows?\b/i.test(combined)) {
@@ -845,10 +861,13 @@ function assertClosedWorldMaterialActions(
   entry: MatchPulseCommentaryEntry,
 ): void {
   for (const claim of MATERIAL_ACTIONS) {
+    const claimText = claim.label === 'shot' && sourceActions.has('goal')
+      ? text.replace(/\bstrikes? first\b/gi, '')
+      : text;
     const contextualGoal = claim.label === 'goal' && getRestartContext(entry) === 'after_goal';
     const contextualAddedTime = claim.label === 'additional time' && isClockGroundedStoppageTime(entry);
     if (
-      claim.pattern.test(text)
+      claim.pattern.test(claimText)
       && !contextualGoal
       && !contextualAddedTime
       && !claim.actions.some((action) => sourceActions.has(action))
@@ -1024,31 +1043,46 @@ function assertNoInventedPlayerName(
     'a', 'additional', 'after', 'an', 'and', 'another', 'away', 'corner', 'deep', 'first', 'free',
     'both', 'full', 'goal', 'half', 'halftime', 'home', 'it', 'moments', 'now', 'one',
     'play', 'pressure', 'second', 'still', 'straight', 'substitution', 'that', 'the', 'these',
-    'they', 'this', 'those', 'var', 'with',
+    'they', 'this', 'those', 'there', 'var', 'with',
   ]);
   const capitalized = [...text.matchAll(/\b\p{Lu}[\p{L}'’.-]*\b/gu)];
   const invented = capitalized.find((match) => {
-    const words = normalizeForComparison(match[0]).split(' ').filter(Boolean);
+    const preceding = text.slice(0, match.index ?? 0);
+    const sentenceInitial = preceding.trim().length === 0 || /[.!?]\s*$/.test(preceding);
+    if (sentenceInitial) return false;
+    const withoutPossessive = match[0].replace(/['’]s$/iu, '');
+    const words = normalizeForComparison(withoutPossessive).split(' ').filter(Boolean);
     return words.some((word) => !allowed.has(word) && !common.has(word));
   })?.[0];
   if (invented) {
     throw new CommentaryValidationError(`Commentary introduced an ungrounded proper name: ${invented}.`);
   }
 
-  const groundedPlayers = (entry.groundedFacts ?? [])
+  const groundedPlayerNames = (entry.groundedFacts ?? [])
     .map((fact) => fact.playerName)
-    .filter((value): value is string => Boolean(value))
-    .map(normalizeForComparison);
+    .filter((value): value is string => Boolean(value));
+  const groundedPlayers = groundedPlayerNames.map(normalizeForComparison);
   const attribution = normalizeForComparison(text).match(
     /\b(?:scored by|goal from|effort from|shot from|corner by|card for)\s+([a-z][a-z0-9' -]{1,50})/,
   )?.[1];
   if (attribution && !groundedPlayers.some((player) => attribution.startsWith(player))) {
     throw new CommentaryValidationError('Commentary attributed an action to an ungrounded player.');
   }
-  const subject = normalizeForComparison(text).match(
-    /^([a-z][a-z' -]{1,50}?)\s+(?:takes|scores|shoots|heads|crosses|wins|fires|strikes|converts|assists)\b/,
-  )?.[1];
-  if (subject && !groundedPlayers.some((player) => subject === player)) {
+  const subject = text
+    .split(/(?:^|[.!?]\s+)/)
+    .map(normalizeForComparison)
+    .map((sentence) => sentence.match(
+      /^([a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,3})\s+(?:takes|scores|shoots|heads|crosses|wins|fires|strikes|converts|assists)\b/,
+    )?.[1])
+    .find((value): value is string => Boolean(value));
+  const groundedTeams = [context.homeTeam.name, context.awayTeam.name, entry.team?.name, entry.opponent?.name]
+    .filter((value): value is string => Boolean(value))
+    .map(normalizeForComparison);
+  if (
+    subject
+    && !groundedTeams.includes(subject)
+    && !groundedPlayerNames.some((player) => hasGroundedPlayerReference(subject, player))
+  ) {
     throw new CommentaryValidationError('Commentary used an ungrounded player as the actor.');
   }
 }

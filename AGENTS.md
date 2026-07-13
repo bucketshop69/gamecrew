@@ -18,6 +18,15 @@
 - Sub-agents should return concise findings and verification summaries instead of large logs. The main agent must inspect important diffs and remains accountable for the integrated result.
 - Use follow-up audits after integration when changes cross subsystem boundaries. Read-only reviewers must not modify files.
 
+## Project custom developers
+
+- When delegation is warranted, use the project-scoped custom agents in `.codex/agents/` instead of built-in generic agents: `maya`, `leo`, and `nora`.
+- Use `maya` first for small, bounded implementation work and focused tests.
+- Use `leo` for difficult architecture, persistence, correction, or cross-subsystem integration work.
+- Use `nora` for end-to-end behavior, browser/client integration, regression coverage, and read-only final audits.
+- Stay lean: do not spawn all three automatically. Use only the smallest set that provides useful independent work, and parallelize only non-overlapping scopes.
+- If more than one is used, give each exact file ownership and reuse the parent's verified context packet. Do not substitute built-in `default`, `worker`, or `explorer` agents unless these profiles are unavailable or the user explicitly requests another agent.
+
 ## Collaboration with the user
 
 - Work in explicit phases. Brief the user in plain language before starting a new phase and provide a concise handoff after completion.
@@ -43,4 +52,4 @@ pnpm --filter @gamecrew/api commentary:smoke -- 18179759
 git diff --check
 ```
 
-The project-scoped Codex configuration pins the main task and inherited sub-agents to GPT-5.6 Luna with high reasoning. Use a different model or effort only when the user explicitly requests it.
+The custom developer profiles carry their own user-selected model and reasoning settings. Do not override them unless the user explicitly requests a different model or effort.

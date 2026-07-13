@@ -164,6 +164,22 @@ test('commentary validator rejects invented players, exact locations, and unsupp
     /unsupported left flank claim/,
   );
   assert.throws(
+    () => validateCommentaryLlmJson(workerContext, current, candidate('Home pin Away in their own half before winning a corner and having an effort.')),
+    /unsupported own half claim/,
+  );
+  assert.throws(
+    () => validateCommentaryLlmJson(workerContext, current, candidate('Home move into the Away half before winning a corner and having an effort.')),
+    /unsupported team-zone location claim/,
+  );
+  assert.throws(
+    () => validateCommentaryLlmJson(workerContext, current, candidate('Home pin Away in their own third before winning a corner and having an effort.')),
+    /unsupported own third claim/,
+  );
+  assert.throws(
+    () => validateCommentaryLlmJson(workerContext, current, candidate('Home are pushing high before winning a corner and having an effort.')),
+    /unsupported pushing high claim/,
+  );
+  assert.throws(
     () => validateCommentaryLlmJson(workerContext, current, candidate('Another Home corner is followed by an effort.')),
     /continuity without a grounded earlier action/,
   );
@@ -177,7 +193,7 @@ test('commentary validator rejects invented players, exact locations, and unsupp
   );
   assert.throws(
     () => validateCommentaryLlmJson(workerContext, current, candidate('Ronaldo takes the corner before Home have an effort.')),
-    /ungrounded proper name/,
+    /ungrounded (?:proper name|player as the actor)/,
   );
   assert.throws(
     () => validateCommentaryLlmJson(workerContext, current, candidate('ronaldo takes the corner before Home have an effort.')),
@@ -192,6 +208,12 @@ test('commentary validator rejects invented players, exact locations, and unsupp
   assert.doesNotThrow(
     () => validateCommentaryLlmJson(workerContext, current, candidate('After that spell, Home take a corner before an effort.')),
   );
+  assert.doesNotThrow(
+    () => validateCommentaryLlmJson(workerContext, current, {
+      ...candidate('Home take a corner before an effort.'),
+      voiceLine: 'There is more pressure from Home.',
+    }),
+  );
   assert.throws(
     () => validateCommentaryLlmJson(workerContext, current, candidate('El Tri take a corner before an effort.')),
     /ungrounded proper name/,
@@ -204,6 +226,27 @@ test('commentary validator rejects invented players, exact locations, and unsupp
     () => validateCommentaryLlmJson(workerContext, current, candidate('Home take a corner before an effort off target.')),
     /unsupported shot outcome claim/,
   );
+});
+
+test('commentary validator accepts sentence starters and grounded team possessives', () => {
+  const current = entry();
+  const candidate = (commentary) => ({
+    entryId: current.id,
+    batchId: current.batchId,
+    projectionGeneration: 4,
+    commentary,
+    coveredFrameIds: ['semantic-frame-20', 'semantic-frame-21'],
+  });
+  assert.doesNotThrow(() => validateCommentaryLlmJson(
+    workerContext,
+    current,
+    candidate("Five minutes in, Home's corner leads to an effort."),
+  ));
+  assert.doesNotThrow(() => validateCommentaryLlmJson(
+    workerContext,
+    current,
+    candidate("Into the area, Home's corner leads to an effort."),
+  ));
 });
 
 test('commentary validator preserves grounded counts and major-event details', () => {
@@ -262,6 +305,16 @@ test('commentary validator preserves grounded counts and major-event details', (
   assert.throws(() => validateCommentaryLlmJson(workerContext, goal, goalCandidate('Goal for Home! It is 2-0.')), /scorer name/);
   assert.throws(() => validateCommentaryLlmJson(workerContext, goal, goalCandidate('Goal for Home, scored by Ana Silva.')), /grounded score/);
   assert.doesNotThrow(() => validateCommentaryLlmJson(workerContext, goal, goalCandidate('Goal for Home, scored by Ana Silva. It is 2-0.')));
+  assert.doesNotThrow(() => validateCommentaryLlmJson(
+    workerContext,
+    goal,
+    goalCandidate('Home strike first. Ana Silva with the goal, and they lead Away 2-0.'),
+  ));
+  assert.doesNotThrow(() => validateCommentaryLlmJson(
+    workerContext,
+    goal,
+    goalCandidate('Home have the lead! Ana Silva scores to make it 2-0.'),
+  ));
   assert.doesNotThrow(() => validateCommentaryLlmJson(workerContext, goal, {
     ...goalCandidate('Goal for Home, scored by Ana Silva. It is 2-0.'),
     voiceLine: 'Ana Silva scores for Home. It is 2-0.',
@@ -289,6 +342,14 @@ test('commentary validator preserves grounded counts and major-event details', (
   );
   assert.throws(
     () => validateCommentaryLlmJson(workerContext, goal, goalCandidate('Goal for Home, scored by Ana Silva. It is 2-0 and the stadium erupts.')),
+    /crowd or stadium atmosphere/,
+  );
+  assert.throws(
+    () => validateCommentaryLlmJson(
+      workerContext,
+      goal,
+      goalCandidate('Home have the lead! Ana Silva scores to make it 2-0, and you can hear the place lift.'),
+    ),
     /crowd or stadium atmosphere/,
   );
 

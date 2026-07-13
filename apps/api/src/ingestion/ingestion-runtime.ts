@@ -10,6 +10,10 @@ import {
   type TxlineScore,
 } from '@gamecrew/core';
 import type { ApiConfig } from '../config.js';
+import {
+  MatchPulseMaterializationStore,
+  isMaterializationAvailable,
+} from '../match-pulse-materialization-store.js';
 import { createMatchPulseCommentaryStore } from '../match-pulse-commentary-store.js';
 import { createMatchPulseEnrichmentService } from '../match-pulse-llm.js';
 import { CommentaryProjectionConsumer } from './commentary-projection-consumer.js';
@@ -34,8 +38,12 @@ export function createIngestionRuntime(config: ApiConfig) {
     filePath: config.matchPulseStorePath,
     sqlitePath: config.matchPulseSqlitePath,
   });
+  const materializations = new MatchPulseMaterializationStore(config.matchPulseSqlitePath);
+  const enrichmentReports = new Map<string, MatchPulseEnrichmentReport>();
   const commentary = new CommentaryProjectionConsumer(store, hub, commentaryStore, {
-    enrichment: createMatchPulseEnrichmentService(config),
+    enrichment: config.llmEnabled && config.llmBaseUrl
+      ? createMatchPulseEnrichmentService(config)
+      : undefined,
     enrichmentBatchSize: config.llmBatchSize,
     onEnrichmentError(error, fixtureId) {
       console.error(JSON.stringify({
@@ -43,6 +51,31 @@ export function createIngestionRuntime(config: ApiConfig) {
         fixtureId,
         reason: error instanceof Error ? error.message : String(error),
       }));
+    },
+    onEnrichmentResult(result, fixtureId) {
+      const current = enrichmentReports.get(fixtureId) ?? emptyEnrichmentReport();
+      const stages = result.traces?.flatMap((trace) => trace.stages) ?? [];
+      enrichmentReports.set(fixtureId, {
+        attempted: current.attempted + result.attempted,
+        completed: current.completed + result.completed,
+        failed: current.failed + result.failed,
+        providerCalls: current.providerCalls + stages.length,
+        promptTokens: sumDefined(current.promptTokens, stages.map((stage) => stage.usage?.promptTokens)),
+        completionTokens: sumDefined(
+          current.completionTokens,
+          stages.map((stage) => stage.usage?.completionTokens),
+        ),
+        totalTokens: sumDefined(current.totalTokens, stages.map((stage) => stage.usage?.totalTokens)),
+      });
+      void materializations.recordUsage(fixtureId, {
+        attempted: result.attempted,
+        completed: result.completed,
+        failed: result.failed,
+        providerCalls: stages.length,
+        promptTokens: sumDefined(undefined, stages.map((stage) => stage.usage?.promptTokens)),
+        completionTokens: sumDefined(undefined, stages.map((stage) => stage.usage?.completionTokens)),
+        totalTokens: sumDefined(undefined, stages.map((stage) => stage.usage?.totalTokens)),
+      });
     },
   });
   const supervisor = new IngestionSupervisor(async (fixtureId) => {
@@ -74,14 +107,13 @@ export function createIngestionRuntime(config: ApiConfig) {
         finalisationCorrectionWindowMs: correctionWindowMs,
       });
     }
-    const [fixtures, snapshot] = await Promise.all([
-      feed.fetchFixtures(),
+    const [snapshot, historical] = await Promise.all([
       feed.fetchSnapshot(fixtureId),
+      feed.fetchHistorical(fixtureId),
     ]);
-    const fixture = fixtures.find((candidate) => String(candidate.FixtureId) === fixtureId)
-      ?? reconstructFixture(fixtureId, snapshot);
-    if (!fixture) throw new Error(`TxLINE fixture ${fixtureId} could not be reconstructed.`);
-    const context = buildMatchEngineContext(fixture, snapshot);
+    const sourceScores = [...historical, ...snapshot];
+    const fixture = await findFixtureMetadata(feed, fixtureId, sourceScores);
+    const context = buildMatchEngineContext(fixture, historical.length > 0 ? historical : snapshot);
     await persistFixtureContext(store, context);
     await commentary.ensureFixture(fixtureId, context.participants);
     return new FixtureIngestionSession({
@@ -93,12 +125,22 @@ export function createIngestionRuntime(config: ApiConfig) {
   return {
     ensureFixture: (fixtureId: string) => supervisor.ensureFixture(fixtureId),
     getCheckpoint: (fixtureId: string) => store.getCheckpoint(fixtureId),
+    getIngestionCursor: (fixtureId: string) => store.getCursor(fixtureId),
     listFramesAfter: (fixtureId: string, revision: number) => store.listFramesAfter(fixtureId, revision),
     listCommentaryEntries: (fixtureId: string) => commentaryStore.listEntries(fixtureId),
     getCommentaryProjection: (fixtureId: string) => commentaryStore.getProjectionSnapshot(fixtureId),
+    getEnrichmentReport: (fixtureId: string) => enrichmentReports.get(fixtureId) ?? emptyEnrichmentReport(),
     async listMatches(query: { filter?: GameCrewMatchFilter; limit?: number } = {}) {
-      const fixtureIds = await store.listFixtureIds();
+      const [fixtureIds, materializationSnapshots] = await Promise.all([
+        store.listFixtureIds(),
+        materializations.list(),
+      ]);
+      const materializationByFixture = new Map(
+        materializationSnapshots.map((snapshot) => [snapshot.fixtureId, snapshot]),
+      );
       const matches = await Promise.all(fixtureIds.map(async (fixtureId) => {
+        const materialization = materializationByFixture.get(fixtureId);
+        if (!isMaterializationAvailable(materialization?.status)) return undefined;
         const [checkpoint, fixtureContext, raw] = await Promise.all([
           store.getCheckpoint(fixtureId),
           store.getFixtureContext(fixtureId),
@@ -129,6 +171,8 @@ export function createIngestionRuntime(config: ApiConfig) {
     async restore() {
       const fixtureIds = await store.listFixtureIds();
       await Promise.allSettled(fixtureIds.map(async (fixtureId) => {
+        const materialization = await materializations.get(fixtureId);
+        if (!isMaterializationAvailable(materialization?.status)) return;
         const local = await store.listRawCandidates(fixtureId);
         const storedFixtureContext = await store.getFixtureContext(fixtureId);
         const localScores = local.flatMap(({ payloadJson }) => {
@@ -166,9 +210,30 @@ export function createIngestionRuntime(config: ApiConfig) {
       await commentary.close();
       const closeableCommentaryStore = commentaryStore as typeof commentaryStore & { close?: () => void };
       closeableCommentaryStore.close?.();
+      materializations.close();
       store.close();
     },
   };
+}
+
+export interface MatchPulseEnrichmentReport {
+  attempted: number;
+  completed: number;
+  failed: number;
+  providerCalls: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+}
+
+function emptyEnrichmentReport(): MatchPulseEnrichmentReport {
+  return { attempted: 0, completed: 0, failed: 0, providerCalls: 0 };
+}
+
+function sumDefined(current: number | undefined, values: readonly (number | undefined)[]): number | undefined {
+  const defined = values.filter((value): value is number => value !== undefined);
+  if (current === undefined && defined.length === 0) return undefined;
+  return (current ?? 0) + defined.reduce((total, value) => total + value, 0);
 }
 
 export type IngestionRuntime = ReturnType<typeof createIngestionRuntime>;
@@ -270,7 +335,7 @@ function reconstructFixture(fixtureId: string, scores: readonly TxlineScore[]): 
   };
 }
 
-async function findFixtureMetadata(
+export async function findFixtureMetadata(
   feed: TxlineFeedSource,
   fixtureId: string,
   scores: readonly TxlineScore[],

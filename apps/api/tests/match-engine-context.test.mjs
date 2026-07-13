@@ -38,3 +38,34 @@ test('derives a safe mid-match score/phase baseline and lineup player index from
   assert.equal(context.players['123'].starter, true);
   assert.equal(context.players['123'].participant, 1);
 });
+
+test('recovers only synthetic historical team names from grounded lineup metadata', () => {
+  const placeholderFixture = {
+    ...fixture,
+    Participant1Id: 1999,
+    Participant1: 'Participant 1999',
+    Participant2Id: 2530,
+    Participant2: 'Participant 2530',
+  };
+  const lineup = [{
+    FixtureId: 99,
+    Seq: 14,
+    Action: 'lineups',
+    Lineups: [
+      { normativeId: 1999, preferredName: 'France', lineups: [] },
+      { normativeId: 2530, preferredName: 'Morocco', lineups: [] },
+    ],
+  }];
+  assert.deepEqual(
+    buildMatchEngineContext(placeholderFixture, lineup).participants.map((team) => team.name),
+    ['France', 'Morocco'],
+  );
+  assert.deepEqual(
+    buildMatchEngineContext({
+      ...placeholderFixture,
+      Participant1: 'France Senior',
+      Participant2: 'Morocco Senior',
+    }, lineup).participants.map((team) => team.name),
+    ['France Senior', 'Morocco Senior'],
+  );
+});

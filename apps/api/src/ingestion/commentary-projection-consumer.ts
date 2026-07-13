@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto';
 import type { MatchPulseCommentaryStore } from '../match-pulse-commentary-store.js';
 import type {
   MatchPulseCommentaryGroundingContext,
+  MatchPulseCommentaryEnrichmentResult,
   MatchPulseEnrichmentService,
 } from '../match-pulse-llm.js';
 import type { SemanticFrameHub } from './semantic-frame-hub.js';
@@ -41,6 +42,7 @@ export interface CommentaryProjectionConsumerOptions {
   enrichment?: MatchPulseEnrichmentService;
   enrichmentBatchSize?: number;
   onEnrichmentError?: (error: unknown, fixtureId: string) => void;
+  onEnrichmentResult?: (result: MatchPulseCommentaryEnrichmentResult, fixtureId: string) => void;
   enrichmentLeaseMs?: number;
   enrichmentRetryBaseMs?: number;
   enrichmentMaxAttempts?: number;
@@ -275,6 +277,23 @@ export class CommentaryProjectionConsumer {
       if (processingError !== undefined) {
         const terminal = claim.attempt >= (this.options.enrichmentMaxAttempts ?? 3);
         const delay = (this.options.enrichmentRetryBaseMs ?? 1_000) * (2 ** Math.max(0, claim.attempt - 1));
+        if (terminal) {
+          const resultGeneration = pending[0]?.projectionGeneration;
+          if (resultGeneration !== undefined) {
+            const commit = await this.commentary.commitEngineProjection(
+              fixtureId,
+              resultGeneration,
+              requestCursor.lastStateRevision,
+              pending.map((entry) => ({ ...entry, enrichmentStatus: 'failed' })),
+              { expectedCursor: requestCursor },
+            );
+            if (!commit.applied) {
+              await this.commentary.releaseEnrichmentClaim(claim, 'retry', Date.now());
+              state.enrichmentRequested = true;
+              continue;
+            }
+          }
+        }
         await this.commentary.releaseEnrichmentClaim(
           claim, terminal ? 'terminal' : 'retry', Date.now() + delay,
         );
@@ -288,17 +307,26 @@ export class CommentaryProjectionConsumer {
         return;
       }
       if (!result) return;
-      if (result.entries.length === 0) {
-        await this.commentary.releaseEnrichmentClaim(claim, 'terminal');
-        return;
-      }
+      const returnedById = new Map(result.entries.map((entry) => [entry.id, entry]));
+      const settledEntries = pending.map((entry) => returnedById.get(entry.id) ?? {
+        ...entry,
+        enrichmentStatus: 'failed' as const,
+      });
+      const settledResult: MatchPulseCommentaryEnrichmentResult = {
+        ...result,
+        entries: settledEntries,
+        attempted: pending.length,
+        completed: settledEntries.filter((entry) => entry.enrichmentStatus === 'complete').length,
+        failed: settledEntries.filter((entry) => entry.enrichmentStatus === 'failed').length,
+      };
+      this.options.onEnrichmentResult?.(settledResult, fixtureId);
       const resultGeneration = pending[0]?.projectionGeneration;
       if (resultGeneration !== undefined) {
         const commit = await this.commentary.commitEngineProjection(
           fixtureId,
           resultGeneration,
           requestCursor.lastStateRevision,
-          result.entries,
+          settledEntries,
           { expectedCursor: requestCursor },
         );
         if (!commit.applied) {
@@ -309,7 +337,7 @@ export class CommentaryProjectionConsumer {
       }
       await this.commentary.releaseEnrichmentClaim(
         claim,
-        result.entries.some((entry) => entry.enrichmentStatus === 'failed') ? 'terminal' : 'complete',
+        settledEntries.some((entry) => entry.enrichmentStatus === 'failed') ? 'terminal' : 'complete',
       );
       state.enrichmentRequested = true;
     }

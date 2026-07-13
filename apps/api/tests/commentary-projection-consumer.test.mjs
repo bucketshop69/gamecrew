@@ -407,6 +407,37 @@ test('atomically leases one SQLite enrichment batch to only one worker', async (
   }
 });
 
+test('repairs legacy terminal jobs that still have pending fallback entries on restart', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gamecrew-commentary-terminal-repair-'));
+  const path = join(directory, 'commentary.sqlite');
+  const entry = {
+    id: 'legacy-terminal-beat', fixtureId, batchId: 'engine:0:1-1', fromSeq: 1, toSeq: 1,
+    period: 'first_half', clock: { label: "1'" }, kind: 'corner', sourceEvents: [],
+    commentary: 'Home win a corner.', intensity: 'building', momentumSide: 'home',
+    confidence: 'source_backed', generation: 'rule_based', fallbackCommentary: 'Home win a corner.',
+    enrichmentStatus: 'pending', projectionGeneration: 0,
+  };
+  const first = new SqliteMatchPulseCommentaryStore(path);
+  try {
+    await first.commitEngineProjection(fixtureId, 0, 1, [entry], { replace: true });
+    const claim = await first.claimEnrichmentBatch(fixtureId, 'legacy-worker', 1, 30_000, 100);
+    assert.ok(claim);
+    await first.releaseEnrichmentClaim(claim, 'terminal');
+  } finally {
+    first.close();
+  }
+  const reopened = new SqliteMatchPulseCommentaryStore(path);
+  try {
+    const [persisted] = await reopened.listEntries(fixtureId);
+    assert.equal(persisted.commentary, entry.commentary);
+    assert.equal(persisted.generation, 'rule_based');
+    assert.equal(persisted.enrichmentStatus, 'failed');
+  } finally {
+    reopened.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('renews a lease throughout slow two-stage reflection so a second worker cannot reclaim it', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'gamecrew-commentary-reflection-lease-'));
   const path = join(directory, 'commentary.sqlite');
@@ -531,6 +562,67 @@ test('persists returned validation failures as terminal work', async () => {
     assert.equal(calls, 1);
   } finally {
     await first.close();
+    store.close();
+  }
+});
+
+test('settles omitted provider results as failed grounded fallbacks', async () => {
+  const frames = [cornerFrame(1)];
+  const frameStore = {
+    async getCheckpoint() { return { phase: 'first_half', projectionGeneration: 0, stateRevision: 1 }; },
+    async listFramesAfter(_fixtureId, afterRevision) { return frames.filter((item) => item.stateRevision > afterRevision); },
+  };
+  const hub = new SemanticFrameHub(frameStore);
+  const store = new SqliteMatchPulseCommentaryStore(':memory:');
+  let calls = 0;
+  const enrichment = {
+    async enrichCommentaryEntries(_context, pending) {
+      calls += 1;
+      return { entries: [], provider: 'disabled', attempted: pending.length, completed: 0, failed: 0 };
+    },
+  };
+  const first = new CommentaryProjectionConsumer(frameStore, hub, store, { enrichment, workerId: 'worker-a' });
+  try {
+    await first.ensureFixture(fixtureId, teams);
+    await flush();
+    await first.close();
+    const [persisted] = await store.listEntries(fixtureId);
+    assert.equal(persisted.generation, 'rule_based');
+    assert.equal(persisted.enrichmentStatus, 'failed');
+    const second = new CommentaryProjectionConsumer(frameStore, hub, store, { enrichment, workerId: 'worker-b' });
+    await second.ensureFixture(fixtureId, teams);
+    await flush();
+    await second.close();
+    assert.equal(calls, 1);
+  } finally {
+    await first.close();
+    store.close();
+  }
+});
+
+test('settles a final provider error as a failed grounded fallback', async () => {
+  const frames = [cornerFrame(1)];
+  const frameStore = {
+    async getCheckpoint() { return { phase: 'first_half', projectionGeneration: 0, stateRevision: 1 }; },
+    async listFramesAfter(_fixtureId, afterRevision) { return frames.filter((item) => item.stateRevision > afterRevision); },
+  };
+  const hub = new SemanticFrameHub(frameStore);
+  const store = new SqliteMatchPulseCommentaryStore(':memory:');
+  const consumer = new CommentaryProjectionConsumer(frameStore, hub, store, {
+    workerId: 'terminal-worker',
+    enrichmentMaxAttempts: 1,
+    onEnrichmentError() {},
+    enrichment: { async enrichCommentaryEntries() { throw new Error('provider unavailable'); } },
+  });
+  try {
+    await consumer.ensureFixture(fixtureId, teams);
+    await flush();
+    await consumer.close();
+    const [persisted] = await store.listEntries(fixtureId);
+    assert.equal(persisted.generation, 'rule_based');
+    assert.equal(persisted.enrichmentStatus, 'failed');
+  } finally {
+    await consumer.close();
     store.close();
   }
 });

@@ -39,6 +39,16 @@ export function buildMatchEngineContext(
     .sort((left, right) => (right.Seq ?? right.seq ?? -1) - (left.Seq ?? left.seq ?? -1))
     .find((score) => (score.Action ?? score.action) === 'lineups') as
       (TxlineScore & { Lineups?: RawLineupTeam[] }) | undefined;
+  const participant1Name = resolveParticipantName(
+    fixture.Participant1,
+    participant1,
+    lineupRecord?.Lineups,
+  );
+  const participant2Name = resolveParticipantName(
+    fixture.Participant2,
+    participant2,
+    lineupRecord?.Lineups,
+  );
 
   for (const team of lineupRecord?.Lineups ?? []) {
     const participant = team.normativeId === participant1 ? 1
@@ -76,13 +86,13 @@ export function buildMatchEngineContext(
       {
         participant: 1,
         teamId: participant1,
-        name: fixture.Participant1,
+        name: participant1Name,
         isHome: fixture.Participant1IsHome,
       },
       {
         participant: 2,
         teamId: participant2,
-        name: fixture.Participant2,
+        name: participant2Name,
         isHome: !fixture.Participant1IsHome,
       },
     ],
@@ -93,6 +103,16 @@ export function buildMatchEngineContext(
       ? { sequenceBefore: snapshotState.sequenceBefore }
       : {}),
   };
+}
+
+function resolveParticipantName(
+  fixtureName: string,
+  teamId: number,
+  lineups: readonly RawLineupTeam[] | undefined,
+): string {
+  if (!/^Participant\s+\d+$/i.test(fixtureName.trim())) return fixtureName;
+  const lineupName = lineups?.find((team) => team.normativeId === teamId)?.preferredName?.trim();
+  return lineupName || fixtureName;
 }
 
 export function applySnapshotBaseline(

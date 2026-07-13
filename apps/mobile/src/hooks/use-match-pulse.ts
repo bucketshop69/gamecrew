@@ -1,19 +1,29 @@
-import type { MatchPulseEvent } from '@gamecrew/core';
+import type { MatchPulseCommentaryEntry } from '@gamecrew/core';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { fetchMatchPulse, isAbortError, matchRefreshIntervalMs } from '../api/gamecrew';
+import {
+  fetchMatchPulseCommentary,
+  isAbortError,
+  matchRefreshIntervalMs,
+} from '../api/gamecrew';
+
+interface PulseData {
+  entries: readonly MatchPulseCommentaryEntry[];
+  projectionGeneration?: number;
+}
 
 export type PulseLoadState =
-  | { status: 'loading'; events: readonly MatchPulseEvent[] }
-  | { status: 'ready'; events: readonly MatchPulseEvent[] }
-  | { status: 'error'; events: readonly MatchPulseEvent[]; message: string };
+  | ({ status: 'loading' } & PulseData)
+  | ({ status: 'ready' } & PulseData)
+  | ({ status: 'error'; message: string } & PulseData);
 
-export function useMatchPulse(fixtureId: string) {
+export function useMatchPulse(fixtureId: string, isLive: boolean) {
   const [pulseLoadState, setPulseLoadState] = useState<PulseLoadState>({
     status: 'loading',
-    events: [],
+    entries: [],
   });
   const activeRequestRef = useRef<AbortController | null>(null);
+  const activeFixtureIdRef = useRef(fixtureId);
   const mountedRef = useRef(false);
 
   const loadPulse = useCallback(
@@ -24,15 +34,23 @@ export function useMatchPulse(fixtureId: string) {
       activeRequestRef.current = controller;
 
       setPulseLoadState((current) =>
-        showLoading || current.events.length === 0
-          ? { status: 'loading', events: current.events }
+        showLoading && current.entries.length === 0
+          ? {
+              status: 'loading',
+              entries: current.entries,
+              projectionGeneration: current.projectionGeneration,
+            }
           : current,
       );
 
-      fetchMatchPulse(fixtureId, { signal: controller.signal })
-        .then((events) => {
+      fetchMatchPulseCommentary(fixtureId, { signal: controller.signal })
+        .then((result) => {
           if (mountedRef.current && activeRequestRef.current === controller) {
-            setPulseLoadState({ status: 'ready', events });
+            setPulseLoadState({
+              status: 'ready',
+              entries: result.entries,
+              projectionGeneration: result.projectionGeneration,
+            });
           }
         })
         .catch((error: unknown) => {
@@ -40,17 +58,12 @@ export function useMatchPulse(fixtureId: string) {
             return;
           }
 
-          setPulseLoadState((current) => {
-            if (!showLoading && current.events.length > 0) {
-              return current;
-            }
-
-            return {
-              status: 'error',
-              events: current.events,
-              message: error instanceof Error ? error.message : 'Match Pulse is unavailable.',
-            };
-          });
+          setPulseLoadState((current) => ({
+            status: 'error',
+            entries: current.entries,
+            projectionGeneration: current.projectionGeneration,
+            message: error instanceof Error ? error.message : 'Match Pulse is unavailable.',
+          }));
         })
         .finally(() => {
           if (activeRequestRef.current === controller) {
@@ -63,17 +76,27 @@ export function useMatchPulse(fixtureId: string) {
 
   useEffect(() => {
     mountedRef.current = true;
+
+    if (activeFixtureIdRef.current !== fixtureId) {
+      activeFixtureIdRef.current = fixtureId;
+      setPulseLoadState({ status: 'loading', entries: [] });
+    }
+
     loadPulse(true);
 
-    const intervalId = setInterval(() => loadPulse(false), matchRefreshIntervalMs);
+    const intervalId = isLive
+      ? setInterval(() => loadPulse(false), matchRefreshIntervalMs)
+      : undefined;
 
     return () => {
       mountedRef.current = false;
-      clearInterval(intervalId);
+      if (intervalId !== undefined) {
+        clearInterval(intervalId);
+      }
       activeRequestRef.current?.abort();
       activeRequestRef.current = null;
     };
-  }, [loadPulse]);
+  }, [isLive, loadPulse]);
 
   return { pulseLoadState, reload: () => loadPulse(true) };
 }

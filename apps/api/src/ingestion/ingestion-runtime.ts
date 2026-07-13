@@ -1,5 +1,9 @@
 import {
   TxlineApiClient,
+  applyMatchQuery,
+  mapTxlineFixtureToGameCrewMatch,
+  type GameCrewMatch,
+  type GameCrewMatchFilter,
   type MatchEngineContext,
   type MatchEngineTeam,
   type TxlineFixture,
@@ -91,6 +95,35 @@ export function createIngestionRuntime(config: ApiConfig) {
     getCheckpoint: (fixtureId: string) => store.getCheckpoint(fixtureId),
     listFramesAfter: (fixtureId: string, revision: number) => store.listFramesAfter(fixtureId, revision),
     listCommentaryEntries: (fixtureId: string) => commentaryStore.listEntries(fixtureId),
+    getCommentaryProjection: (fixtureId: string) => commentaryStore.getProjectionSnapshot(fixtureId),
+    async listMatches(query: { filter?: GameCrewMatchFilter; limit?: number } = {}) {
+      const fixtureIds = await store.listFixtureIds();
+      const matches = await Promise.all(fixtureIds.map(async (fixtureId) => {
+        const [checkpoint, fixtureContext, raw] = await Promise.all([
+          store.getCheckpoint(fixtureId),
+          store.getFixtureContext(fixtureId),
+          store.listRawCandidates(fixtureId),
+        ]);
+        if (!checkpoint || !fixtureContext) return undefined;
+        const scores = raw.flatMap(({ payloadJson }) => {
+          try { return [JSON.parse(payloadJson) as TxlineScore]; } catch { return []; }
+        });
+        const fixture = reconstructFixture(fixtureId, scores);
+        if (!fixture) return undefined;
+        const persistedParticipants = fixtureContext.participants;
+        const participant1 = persistedParticipants.find((participant) => participant.participant === 1);
+        if (typeof participant1?.isHome === 'boolean') {
+          fixture.Participant1IsHome = participant1.isHome;
+        }
+        for (const participant of persistedParticipants) {
+          if (participant.participant === 1) fixture.Participant1 = participant.name;
+          if (participant.participant === 2) fixture.Participant2 = participant.name;
+        }
+        const mapped = mapTxlineFixtureToGameCrewMatch(fixture, scores);
+        return withCanonicalCheckpoint(mapped, checkpoint, persistedParticipants);
+      }));
+      return applyMatchQuery(matches.filter((match): match is GameCrewMatch => Boolean(match)), query);
+    },
     subscribe: hub.subscribe.bind(hub),
     activeFixtureCount: () => supervisor.activeFixtureCount(),
     async restore() {
@@ -139,6 +172,58 @@ export function createIngestionRuntime(config: ApiConfig) {
 }
 
 export type IngestionRuntime = ReturnType<typeof createIngestionRuntime>;
+
+function withCanonicalCheckpoint(
+  match: GameCrewMatch,
+  checkpoint: Awaited<ReturnType<SqliteIngestionStore['getCheckpoint']>> & {},
+  participants: readonly MatchEngineTeam[],
+): GameCrewMatch {
+  const participant1Home = participants.find((team) => team.participant === 1)?.isHome
+    ?? match.homeTeam.id.endsWith(String(participants.find((team) => team.participant === 1)?.teamId));
+  const score = checkpoint.state.finalScore ?? checkpoint.state.confirmedScore;
+  const status = checkpoint.phase === 'finalised'
+    ? 'replayable'
+    : checkpoint.phase === 'pre_match'
+      ? 'upcoming'
+      : 'live';
+  const clockSeconds = checkpoint.state.liveClock?.seconds;
+  const minute = typeof clockSeconds === 'number' ? Math.floor(clockSeconds / 60) : undefined;
+  return {
+    ...match,
+    filter: status === 'replayable' ? 'replay' : status,
+    status,
+    score: {
+      home: participant1Home ? score.participant1 : score.participant2,
+      away: participant1Home ? score.participant2 : score.participant1,
+    },
+    clock: status === 'replayable'
+      ? { label: 'Full time', phase: 'replay_ready' }
+      : status === 'upcoming'
+        ? { label: match.clock.label, phase: 'pre_match' }
+      : {
+          ...(minute === undefined ? {} : { minute }),
+          label: minute === undefined ? phaseLabel(checkpoint.phase) : `Live ${minute}'`,
+          phase: phaseForClient(checkpoint.phase),
+        },
+    replay: status === 'replayable' ? { available: true, label: 'Replay ready' } : undefined,
+  };
+}
+
+function phaseForClient(phase: string): GameCrewMatch['clock']['phase'] {
+  if (phase === 'half_time') return 'half_time';
+  if (phase === 'second_half' || phase === 'second_half_ready') return 'second_half';
+  if (phase === 'finalised' || phase === 'full_time_pending') return 'full_time';
+  if (phase === 'pre_match') return 'pre_match';
+  return 'first_half';
+}
+
+function phaseLabel(phase: string): string {
+  if (phase === 'half_time') return 'Half time';
+  if (phase === 'full_time_pending') return 'Full time pending';
+  if (phase === 'second_half_ready') return 'Second half ready';
+  if (phase === 'first_half_ready') return 'First half ready';
+  return phase === 'pre_match' ? 'Pre-match' : 'Live';
+}
 
 function withStoredParticipants<T extends { participants: readonly MatchEngineTeam[] }>(
   context: T,

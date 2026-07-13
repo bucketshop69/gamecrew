@@ -1,6 +1,11 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import type { GameCrewMatchFilter } from '@gamecrew/core';
+import {
+  applyMatchQuery,
+  type GameCrewMatch,
+  type GameCrewMatchFilter,
+  type MatchTeam,
+} from '@gamecrew/core';
 import type { ApiConfig } from './config.js';
 import { createTxlineService } from './txline-service.js';
 import type { IngestionRuntime } from './ingestion/ingestion-runtime.js';
@@ -76,9 +81,23 @@ export function createApp(config: ApiConfig, ingestion?: IngestionRuntime) {
   app.get('/matches', async (context) => {
     const filter = parseFilter(context.req.query('filter'));
     const limit = parseLimit(context.req.query('limit'));
-    const result = await txline.listMatches({ filter, limit });
+    const [remoteResult, localResult] = await Promise.allSettled([
+      txline.listMatches(),
+      ingestion?.listMatches() ?? Promise.resolve([]),
+    ]);
+    const remoteMatches = remoteResult.status === 'fulfilled' ? remoteResult.value.matches : [];
+    const localMatches = localResult.status === 'fulfilled' ? localResult.value : [];
+    if (remoteResult.status === 'rejected' && localMatches.length === 0) {
+      throw remoteResult.reason;
+    }
+    const matches = applyMatchQuery(mergeMatches(remoteMatches, localMatches), { filter, limit });
+    const source = remoteMatches.length > 0 && localMatches.length > 0
+      ? 'combined'
+      : localMatches.length > 0
+        ? 'engine'
+        : 'txline';
 
-    return context.json(result);
+    return context.json({ matches, source });
   });
 
   app.get('/matches/:fixtureId/pulse', async (context) => {
@@ -91,8 +110,11 @@ export function createApp(config: ApiConfig, ingestion?: IngestionRuntime) {
   app.get('/matches/:fixtureId/pulse/commentary', async (context) => {
     const fixtureId = normalizeFixtureId(context.req.param('fixtureId'));
     if (ingestion) {
+      const projection = await ingestion.getCommentaryProjection(fixtureId);
       return context.json({
-        entries: await ingestion.listCommentaryEntries(fixtureId),
+        fixtureId,
+        projectionGeneration: projection.cursor?.projectionGeneration ?? 0,
+        entries: projection.entries,
         source: 'engine',
         persistence: {
           inserted: 0,
@@ -126,6 +148,31 @@ export function createApp(config: ApiConfig, ingestion?: IngestionRuntime) {
   );
 
   return app;
+}
+
+function mergeMatches(
+  remoteMatches: readonly GameCrewMatch[],
+  localMatches: readonly GameCrewMatch[],
+): readonly GameCrewMatch[] {
+  const merged = new Map(remoteMatches.map((match) => [match.txline.fixtureId, match]));
+  for (const local of localMatches) {
+    const remote = merged.get(local.txline.fixtureId);
+    merged.set(local.txline.fixtureId, remote ? {
+      ...remote,
+      ...local,
+      competition: remote.competition || local.competition,
+      round: remote.round ?? local.round,
+      kickoffUtc: remote.kickoffUtc || local.kickoffUtc,
+      homeTeam: mergeRemoteTeamMetadata(local.homeTeam, remote),
+      awayTeam: mergeRemoteTeamMetadata(local.awayTeam, remote),
+    } : local);
+  }
+  return [...merged.values()];
+}
+
+function mergeRemoteTeamMetadata(local: MatchTeam, remoteMatch: GameCrewMatch): MatchTeam {
+  const remote = [remoteMatch.homeTeam, remoteMatch.awayTeam].find((team) => team.id === local.id);
+  return remote ? { ...remote, name: local.name, shortName: local.shortName } : local;
 }
 
 function normalizeFixtureId(value: string): string {

@@ -144,6 +144,25 @@ latency, and token usage, and never writes its samples to the commentary feed.
 Use `--cases=goal,red_card` to keep a tuning run bounded to demonstrated gaps.
 ```
 
+Client delivery rules:
+
+```text
+GET /matches merges TxLINE discovery metadata with fixtures already stored by
+the engine. The durable checkpoint owns score, phase, home/away orientation,
+and replay availability, so completed matches remain discoverable when TxLINE
+is temporarily unavailable.
+
+GET /matches/:fixtureId/pulse/commentary is a read-only projection snapshot.
+Its entries and projectionGeneration come from the same commentary-store
+snapshot; an engine correction cannot label older commentary as the new
+generation while its asynchronous rebuild is still running.
+
+The Expo client loads a completed fixture once and polls a live fixture. It
+renders the full saved commentary projection newest-first and replaces it from
+the returned generation-safe snapshot. Semantic frames remain available from
+the engine frames route for the Phase 10 probable simulation consumer.
+```
+
 Runtime note:
 
 ```text

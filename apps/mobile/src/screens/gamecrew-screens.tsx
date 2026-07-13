@@ -1,6 +1,6 @@
 import {
   type GameCrewMatch,
-  type MatchPulseEvent,
+  type MatchPulseCommentaryEntry,
   gameCrewTokens,
   getMatchTitle,
 } from '@gamecrew/core';
@@ -20,7 +20,6 @@ import { useGameCrewMatches } from '../hooks/use-gamecrew-matches';
 import { useMatchPulse } from '../hooks/use-match-pulse';
 
 const tokens = gameCrewTokens;
-const maxPulseRows = 50;
 
 type PulseTone = 'major' | 'danger' | 'building' | 'quiet';
 
@@ -30,7 +29,6 @@ interface PulseFeedItem {
   title: string;
   meta: string;
   tone: PulseTone;
-  verified?: boolean;
 }
 
 export function HomeScreen({ onOpenMatch }: { onOpenMatch: (match: GameCrewMatch) => void }) {
@@ -322,11 +320,11 @@ export function MatchDetailScreen({
   match: GameCrewMatch;
   onBack: () => void;
 }) {
-  const { pulseLoadState, reload } = useMatchPulse(match.txline.fixtureId);
-  const pulseItems =
-    pulseLoadState.status === 'ready'
-      ? getPulseFeedItems(match, pulseLoadState.events).slice(-maxPulseRows).reverse()
-      : [];
+  const { pulseLoadState, reload } = useMatchPulse(
+    match.txline.fixtureId,
+    match.status === 'live',
+  );
+  const pulseItems = getPulseFeedItems(pulseLoadState.entries);
 
   return (
     <View style={styles.detailScreen}>
@@ -385,9 +383,9 @@ export function MatchDetailScreen({
         contentContainerStyle={styles.pulseStack}
         contentInsetAdjustmentBehavior="automatic"
       >
-        {pulseLoadState.status === 'loading' ? (
-          <PulseStatePanel title="Loading Match Pulse" body="Fetching the TxLINE event timeline." />
-        ) : pulseLoadState.status === 'error' ? (
+        {pulseLoadState.status === 'loading' && pulseItems.length === 0 ? (
+          <PulseStatePanel title="Loading Match Pulse" body="Loading the saved match story." />
+        ) : pulseLoadState.status === 'error' && pulseItems.length === 0 ? (
           <PulseStatePanel
             title="Match Pulse unavailable"
             body={getPulseErrorCopy(pulseLoadState.message)}
@@ -395,9 +393,22 @@ export function MatchDetailScreen({
             onAction={reload}
           />
         ) : pulseItems.length === 0 ? (
-          <PulseStatePanel title="No pulse events yet" body="TxLINE has no useful timeline events for this fixture." />
+          <PulseStatePanel
+            title="No match updates yet"
+            body="There is no Match Pulse story available for this fixture yet."
+          />
         ) : (
-          pulseItems.map((item) => <PulseMomentRow key={item.id} item={item} />)
+          <>
+            {pulseLoadState.status === 'error' ? (
+              <PulseStatePanel
+                title="Latest update unavailable"
+                body="Showing the saved Match Pulse timeline. Try again shortly for the latest moments."
+                actionLabel="Retry"
+                onAction={reload}
+              />
+            ) : null}
+            {pulseItems.map((item) => <PulseMomentRow key={item.id} item={item} />)}
+          </>
         )}
       </ScrollView>
     </View>
@@ -447,11 +458,6 @@ function PulseMomentRow({ item }: { item: PulseFeedItem }) {
           <Text style={styles.pulseMomentTitle} selectable>
             {item.title}
           </Text>
-          {item.verified ? (
-            <Text style={styles.pulseVerified} selectable>
-              Confirmed
-            </Text>
-          ) : null}
         </View>
         <Text style={styles.pulseBody} selectable>
           {item.meta}
@@ -528,69 +534,54 @@ function getDetailScoreLabel(match: GameCrewMatch, side: 'home' | 'away'): strin
 }
 
 function getPulseFeedItems(
-  match: GameCrewMatch,
-  events: readonly MatchPulseEvent[],
+  entries: readonly MatchPulseCommentaryEntry[],
 ): readonly PulseFeedItem[] {
-  return events.map((event) => {
-    const title = getPulseActionTitle(event.action);
-    const teamName = getPulseEventTeamName(match, event);
-
-    return {
-      id: event.id,
-      minute: event.clock.label,
-      title: teamName ? `${teamName}: ${title}` : title,
-      meta: event.confirmed === false ? 'Awaiting TxLINE confirmation' : 'TxLINE match event',
-      tone: event.intensity,
-      verified: event.confirmed,
-    };
-  });
+  return [...entries]
+    .sort(compareCommentaryNewestFirst)
+    .map((entry) => ({
+      id: entry.id,
+      minute: entry.clock.label,
+      title: entry.commentary,
+      meta: getPulseEntryMeta(entry),
+      tone: entry.intensity,
+    }));
 }
 
-function getPulseActionTitle(action: string): string {
-  switch (action) {
-    case 'goal':
-      return 'Goal';
-    case 'shot':
-      return 'Shot';
-    case 'corner':
-      return 'Corner';
-    case 'red_card':
-      return 'Red card';
-    case 'yellow_card':
-      return 'Yellow card';
-    case 'substitution':
-      return 'Substitution';
-    case 'free_kick':
-      return 'Free kick';
-    case 'danger_possession':
-      return 'Danger possession';
-    case 'high_danger_possession':
-      return 'High danger possession';
-    case 'throw_in':
-      return 'Throw-in';
-    case 'var':
-      return 'VAR check';
-    case 'injury':
-      return 'Injury stoppage';
-    case 'kickoff':
-      return 'Kickoff';
-    case 'game_finalised':
-      return 'Game finalised';
-    default:
-      return 'Match event';
+function compareCommentaryNewestFirst(
+  left: MatchPulseCommentaryEntry,
+  right: MatchPulseCommentaryEntry,
+): number {
+  const leftSequence = left.sortSeq ?? left.toSeq ?? left.fromSeq;
+  const rightSequence = right.sortSeq ?? right.toSeq ?? right.fromSeq;
+
+  if (leftSequence !== undefined && rightSequence !== undefined && leftSequence !== rightSequence) {
+    return rightSequence - leftSequence;
   }
+
+  if (left.sortTimestamp && right.sortTimestamp) {
+    return right.sortTimestamp.localeCompare(left.sortTimestamp);
+  }
+
+  return right.id.localeCompare(left.id);
 }
 
-function getPulseEventTeamName(match: GameCrewMatch, event: MatchPulseEvent): string | undefined {
-  if (event.participant === 1) {
-    return match.homeTeam.shortName;
-  }
+function getPulseEntryMeta(entry: MatchPulseCommentaryEntry): string {
+  const team = entry.team?.shortName ?? entry.team?.name;
+  const confirmed = entry.confidence === 'verified' ? 'Confirmed' : undefined;
+  return [team, getPulseKindLabel(entry.kind), confirmed].filter(Boolean).join(' · ');
+}
 
-  if (event.participant === 2) {
-    return match.awayTeam.shortName;
-  }
-
-  return undefined;
+function getPulseKindLabel(kind: MatchPulseCommentaryEntry['kind']): string {
+  if (kind === 'goal') return 'Goal';
+  if (kind === 'card') return 'Card';
+  if (kind === 'pressure' || kind === 'danger') return 'Pressure';
+  if (kind === 'shot') return 'Attempt';
+  if (kind === 'corner') return 'Corner';
+  if (kind === 'free_kick' || kind === 'set_piece') return 'Set piece';
+  if (kind === 'substitution') return 'Substitution';
+  if (kind === 'var') return 'VAR';
+  if (kind === 'phase_change') return 'Match phase';
+  return 'Match update';
 }
 
 function getPulseToneStyle(tone: PulseTone) {
@@ -657,18 +648,18 @@ const horizontalFlagCodes = new Set(['AR', 'CO', 'DE', 'EC', 'NL', 'SN']);
 
 function getErrorCopy(message: string): string {
   if (message.includes('Network request failed') || message.includes('Failed to fetch')) {
-    return 'Start the local GameCrew API, then try again.';
+    return 'Check your connection, then try again.';
   }
 
-  return 'The local API could not return the TxLINE match feed.';
+  return 'Match data could not be loaded right now.';
 }
 
 function getPulseErrorCopy(message: string): string {
   if (message.includes('Network request failed') || message.includes('Failed to fetch')) {
-    return 'Start the local GameCrew API, then retry Match Pulse.';
+    return 'Check your connection, then retry Match Pulse.';
   }
 
-  return 'The local API could not return the TxLINE event timeline.';
+  return 'The saved Match Pulse timeline could not be loaded.';
 }
 
 const styles = StyleSheet.create({
@@ -1169,12 +1160,5 @@ const styles = StyleSheet.create({
     fontSize: tokens.typography.size.body,
     fontWeight: tokens.typography.weight.bold,
     lineHeight: tokens.typography.lineHeight.body,
-  },
-  pulseVerified: {
-    color: tokens.shell.textDim,
-    fontSize: tokens.typography.size.caption,
-    fontWeight: tokens.typography.weight.bold,
-    lineHeight: tokens.typography.lineHeight.caption,
-    textTransform: 'uppercase',
   },
 });

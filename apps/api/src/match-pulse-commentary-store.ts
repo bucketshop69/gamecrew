@@ -8,6 +8,7 @@ export type MatchPulseCommentaryStoreDriver = 'file' | 'sqlite';
 
 export interface MatchPulseCommentaryStore {
   listEntries(fixtureId: string): Promise<readonly MatchPulseCommentaryEntry[]>;
+  getProjectionSnapshot(fixtureId: string): Promise<MatchPulseCommentaryProjectionSnapshot>;
   upsertEntries(entries: readonly MatchPulseCommentaryEntry[]): Promise<MatchPulseCommentaryUpsertResult>;
   getProjectionCursor(fixtureId: string): Promise<MatchPulseCommentaryProjectionCursor | undefined>;
   commitEngineProjection(
@@ -51,6 +52,11 @@ export interface MatchPulseCommentaryProjectionCursor {
   fixtureId: string;
   projectionGeneration: number;
   lastStateRevision: number;
+}
+
+export interface MatchPulseCommentaryProjectionSnapshot {
+  entries: readonly MatchPulseCommentaryEntry[];
+  cursor?: MatchPulseCommentaryProjectionCursor;
 }
 
 export interface MatchPulseCommentaryUpsertResult {
@@ -113,6 +119,16 @@ export class FileMatchPulseCommentaryStore implements MatchPulseCommentaryStore 
     return [...this.entriesById.values()]
       .filter((entry) => entry.fixtureId === fixtureId)
       .sort(compareEntriesNewestFirst);
+  }
+
+  async getProjectionSnapshot(fixtureId: string): Promise<MatchPulseCommentaryProjectionSnapshot> {
+    await this.load();
+    return this.withMutation(async () => ({
+      entries: [...this.entriesById.values()]
+        .filter((entry) => entry.fixtureId === fixtureId)
+        .sort(compareEntriesNewestFirst),
+      cursor: this.projectionCursors.get(fixtureId),
+    }));
   }
 
   async upsertEntries(entries: readonly MatchPulseCommentaryEntry[]): Promise<MatchPulseCommentaryUpsertResult> {
@@ -443,6 +459,25 @@ export class SqliteMatchPulseCommentaryStore implements MatchPulseCommentaryStor
   }
 
   async listEntries(fixtureId: string): Promise<readonly MatchPulseCommentaryEntry[]> {
+    return this.listEntriesSync(fixtureId);
+  }
+
+  async getProjectionSnapshot(fixtureId: string): Promise<MatchPulseCommentaryProjectionSnapshot> {
+    this.db.exec('BEGIN');
+    try {
+      const snapshot = {
+        entries: this.listEntriesSync(fixtureId),
+        cursor: this.getProjectionCursorSync(fixtureId),
+      };
+      this.db.exec('COMMIT');
+      return snapshot;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  private listEntriesSync(fixtureId: string): readonly MatchPulseCommentaryEntry[] {
     const rows = this.db.prepare(`
       SELECT entry_json
       FROM match_pulse_commentary_entries

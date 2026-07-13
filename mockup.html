@@ -1,0 +1,1963 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta
+    name="description"
+    content="GameCrew is an Android football match companion that turns match events into clear commentary and a tactical view of how the game is developing."
+  />
+  <title>GameCrew — See the match taking shape</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --black: #050505;
+      --surface: #0d0d0d;
+      --raised: #151515;
+      --raised-strong: #202020;
+      --text: #f7f7f7;
+      --muted: #a6a6a6;
+      --dim: #6e6e6e;
+      --divider: #2a2a2a;
+      --pitch: #62755f;
+      --pitch-dark: #536550;
+      --home: #137a4b;
+      --home-light: #f0f0e8;
+      --home-warm: #df3434;
+      --away: #f0cb28;
+      --away-dark: #174b9b;
+      --live: #f04a4a;
+      --radius-sm: 8px;
+      --radius-md: 14px;
+      --radius-lg: 24px;
+      --radius-pill: 999px;
+      --container: 1360px;
+      --page-pad: clamp(18px, 4vw, 64px);
+      --display: "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+      --body: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+    }
+
+    html {
+      background: var(--black);
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--black);
+      color: var(--text);
+      font-family: var(--body);
+      font-size: 16px;
+      line-height: 1.5;
+      overflow-x: hidden;
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    button,
+    a,
+    input {
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    :focus-visible {
+      outline: 3px solid var(--text);
+      outline-offset: 4px;
+    }
+
+    .skip-link {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      z-index: 100;
+      padding: 10px 14px;
+      border-radius: var(--radius-sm);
+      background: var(--text);
+      color: var(--black);
+      font-weight: 800;
+      transform: translateY(-180%);
+    }
+
+    .skip-link:focus {
+      transform: translateY(0);
+    }
+
+    .site-header {
+      position: relative;
+      z-index: 20;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      background: var(--black);
+    }
+
+    .nav {
+      width: min(var(--container), calc(100% - (var(--page-pad) * 2)));
+      min-height: 76px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 24px;
+    }
+
+    .wordmark {
+      font-family: var(--display);
+      font-size: 20px;
+      font-weight: 900;
+      letter-spacing: -0.04em;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 30px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .nav-links a:hover {
+      color: var(--text);
+    }
+
+    .nav-action {
+      justify-self: end;
+    }
+
+    .button {
+      min-height: 48px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 0 22px;
+      border: 1px solid var(--text);
+      border-radius: var(--radius-pill);
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 850;
+      line-height: 1;
+      transition: transform 160ms ease, background-color 160ms ease, color 160ms ease;
+    }
+
+    .button:hover {
+      transform: translateY(-2px);
+    }
+
+    .button-primary {
+      background: var(--text);
+      color: var(--black);
+    }
+
+    .button-secondary {
+      background: transparent;
+      color: var(--text);
+    }
+
+    .button-compact {
+      min-height: 40px;
+      padding: 0 18px;
+      font-size: 12px;
+    }
+
+    .android-mark {
+      width: 16px;
+      height: 12px;
+      position: relative;
+      display: inline-block;
+      border-radius: 7px 7px 3px 3px;
+      background: currentColor;
+    }
+
+    .android-mark::before,
+    .android-mark::after {
+      content: "";
+      position: absolute;
+      top: -4px;
+      width: 1px;
+      height: 6px;
+      background: currentColor;
+    }
+
+    .android-mark::before {
+      left: 3px;
+      transform: rotate(-28deg);
+    }
+
+    .android-mark::after {
+      right: 3px;
+      transform: rotate(28deg);
+    }
+
+    .hero {
+      width: min(var(--container), calc(100% - (var(--page-pad) * 2)));
+      min-height: calc(100svh - 77px);
+      margin: 0 auto;
+      padding: clamp(54px, 7vw, 104px) 0 clamp(72px, 8vw, 120px);
+      display: grid;
+      grid-template-columns: minmax(360px, 0.72fr) minmax(650px, 1.28fr);
+      align-items: center;
+      gap: clamp(44px, 6vw, 92px);
+    }
+
+    .hero-copy {
+      position: relative;
+      z-index: 2;
+    }
+
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0 0 24px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 850;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 28px;
+      height: 2px;
+      background: var(--text);
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      max-width: 720px;
+      margin-bottom: 28px;
+      font-family: var(--display);
+      font-size: clamp(64px, 6.8vw, 108px);
+      font-weight: 950;
+      letter-spacing: -0.075em;
+      line-height: 0.87;
+      text-wrap: balance;
+    }
+
+    .headline-line {
+      display: block;
+    }
+
+    .headline-line-muted {
+      color: var(--muted);
+    }
+
+    .hero-intro {
+      max-width: 570px;
+      margin-bottom: 32px;
+      color: var(--muted);
+      font-size: clamp(17px, 1.4vw, 20px);
+      line-height: 1.6;
+    }
+
+    .hero-intro strong {
+      color: var(--text);
+      font-weight: 750;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .hero-note {
+      margin: 0;
+      color: var(--dim);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    .match-demo {
+      position: relative;
+      min-width: 0;
+      overflow: hidden;
+      border: 1px solid var(--divider);
+      border-radius: var(--radius-lg);
+      background: var(--surface);
+      box-shadow: 0 30px 90px rgba(0, 0, 0, 0.42);
+    }
+
+    .match-color-line {
+      height: 4px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .match-color-line span:first-child {
+      background: var(--home);
+    }
+
+    .match-color-line span:last-child {
+      background: var(--away);
+    }
+
+    .demo-kicker {
+      min-height: 42px;
+      padding: 0 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      border-bottom: 1px solid var(--divider);
+      color: var(--dim);
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+
+    .replay-demo {
+      min-height: 30px;
+      padding: 0 11px;
+      border: 1px solid var(--divider);
+      border-radius: var(--radius-pill);
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 10px;
+      font-weight: 850;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .replay-demo:hover {
+      border-color: var(--muted);
+      color: var(--text);
+    }
+
+    .score-rail {
+      min-height: 104px;
+      padding: 16px 22px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+      align-items: center;
+      gap: 16px;
+      border-bottom: 1px solid var(--divider);
+      background: var(--black);
+    }
+
+    .team {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .team-away {
+      justify-content: flex-end;
+      text-align: right;
+    }
+
+    .flag {
+      width: 52px;
+      height: 34px;
+      flex: 0 0 auto;
+      display: grid;
+      overflow: hidden;
+      border-radius: 8px;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+    }
+
+    .flag-mexico {
+      grid-template-columns: repeat(3, 1fr);
+    }
+
+    .flag-mexico span:nth-child(1) { background: var(--home); }
+    .flag-mexico span:nth-child(2) { background: var(--home-light); }
+    .flag-mexico span:nth-child(3) { background: var(--home-warm); }
+
+    .flag-ecuador {
+      grid-template-rows: 2fr 1fr 1fr;
+    }
+
+    .flag-ecuador span:nth-child(1) { background: var(--away); }
+    .flag-ecuador span:nth-child(2) { background: var(--away-dark); }
+    .flag-ecuador span:nth-child(3) { background: #cf2d32; }
+
+    .team-copy {
+      min-width: 0;
+    }
+
+    .team-code {
+      display: block;
+      color: var(--text);
+      font-family: var(--display);
+      font-size: 23px;
+      font-weight: 950;
+      letter-spacing: -0.035em;
+      line-height: 1;
+    }
+
+    .team-name {
+      display: block;
+      margin-top: 5px;
+      color: var(--dim);
+      font-size: 9px;
+      font-weight: 850;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .score-center {
+      min-width: 160px;
+      text-align: center;
+    }
+
+    .score {
+      display: flex;
+      align-items: baseline;
+      justify-content: center;
+      gap: 10px;
+      font-family: var(--display);
+      font-size: 38px;
+      font-variant-numeric: tabular-nums;
+      font-weight: 950;
+      letter-spacing: -0.05em;
+      line-height: 1;
+    }
+
+    .score-divider {
+      color: var(--dim);
+      font-size: 22px;
+    }
+
+    .match-clock {
+      display: block;
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+      font-weight: 900;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .demo-body {
+      min-height: 462px;
+      display: grid;
+      grid-template-columns: minmax(240px, 0.75fr) minmax(390px, 1.25fr);
+    }
+
+    .pulse-panel {
+      min-width: 0;
+      padding: 22px;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid var(--divider);
+      background: var(--surface);
+    }
+
+    .panel-label {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 20px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .panel-label-live {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--dim);
+      font-size: 9px;
+    }
+
+    .panel-label-live::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--live);
+    }
+
+    .pulse-feed {
+      display: flex;
+      flex: 1;
+      flex-direction: column;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    .pulse-item {
+      display: grid;
+      grid-template-columns: 48px 1fr;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      border-radius: var(--radius-md);
+      background: #111;
+      color: var(--dim);
+    }
+
+    .pulse-item-previous {
+      opacity: 0.72;
+    }
+
+    .pulse-item-current {
+      min-height: 154px;
+      align-items: start;
+      padding: 16px 14px;
+      background: var(--raised-strong);
+      color: var(--text);
+    }
+
+    .pulse-minute {
+      min-height: 36px;
+      display: grid;
+      place-items: center;
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--text);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      font-weight: 900;
+    }
+
+    .pulse-title {
+      margin: 1px 0 5px;
+      color: var(--text);
+      font-size: 15px;
+      font-weight: 850;
+      line-height: 1.35;
+    }
+
+    .pulse-copy {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .pulse-meta {
+      display: block;
+      margin-top: 8px;
+      color: var(--dim);
+      font-size: 10px;
+      font-weight: 750;
+    }
+
+    .pitch-wrap {
+      position: relative;
+      min-width: 0;
+      overflow: hidden;
+      background: #101610;
+    }
+
+    .pitch-label {
+      position: absolute;
+      z-index: 8;
+      top: 16px;
+      left: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      border-radius: var(--radius-pill);
+      background: rgba(5, 5, 5, 0.84);
+      color: rgba(247, 247, 247, 0.84);
+      font-size: 9px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .pitch-label-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--home-light);
+    }
+
+    .pitch {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      background-color: var(--pitch);
+      background-image: repeating-linear-gradient(
+        90deg,
+        rgba(0, 0, 0, 0.08) 0,
+        rgba(0, 0, 0, 0.08) 12.5%,
+        rgba(255, 255, 255, 0.025) 12.5%,
+        rgba(255, 255, 255, 0.025) 25%
+      );
+    }
+
+    .pitch::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at 62% 48%, transparent 0 24%, rgba(3, 8, 3, 0.14) 72%);
+      pointer-events: none;
+    }
+
+    .pitch-boundary {
+      position: absolute;
+      inset: 20px;
+      border: 1px solid rgba(237, 242, 234, 0.62);
+    }
+
+    .halfway {
+      position: absolute;
+      top: 20px;
+      bottom: 20px;
+      left: 50%;
+      width: 1px;
+      background: rgba(237, 242, 234, 0.62);
+    }
+
+    .center-circle {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 92px;
+      height: 92px;
+      border: 1px solid rgba(237, 242, 234, 0.62);
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+    }
+
+    .center-circle::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: rgba(237, 242, 234, 0.72);
+      transform: translate(-50%, -50%);
+    }
+
+    .penalty-box {
+      position: absolute;
+      top: 25%;
+      width: 18%;
+      height: 50%;
+      border: 1px solid rgba(237, 242, 234, 0.62);
+    }
+
+    .penalty-box-left {
+      left: 20px;
+      border-left: 0;
+    }
+
+    .penalty-box-right {
+      right: 20px;
+      border-right: 0;
+    }
+
+    .goal-box {
+      position: absolute;
+      top: 38%;
+      width: 7%;
+      height: 24%;
+      border: 1px solid rgba(237, 242, 234, 0.62);
+    }
+
+    .goal-box-left {
+      left: 20px;
+      border-left: 0;
+    }
+
+    .goal-box-right {
+      right: 20px;
+      border-right: 0;
+    }
+
+    .pressure-zone {
+      position: absolute;
+      z-index: 1;
+      left: var(--zone-x, 53%);
+      top: var(--zone-y, 49%);
+      width: 108px;
+      height: 108px;
+      border: 1px solid rgba(255, 247, 207, 0.68);
+      border-radius: 50%;
+      background: rgba(255, 240, 170, 0.09);
+      opacity: var(--zone-opacity, 0.42);
+      transform: translate(-50%, -50%) scale(var(--zone-scale, 0.9));
+      transition: left 900ms cubic-bezier(0.2, 0.7, 0.2, 1), top 900ms cubic-bezier(0.2, 0.7, 0.2, 1), opacity 500ms ease, transform 900ms ease;
+    }
+
+    .player {
+      --x: 50;
+      --y: 50;
+      position: absolute;
+      z-index: 3;
+      left: calc(var(--x) * 1%);
+      top: calc(var(--y) * 1%);
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(5, 5, 5, 0.72);
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.28);
+      transition: left 1100ms cubic-bezier(0.2, 0.7, 0.2, 1), top 1100ms cubic-bezier(0.2, 0.7, 0.2, 1);
+    }
+
+    .player::after {
+      content: "";
+      position: absolute;
+      top: 13px;
+      left: 50%;
+      width: 5px;
+      height: 8px;
+      border-radius: 0 0 4px 4px;
+      background: inherit;
+      transform: translateX(-50%);
+    }
+
+    .player-home {
+      background: #f4f2e8;
+    }
+
+    .player-away {
+      background: var(--away);
+    }
+
+    .ball {
+      --ball-x: 44;
+      --ball-y: 53;
+      position: absolute;
+      z-index: 5;
+      left: calc(var(--ball-x) * 1%);
+      top: calc(var(--ball-y) * 1%);
+      width: 11px;
+      height: 11px;
+      border: 2px solid var(--black);
+      border-radius: 50%;
+      background: #fff7d5;
+      box-shadow: 0 0 0 5px rgba(255, 247, 213, 0.14);
+      transform: translate(-50%, -50%);
+      transition: left 900ms cubic-bezier(0.2, 0.7, 0.2, 1), top 900ms cubic-bezier(0.2, 0.7, 0.2, 1), box-shadow 300ms ease;
+    }
+
+    .match-demo[data-beat="goal"] .ball {
+      box-shadow: 0 0 0 12px rgba(255, 247, 213, 0.18);
+    }
+
+    .pitch-status {
+      position: absolute;
+      z-index: 8;
+      right: 14px;
+      bottom: 14px;
+      max-width: 190px;
+      padding: 8px 10px;
+      border-radius: var(--radius-sm);
+      background: rgba(5, 5, 5, 0.82);
+      color: var(--muted);
+      font-size: 9px;
+      line-height: 1.35;
+      text-align: right;
+    }
+
+    .beat-controls {
+      position: relative;
+      padding: 16px 20px 18px;
+      border-top: 1px solid var(--divider);
+      background: var(--black);
+    }
+
+    .beat-progress {
+      position: absolute;
+      top: -1px;
+      left: 0;
+      width: var(--progress, 25%);
+      height: 2px;
+      background: var(--text);
+      transition: width 700ms ease;
+    }
+
+    .beat-list {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+
+    .beat-button {
+      min-height: 38px;
+      padding: 0 8px;
+      border: 0;
+      border-radius: var(--radius-sm);
+      background: transparent;
+      color: var(--dim);
+      cursor: pointer;
+      font-size: 9px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .beat-button:hover,
+    .beat-button[aria-pressed="true"] {
+      background: var(--raised);
+      color: var(--text);
+    }
+
+    .section {
+      width: min(var(--container), calc(100% - (var(--page-pad) * 2)));
+      margin: 0 auto;
+      padding: clamp(92px, 12vw, 180px) 0;
+    }
+
+    .section-rule {
+      border-top: 1px solid var(--divider);
+    }
+
+    .statement {
+      max-width: 1160px;
+      margin: 0;
+      font-family: var(--display);
+      font-size: clamp(42px, 6.2vw, 92px);
+      font-weight: 900;
+      letter-spacing: -0.055em;
+      line-height: 1.02;
+      text-wrap: balance;
+    }
+
+    .statement-muted {
+      color: var(--dim);
+    }
+
+    .section-heading {
+      max-width: 780px;
+      margin-bottom: clamp(42px, 7vw, 84px);
+    }
+
+    .section-heading h2,
+    .story-intro h2,
+    .replay-copy h2,
+    .cta-copy h2 {
+      margin-bottom: 20px;
+      font-family: var(--display);
+      font-size: clamp(44px, 5.4vw, 80px);
+      font-weight: 950;
+      letter-spacing: -0.06em;
+      line-height: 0.96;
+      text-wrap: balance;
+    }
+
+    .section-heading p,
+    .story-intro p,
+    .replay-copy p,
+    .cta-copy p {
+      max-width: 620px;
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1.65;
+    }
+
+    .shared-match {
+      overflow: hidden;
+      border: 1px solid var(--divider);
+      border-radius: var(--radius-lg);
+      background: var(--surface);
+    }
+
+    .shared-rail {
+      min-height: 72px;
+      padding: 14px clamp(18px, 3vw, 34px);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      border-bottom: 1px solid var(--divider);
+      background: var(--black);
+    }
+
+    .shared-rail strong {
+      font-size: 14px;
+      font-weight: 900;
+    }
+
+    .shared-state {
+      color: var(--muted);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      font-weight: 850;
+      text-align: right;
+    }
+
+    .view-pair {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .view {
+      min-height: 440px;
+      padding: clamp(28px, 5vw, 64px);
+    }
+
+    .view:first-child {
+      border-right: 1px solid var(--divider);
+    }
+
+    .view-label {
+      margin: 0 0 52px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .view h3 {
+      max-width: 490px;
+      margin-bottom: 18px;
+      font-family: var(--display);
+      font-size: clamp(31px, 3.5vw, 52px);
+      font-weight: 900;
+      letter-spacing: -0.045em;
+      line-height: 1.05;
+    }
+
+    .view p {
+      max-width: 500px;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.65;
+    }
+
+    .pulse-quote {
+      margin-top: 38px;
+      padding: 20px;
+      display: grid;
+      grid-template-columns: 56px 1fr;
+      gap: 16px;
+      border-radius: var(--radius-md);
+      background: var(--raised);
+    }
+
+    .pulse-quote-time {
+      min-height: 44px;
+      display: grid;
+      place-items: center;
+      border-radius: var(--radius-sm);
+      background: var(--black);
+      font-size: 13px;
+      font-weight: 900;
+    }
+
+    .pulse-quote strong {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 15px;
+      line-height: 1.4;
+    }
+
+    .pulse-quote span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .tactical-diagram {
+      position: relative;
+      min-height: 210px;
+      margin-top: 36px;
+      overflow: hidden;
+      border-radius: var(--radius-md);
+      background: var(--pitch-dark);
+    }
+
+    .tactical-diagram::before {
+      content: "";
+      position: absolute;
+      inset: 14px;
+      border: 1px solid rgba(255, 255, 255, 0.48);
+    }
+
+    .tactical-diagram::after {
+      content: "";
+      position: absolute;
+      top: 14px;
+      bottom: 14px;
+      left: 50%;
+      width: 1px;
+      background: rgba(255, 255, 255, 0.48);
+    }
+
+    .diagram-run {
+      position: absolute;
+      z-index: 2;
+      top: 47%;
+      left: 37%;
+      width: 36%;
+      height: 2px;
+      background: rgba(255, 248, 218, 0.74);
+      transform: rotate(-12deg);
+      transform-origin: left center;
+    }
+
+    .diagram-run::after {
+      content: "";
+      position: absolute;
+      top: -4px;
+      right: -2px;
+      border-top: 5px solid transparent;
+      border-bottom: 5px solid transparent;
+      border-left: 8px solid rgba(255, 248, 218, 0.9);
+    }
+
+    .diagram-dot {
+      position: absolute;
+      z-index: 3;
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(5, 5, 5, 0.7);
+      border-radius: 50%;
+    }
+
+    .diagram-dot.home { background: #f4f2e8; }
+    .diagram-dot.away { background: var(--away); }
+
+    .story-grid {
+      display: grid;
+      grid-template-columns: minmax(300px, 0.78fr) minmax(520px, 1.22fr);
+      gap: clamp(50px, 9vw, 130px);
+      align-items: start;
+    }
+
+    .story-intro {
+      position: sticky;
+      top: 42px;
+    }
+
+    .story-list {
+      border-top: 1px solid var(--divider);
+    }
+
+    .story-step {
+      min-height: 190px;
+      padding: 34px 0;
+      display: grid;
+      grid-template-columns: 88px 1fr;
+      gap: 26px;
+      border-bottom: 1px solid var(--divider);
+    }
+
+    .story-time {
+      color: var(--dim);
+      font-family: var(--display);
+      font-size: 28px;
+      font-variant-numeric: tabular-nums;
+      font-weight: 900;
+      letter-spacing: -0.04em;
+    }
+
+    .story-step h3 {
+      margin: 0 0 10px;
+      font-family: var(--display);
+      font-size: clamp(28px, 3vw, 42px);
+      font-weight: 900;
+      letter-spacing: -0.04em;
+      line-height: 1.05;
+    }
+
+    .story-step p {
+      max-width: 520px;
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.65;
+    }
+
+    .story-step-goal .story-time,
+    .story-step-goal h3 {
+      color: var(--text);
+    }
+
+    .replay-grid {
+      display: grid;
+      grid-template-columns: minmax(320px, 0.78fr) minmax(520px, 1.22fr);
+      gap: clamp(54px, 10vw, 150px);
+      align-items: center;
+    }
+
+    .archive {
+      overflow: hidden;
+      border: 1px solid var(--divider);
+      border-radius: var(--radius-lg);
+      background: var(--surface);
+    }
+
+    .archive-header {
+      padding: 18px 22px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--divider);
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .archive-match {
+      min-height: 100px;
+      padding: 18px 22px;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 18px;
+      border-bottom: 1px solid var(--divider);
+    }
+
+    .archive-match:last-child {
+      border-bottom: 0;
+    }
+
+    .archive-team {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .archive-team-away {
+      justify-content: flex-end;
+      text-align: right;
+    }
+
+    .team-swatch {
+      width: 8px;
+      height: 30px;
+      border-radius: var(--radius-pill);
+      background: var(--dim);
+    }
+
+    .archive-score {
+      font-family: var(--display);
+      font-size: 30px;
+      font-variant-numeric: tabular-nums;
+      font-weight: 950;
+      letter-spacing: -0.04em;
+    }
+
+    .archive-meta {
+      grid-column: 1 / -1;
+      margin-top: -12px;
+      color: var(--dim);
+      font-size: 9px;
+      font-weight: 850;
+      letter-spacing: 0.11em;
+      text-align: center;
+      text-transform: uppercase;
+    }
+
+    .cta-section {
+      width: min(var(--container), calc(100% - (var(--page-pad) * 2)));
+      margin: 0 auto clamp(26px, 4vw, 56px);
+      overflow: hidden;
+      border-radius: var(--radius-lg);
+      background: var(--text);
+      color: var(--black);
+    }
+
+    .cta-team-line {
+      height: 6px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .cta-team-line span:first-child { background: var(--home); }
+    .cta-team-line span:last-child { background: var(--away); }
+
+    .cta-inner {
+      padding: clamp(42px, 7vw, 92px);
+      display: grid;
+      grid-template-columns: minmax(340px, 1fr) minmax(360px, 0.85fr);
+      align-items: end;
+      gap: clamp(44px, 9vw, 130px);
+    }
+
+    .cta-copy h2 {
+      color: var(--black);
+    }
+
+    .cta-copy p {
+      color: #505050;
+    }
+
+    .signup-form {
+      display: grid;
+      gap: 12px;
+    }
+
+    .signup-label {
+      font-size: 12px;
+      font-weight: 850;
+    }
+
+    .signup-row {
+      display: flex;
+      gap: 10px;
+    }
+
+    .signup-input {
+      min-width: 0;
+      min-height: 54px;
+      flex: 1;
+      padding: 0 18px;
+      border: 1px solid #8a8a8a;
+      border-radius: var(--radius-pill);
+      background: transparent;
+      color: var(--black);
+    }
+
+    .signup-input::placeholder {
+      color: #6a6a6a;
+    }
+
+    .signup-input:focus-visible {
+      outline-color: var(--black);
+    }
+
+    .signup-button {
+      min-height: 54px;
+      padding: 0 22px;
+      border: 1px solid var(--black);
+      border-radius: var(--radius-pill);
+      background: var(--black);
+      color: var(--text);
+      cursor: pointer;
+      font-weight: 850;
+    }
+
+    .form-note,
+    .form-status {
+      margin: 0;
+      color: #5d5d5d;
+      font-size: 11px;
+    }
+
+    .form-status {
+      min-height: 17px;
+      color: #184c31;
+      font-weight: 800;
+    }
+
+    .site-footer {
+      width: min(var(--container), calc(100% - (var(--page-pad) * 2)));
+      min-height: 100px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      color: var(--dim);
+      font-size: 11px;
+    }
+
+    .site-footer strong {
+      color: var(--text);
+      font-size: 15px;
+    }
+
+    @media (max-width: 1120px) {
+      .hero {
+        min-height: auto;
+        grid-template-columns: 1fr;
+      }
+
+      .hero-copy {
+        max-width: 820px;
+      }
+
+      h1 {
+        max-width: 900px;
+      }
+
+      .match-demo {
+        width: 100%;
+      }
+    }
+
+    @media (max-width: 820px) {
+      .nav {
+        grid-template-columns: 1fr auto;
+      }
+
+      .nav-links {
+        display: none;
+      }
+
+      .demo-body {
+        grid-template-columns: 1fr;
+      }
+
+      .pulse-panel {
+        min-height: 330px;
+        border-right: 0;
+        border-bottom: 1px solid var(--divider);
+      }
+
+      .pitch-wrap {
+        min-height: 420px;
+      }
+
+      .view-pair,
+      .story-grid,
+      .replay-grid,
+      .cta-inner {
+        grid-template-columns: 1fr;
+      }
+
+      .view:first-child {
+        border-right: 0;
+        border-bottom: 1px solid var(--divider);
+      }
+
+      .story-intro {
+        position: static;
+      }
+
+      .cta-inner {
+        align-items: start;
+      }
+    }
+
+    @media (max-width: 560px) {
+      .nav {
+        min-height: 68px;
+      }
+
+      .nav-action .button {
+        min-height: 38px;
+        padding: 0 14px;
+        font-size: 11px;
+      }
+
+      .hero {
+        padding-top: 48px;
+        gap: 48px;
+      }
+
+      h1 {
+        font-size: clamp(58px, 19vw, 78px);
+      }
+
+      .hero-intro {
+        font-size: 16px;
+      }
+
+      .hero-actions {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .hero-actions .button {
+        width: 100%;
+      }
+
+      .match-demo {
+        border-radius: 18px;
+      }
+
+      .score-rail {
+        min-height: 92px;
+        padding: 12px;
+        gap: 8px;
+      }
+
+      .flag {
+        width: 36px;
+        height: 25px;
+        border-radius: 6px;
+      }
+
+      .team {
+        gap: 8px;
+      }
+
+      .team-code {
+        font-size: 17px;
+      }
+
+      .team-name {
+        display: none;
+      }
+
+      .score-center {
+        min-width: 108px;
+      }
+
+      .score {
+        font-size: 30px;
+      }
+
+      .match-clock {
+        font-size: 8px;
+      }
+
+      .pulse-panel {
+        min-height: 318px;
+        padding: 16px;
+      }
+
+      .pitch-wrap {
+        min-height: 330px;
+      }
+
+      .beat-controls {
+        padding-inline: 10px;
+      }
+
+      .beat-button {
+        padding: 0 4px;
+        font-size: 8px;
+        letter-spacing: 0.03em;
+      }
+
+      .shared-rail {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .shared-state {
+        text-align: left;
+      }
+
+      .view {
+        min-height: 0;
+        padding: 28px 20px 34px;
+      }
+
+      .view-label {
+        margin-bottom: 36px;
+      }
+
+      .story-step {
+        min-height: 0;
+        grid-template-columns: 66px 1fr;
+        gap: 16px;
+      }
+
+      .story-time {
+        font-size: 22px;
+      }
+
+      .archive-match {
+        padding-inline: 14px;
+        gap: 9px;
+      }
+
+      .archive-team {
+        font-size: 11px;
+      }
+
+      .archive-score {
+        font-size: 25px;
+      }
+
+      .cta-section {
+        width: calc(100% - 24px);
+      }
+
+      .cta-inner {
+        padding: 38px 22px;
+      }
+
+      .signup-row {
+        flex-direction: column;
+      }
+
+      .site-footer {
+        padding: 28px 0;
+        align-items: flex-start;
+        flex-direction: column;
+        justify-content: center;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+
+      *,
+      *::before,
+      *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <nav class="nav" aria-label="Primary navigation">
+      <a class="wordmark" href="#top" aria-label="GameCrew home">GameCrew</a>
+      <div class="nav-links">
+        <a href="#product">The app</a>
+        <a href="#story">How it works</a>
+        <a href="#replay">Match archive</a>
+      </div>
+      <div class="nav-action">
+        <a class="button button-primary button-compact" href="#get-gamecrew">
+          <span class="android-mark" aria-hidden="true"></span>
+          Android access
+        </a>
+      </div>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="top" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow">The Android match companion</p>
+        <h1 id="hero-title">
+          <span class="headline-line">See the match</span>
+          <span class="headline-line headline-line-muted">taking shape.</span>
+        </h1>
+        <p class="hero-intro">
+          GameCrew turns football match events into a clear live story—so you can follow the
+          <strong>pressure, turning points and momentum</strong>, not just the score.
+        </p>
+        <div class="hero-actions">
+          <a class="button button-primary" href="#get-gamecrew">
+            <span class="android-mark" aria-hidden="true"></span>
+            Get GameCrew for Android
+          </a>
+          <button class="button button-secondary" type="button" data-watch-demo>
+            Watch a match unfold
+          </button>
+        </div>
+        <p class="hero-note">Android first · Live fixtures and completed-match stories</p>
+      </div>
+
+      <div class="match-demo" id="match-demo" data-beat="possession" aria-label="GameCrew product demonstration">
+        <div class="match-color-line" aria-hidden="true"><span></span><span></span></div>
+        <div class="demo-kicker">
+          <span>Product demo · Match replay</span>
+          <button class="replay-demo" type="button" data-replay-demo>Replay sequence</button>
+        </div>
+
+        <div class="score-rail">
+          <div class="team team-home">
+            <span class="flag flag-mexico" aria-hidden="true"><span></span><span></span><span></span></span>
+            <span class="team-copy">
+              <span class="team-code">MEX</span>
+              <span class="team-name">Mexico</span>
+            </span>
+          </div>
+
+          <div class="score-center" aria-live="polite">
+            <span class="score"><span id="home-score">1</span><span class="score-divider">—</span><span id="away-score">0</span></span>
+            <span class="match-clock" id="match-clock">67:08 · In possession</span>
+          </div>
+
+          <div class="team team-away">
+            <span class="team-copy">
+              <span class="team-code">ECU</span>
+              <span class="team-name">Ecuador</span>
+            </span>
+            <span class="flag flag-ecuador" aria-hidden="true"><span></span><span></span><span></span></span>
+          </div>
+        </div>
+
+        <div class="demo-body">
+          <section class="pulse-panel" aria-labelledby="pulse-panel-title">
+            <div class="panel-label">
+              <span id="pulse-panel-title">Match Pulse</span>
+              <span class="panel-label-live">Story view</span>
+            </div>
+
+            <div class="pulse-feed">
+              <div class="pulse-item pulse-item-previous">
+                <span class="pulse-minute">66'</span>
+                <span>
+                  <strong class="pulse-title">Shape restored</strong>
+                  <span class="pulse-copy">Mexico recover their structure after the restart.</span>
+                </span>
+              </div>
+
+              <div class="pulse-item pulse-item-current" aria-live="polite" aria-atomic="true">
+                <span class="pulse-minute" id="pulse-minute">67'</span>
+                <span>
+                  <strong class="pulse-title" id="pulse-title">Settled possession</strong>
+                  <span class="pulse-copy" id="pulse-copy">Mexico begin patiently, drawing Ecuador toward the ball before looking for space.</span>
+                  <span class="pulse-meta" id="pulse-meta">Mexico · Building from the back</span>
+                </span>
+              </div>
+            </div>
+          </section>
+
+          <section class="pitch-wrap" aria-label="Game View tactical illustration">
+            <div class="pitch-label"><span class="pitch-label-dot"></span><span id="pitch-phase">Building</span></div>
+            <div class="pitch" aria-hidden="true">
+              <div class="pitch-boundary"></div>
+              <div class="halfway"></div>
+              <div class="center-circle"></div>
+              <div class="penalty-box penalty-box-left"></div>
+              <div class="penalty-box penalty-box-right"></div>
+              <div class="goal-box goal-box-left"></div>
+              <div class="goal-box goal-box-right"></div>
+              <div class="pressure-zone" id="pressure-zone"></div>
+
+              <span class="player player-home" data-player="0"></span>
+              <span class="player player-home" data-player="1"></span>
+              <span class="player player-home" data-player="2"></span>
+              <span class="player player-home" data-player="3"></span>
+              <span class="player player-home" data-player="4"></span>
+              <span class="player player-home" data-player="5"></span>
+              <span class="player player-away" data-player="6"></span>
+              <span class="player player-away" data-player="7"></span>
+              <span class="player player-away" data-player="8"></span>
+              <span class="player player-away" data-player="9"></span>
+              <span class="player player-away" data-player="10"></span>
+              <span class="player player-away" data-player="11"></span>
+              <span class="ball" id="demo-ball"></span>
+            </div>
+            <div class="pitch-status">Tactical illustration · Not player-tracking footage</div>
+          </section>
+        </div>
+
+        <div class="beat-controls">
+          <div class="beat-progress" id="beat-progress"></div>
+          <div class="beat-list" aria-label="Match sequence moments">
+            <button class="beat-button" type="button" data-beat-index="0" aria-pressed="true">Possession</button>
+            <button class="beat-button" type="button" data-beat-index="1" aria-pressed="false">Pressure</button>
+            <button class="beat-button" type="button" data-beat-index="2" aria-pressed="false">Breakthrough</button>
+            <button class="beat-button" type="button" data-beat-index="3" aria-pressed="false">Goal</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-rule" aria-label="GameCrew value proposition">
+      <p class="statement">
+        A score tells you what happened.
+        <span class="statement-muted">GameCrew helps you understand how the match is changing.</span>
+      </p>
+    </section>
+
+    <section class="section section-rule" id="product" aria-labelledby="product-title">
+      <header class="section-heading">
+        <p class="eyebrow">One match · One shared truth</p>
+        <h2 id="product-title">Two ways to follow it.</h2>
+        <p>Read the developing story in Match Pulse, then see the same pressure and progression take shape in Game View.</p>
+      </header>
+
+      <div class="shared-match">
+        <div class="shared-rail">
+          <strong>Mexico 1 — 0 Ecuador</strong>
+          <span class="shared-state">67:29 · Opening forming</span>
+        </div>
+
+        <div class="view-pair">
+          <article class="view">
+            <p class="view-label">Match Pulse · Read the shift</p>
+            <h3>The final pass is beginning to appear.</h3>
+            <p>GameCrew turns confirmed match signals into concise commentary that explains the pressure and the turning point—not another wall of statistics.</p>
+            <div class="pulse-quote">
+              <span class="pulse-quote-time">67'</span>
+              <span>
+                <strong>Mexico pull the block narrow, then find the runner beyond it.</strong>
+                <span>Mexico · Breakthrough</span>
+              </span>
+            </div>
+          </article>
+
+          <article class="view">
+            <p class="view-label">Game View · See the space</p>
+            <h3>Pressure, progression and important moments—on one board.</h3>
+            <p>Anonymous tactical markers show how the passage develops without claiming exact player-tracking coordinates.</p>
+            <div class="tactical-diagram" aria-label="Illustrative tactical diagram">
+              <span class="diagram-run"></span>
+              <span class="diagram-dot home" style="left: 29%; top: 61%"></span>
+              <span class="diagram-dot home" style="left: 43%; top: 48%"></span>
+              <span class="diagram-dot home" style="left: 61%; top: 38%"></span>
+              <span class="diagram-dot home" style="left: 70%; top: 64%"></span>
+              <span class="diagram-dot away" style="left: 56%; top: 52%"></span>
+              <span class="diagram-dot away" style="left: 66%; top: 45%"></span>
+              <span class="diagram-dot away" style="left: 78%; top: 54%"></span>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-rule" id="story" aria-labelledby="story-title">
+      <div class="story-grid">
+        <header class="story-intro">
+          <p class="eyebrow">A match, moment by moment</p>
+          <h2 id="story-title">Follow the change, not the noise.</h2>
+          <p>GameCrew keeps the important movement of the match in one readable story while you watch.</p>
+        </header>
+
+        <div class="story-list">
+          <article class="story-step">
+            <span class="story-time">67:08</span>
+            <div>
+              <h3>Possession</h3>
+              <p>The team settles on the ball. Match Pulse establishes who has control; Game View shows the shape before it changes.</p>
+            </div>
+          </article>
+          <article class="story-step">
+            <span class="story-time">67:16</span>
+            <div>
+              <h3>Pressure</h3>
+              <p>Space tightens around the ball. The commentary explains the shift while the tactical view makes the pressure visible.</p>
+            </div>
+          </article>
+          <article class="story-step">
+            <span class="story-time">67:29</span>
+            <div>
+              <h3>Breakthrough</h3>
+              <p>A lane opens and the story changes instantly. You see the turning point without digging through a statistics screen.</p>
+            </div>
+          </article>
+          <article class="story-step story-step-goal">
+            <span class="story-time">67:33</span>
+            <div>
+              <h3>Goal</h3>
+              <p>The score changes only after the moment is confirmed. Both views stay tied to the same match truth.</p>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-rule" id="replay" aria-labelledby="replay-title">
+      <div class="replay-grid">
+        <div class="replay-copy">
+          <p class="eyebrow">After full time</p>
+          <h2 id="replay-title">The match story stays with you.</h2>
+          <p>Return to completed matches, revisit the turning points and see how the final score took shape.</p>
+        </div>
+
+        <div class="archive" aria-label="Example completed match archive">
+          <div class="archive-header"><span>Recent matches</span><span>Replay ready</span></div>
+          <div class="archive-match">
+            <span class="archive-team"><span class="team-swatch" style="background:#137a4b"></span>Mexico</span>
+            <span class="archive-score">2 — 0</span>
+            <span class="archive-team archive-team-away">Ecuador<span class="team-swatch" style="background:#f0cb28"></span></span>
+            <span class="archive-meta">Full time · Match story saved</span>
+          </div>
+          <div class="archive-match">
+            <span class="archive-team"><span class="team-swatch" style="background:#74acdf"></span>Argentina</span>
+            <span class="archive-score">1 — 1</span>
+            <span class="archive-team archive-team-away">Portugal<span class="team-swatch" style="background:#d52b1e"></span></span>
+            <span class="archive-meta">Full time · Match story saved</span>
+          </div>
+          <div class="archive-match">
+            <span class="archive-team"><span class="team-swatch" style="background:#ffffff"></span>England</span>
+            <span class="archive-score">3 — 2</span>
+            <span class="archive-team archive-team-away">Brazil<span class="team-swatch" style="background:#009b3a"></span></span>
+            <span class="archive-meta">Full time · Match story saved</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="cta-section" id="get-gamecrew" aria-labelledby="cta-title">
+      <div class="cta-team-line" aria-hidden="true"><span></span><span></span></div>
+      <div class="cta-inner">
+        <div class="cta-copy">
+          <p class="eyebrow">Android early access</p>
+          <h2 id="cta-title">Your next match deserves more than a scoreline.</h2>
+          <p>Be first to know when GameCrew is ready for your Android phone.</p>
+        </div>
+
+        <form class="signup-form" id="signup-form">
+          <label class="signup-label" for="email">Email address</label>
+          <div class="signup-row">
+            <input class="signup-input" id="email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required />
+            <button class="signup-button" type="submit">Join Android access</button>
+          </div>
+          <p class="form-note">Prototype signup only—this mockup does not send or store your details.</p>
+          <p class="form-status" id="form-status" role="status" aria-live="polite"></p>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <strong>GameCrew</strong>
+    <span>Android-first football match intelligence · Game View uses illustrative positioning, not player tracking.</span>
+  </footer>
+
+  <script>
+    (function () {
+      var matchDemo = document.getElementById("match-demo");
+      var players = Array.prototype.slice.call(document.querySelectorAll("[data-player]"));
+      var beatButtons = Array.prototype.slice.call(document.querySelectorAll("[data-beat-index]"));
+      var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      var timers = [];
+
+      var beats = [
+        {
+          key: "possession",
+          clock: "67:08 · In possession",
+          title: "Settled possession",
+          copy: "Mexico begin patiently, drawing Ecuador toward the ball before looking for space.",
+          meta: "Mexico · Building from the back",
+          phase: "Building",
+          score: [1, 0],
+          ball: [37, 58],
+          zone: [42, 55, 0.28, 0.82],
+          positions: [[12,50],[25,26],[26,72],[39,43],[43,68],[55,54],[54,28],[60,45],[64,66],[74,33],[78,55],[86,72]]
+        },
+        {
+          key: "pressure",
+          clock: "67:16 · Pressure building",
+          title: "The space is tightening",
+          copy: "Ecuador narrow the centre and force the move toward the right touchline.",
+          meta: "Ecuador · Defensive pressure",
+          phase: "Under pressure",
+          score: [1, 0],
+          ball: [52, 66],
+          zone: [54, 64, 0.7, 1.02],
+          positions: [[13,50],[29,28],[31,73],[45,45],[51,69],[59,58],[52,31],[58,49],[62,66],[71,36],[77,56],[84,72]]
+        },
+        {
+          key: "breakthrough",
+          clock: "67:29 · Opening forming",
+          title: "The final lane opens",
+          copy: "A quick switch pulls the block across and releases the runner beyond the pressure.",
+          meta: "Mexico · Breakthrough",
+          phase: "Breakthrough",
+          score: [1, 0],
+          ball: [70, 38],
+          zone: [69, 39, 0.88, 1.08],
+          positions: [[13,50],[35,25],[34,73],[54,52],[63,66],[75,31],[54,29],[61,48],[68,62],[75,45],[82,56],[88,70]]
+        },
+        {
+          key: "goal",
+          clock: "67:33 · Goal confirmed",
+          title: "The move reaches its finish",
+          copy: "Mexico turn the opening into a goal. The score updates only when the moment is confirmed.",
+          meta: "Mexico · Goal",
+          phase: "Goal",
+          score: [2, 0],
+          ball: [94, 49],
+          zone: [88, 49, 0.36, 1.28],
+          positions: [[14,50],[39,27],[37,73],[59,54],[72,66],[85,38],[58,28],[66,49],[74,61],[81,45],[87,57],[91,72]]
+        }
+      ];
+
+      function clearTimers() {
+        timers.forEach(function (timer) { window.clearTimeout(timer); });
+        timers = [];
+      }
+
+      function setText(id, value) {
+        var element = document.getElementById(id);
+        if (element) element.textContent = value;
+      }
+
+      function applyBeat(index) {
+        var beat = beats[index];
+        matchDemo.setAttribute("data-beat", beat.key);
+        setText("match-clock", beat.clock);
+        setText("home-score", String(beat.score[0]));
+        setText("away-score", String(beat.score[1]));
+        setText("pulse-title", beat.title);
+        setText("pulse-copy", beat.copy);
+        setText("pulse-meta", beat.meta);
+        setText("pitch-phase", beat.phase);
+
+        var ball = document.getElementById("demo-ball");
+        ball.style.setProperty("--ball-x", beat.ball[0]);
+        ball.style.setProperty("--ball-y", beat.ball[1]);
+
+        var zone = document.getElementById("pressure-zone");
+        zone.style.setProperty("--zone-x", beat.zone[0] + "%");
+        zone.style.setProperty("--zone-y", beat.zone[1] + "%");
+        zone.style.setProperty("--zone-opacity", beat.zone[2]);
+        zone.style.setProperty("--zone-scale", beat.zone[3]);
+
+        players.forEach(function (player, playerIndex) {
+          var position = beat.positions[playerIndex];
+          player.style.setProperty("--x", position[0]);
+          player.style.setProperty("--y", position[1]);
+        });
+
+        beatButtons.forEach(function (button, buttonIndex) {
+          button.setAttribute("aria-pressed", buttonIndex === index ? "true" : "false");
+        });
+
+        document.getElementById("beat-progress").style.setProperty("--progress", ((index + 1) * 25) + "%");
+      }
+
+      function playSequence(shouldScroll) {
+        clearTimers();
+        if (shouldScroll) {
+          matchDemo.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "center" });
+        }
+
+        if (reduceMotion) {
+          applyBeat(2);
+          return;
+        }
+
+        applyBeat(0);
+        [1, 2, 3].forEach(function (beatIndex) {
+          timers.push(window.setTimeout(function () { applyBeat(beatIndex); }, beatIndex * 2600));
+        });
+      }
+
+      beatButtons.forEach(function (button) {
+        button.addEventListener("click", function () {
+          clearTimers();
+          applyBeat(Number(button.getAttribute("data-beat-index")));
+        });
+      });
+
+      Array.prototype.slice.call(document.querySelectorAll("[data-watch-demo], [data-replay-demo]")).forEach(function (button) {
+        button.addEventListener("click", function () {
+          playSequence(button.hasAttribute("data-watch-demo"));
+        });
+      });
+
+      document.getElementById("signup-form").addEventListener("submit", function (event) {
+        event.preventDefault();
+        setText("form-status", "Thanks—this prototype keeps your email on this device only.");
+      });
+
+      applyBeat(reduceMotion ? 2 : 0);
+      if (!reduceMotion) {
+        timers.push(window.setTimeout(function () { playSequence(false); }, 900));
+      }
+    })();
+  </script>
+</body>
+</html>

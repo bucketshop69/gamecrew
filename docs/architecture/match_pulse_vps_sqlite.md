@@ -119,8 +119,8 @@ saved entries; they do not start TxLINE ingestion or LLM work.
 
 The LLM must echo the beat identity and generation, cover every required frame,
 and pass closed-world action, team attribution, all-score, semantic cue,
-repetition, and unsupported-claim validation. A major beat may receive one
-validation-only repair attempt.
+repetition, and unsupported-claim validation. Any model or validation failure
+leaves the deterministic fallback as the published commentary.
 
 SQLite workers atomically claim pending beats using an owner, lease, attempt
 count, and retry timestamp. Provider failures use persisted exponential retry;
@@ -136,6 +136,12 @@ one additional grounded reflection request: the model silently critiques its
 draft for coverage, continuity, repetition, importance, and natural broadcast
 voice, then returns revised JSON. The revised result still passes the same
 deterministic truth validator before it can replace the saved fallback.
+
+Live provider calibration is deliberately separate from persistence. The
+`commentary:calibrate` command loads a fixed, representative set of beats from
+the durable fixture database, reports draft/reflection/final text, provider
+latency, and token usage, and never writes its samples to the commentary feed.
+Use `--cases=goal,red_card` to keep a tuning run bounded to demonstrated gaps.
 ```
 
 Runtime note:

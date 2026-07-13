@@ -47,6 +47,23 @@ export interface MatchPulseCommentaryEnrichmentResult {
   attempted: number;
   completed: number;
   failed: number;
+  traces?: readonly MatchPulseCommentaryEnrichmentTrace[];
+}
+
+export interface MatchPulseCommentaryEnrichmentTrace {
+  entryId: string;
+  stages: readonly MatchPulseCommentaryEnrichmentStageTrace[];
+}
+
+export interface MatchPulseCommentaryEnrichmentStageTrace {
+  stage: 'draft' | 'reflection';
+  durationMs: number;
+  commentary?: string;
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
 }
 
 interface MatchPulseCommentaryLlmJson {
@@ -76,6 +93,17 @@ interface ChatCompletionResponse {
       content?: string;
     };
   }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
+}
+
+interface ChatCompletionResult {
+  content: string;
+  durationMs: number;
+  usage?: MatchPulseCommentaryEnrichmentStageTrace['usage'];
 }
 
 export function createMatchPulseEnrichmentService(config: ApiConfig): MatchPulseEnrichmentService {
@@ -96,6 +124,7 @@ export function createMatchPulseEnrichmentService(config: ApiConfig): MatchPulse
           attempted: 0,
           completed: 0,
           failed: 0,
+          traces: [],
         };
       },
     };
@@ -129,13 +158,17 @@ class OpenAiCompatibleMatchPulseEnrichmentService implements MatchPulseEnrichmen
     previousEntries: readonly MatchPulseCommentaryEntry[],
   ): Promise<MatchPulseCommentaryEnrichmentResult> {
     const enrichedEntries: MatchPulseCommentaryEntry[] = [];
+    const traces: MatchPulseCommentaryEnrichmentTrace[] = [];
     const previousContext = [...previousEntries];
     let failed = 0;
 
     for (const entry of pendingEntries) {
+      const stages: MatchPulseCommentaryEnrichmentStageTrace[] = [];
       try {
         const prompt = buildCommentaryEnrichmentPrompt(context, entry, previousContext);
-        const content = await this.createChatCompletion(prompt);
+        const draftCompletion = await this.createChatCompletionResult(prompt);
+        const content = draftCompletion.content;
+        stages.push(toStageTrace('draft', draftCompletion));
         let draft: MatchPulseCommentaryEntry | undefined;
         let draftFailure: Error | undefined;
         try {
@@ -156,7 +189,9 @@ class OpenAiCompatibleMatchPulseEnrichmentService implements MatchPulseEnrichmen
             content,
             draftFailure?.message,
           );
-          const reflectedContent = await this.createChatCompletion(reflectionPrompt);
+          const reflectionCompletion = await this.createChatCompletionResult(reflectionPrompt);
+          const reflectedContent = reflectionCompletion.content;
+          stages.push(toStageTrace('reflection', reflectionCompletion));
           enriched = applyCommentaryLlmJson(
             context,
             entry,
@@ -181,6 +216,8 @@ class OpenAiCompatibleMatchPulseEnrichmentService implements MatchPulseEnrichmen
           ...entry,
           enrichmentStatus: 'failed',
         });
+      } finally {
+        traces.push({ entryId: entry.id, stages });
       }
     }
 
@@ -190,6 +227,7 @@ class OpenAiCompatibleMatchPulseEnrichmentService implements MatchPulseEnrichmen
       attempted: pendingEntries.length,
       completed: enrichedEntries.filter((entry) => entry.enrichmentStatus === 'complete').length,
       failed,
+      traces,
     };
   }
 
@@ -209,8 +247,15 @@ class OpenAiCompatibleMatchPulseEnrichmentService implements MatchPulseEnrichmen
   }
 
   private async createChatCompletion(messages: readonly { role: 'system' | 'user'; content: string }[]): Promise<string> {
+    return (await this.createChatCompletionResult(messages)).content;
+  }
+
+  private async createChatCompletionResult(
+    messages: readonly { role: 'system' | 'user'; content: string }[],
+  ): Promise<ChatCompletionResult> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.llmTimeoutMs);
+    const startedAt = performance.now();
     try {
       const response = await fetch(`${this.config.llmBaseUrl}/v1/chat/completions`, {
         method: 'POST',
@@ -240,7 +285,23 @@ class OpenAiCompatibleMatchPulseEnrichmentService implements MatchPulseEnrichmen
         throw new Error('LLM response did not include message content.');
       }
 
-      return content;
+      return {
+        content,
+        durationMs: Math.round(performance.now() - startedAt),
+        ...(payload.usage ? {
+          usage: {
+            ...(typeof payload.usage.prompt_tokens === 'number'
+              ? { promptTokens: payload.usage.prompt_tokens }
+              : {}),
+            ...(typeof payload.usage.completion_tokens === 'number'
+              ? { completionTokens: payload.usage.completion_tokens }
+              : {}),
+            ...(typeof payload.usage.total_tokens === 'number'
+              ? { totalTokens: payload.usage.total_tokens }
+              : {}),
+          },
+        } : {}),
+      };
     } catch (error) {
       throw new CommentaryProviderError(
         error instanceof Error ? error.message : 'Unknown LLM provider failure.',
@@ -250,6 +311,24 @@ class OpenAiCompatibleMatchPulseEnrichmentService implements MatchPulseEnrichmen
       clearTimeout(timeout);
     }
   }
+}
+
+function toStageTrace(
+  stage: MatchPulseCommentaryEnrichmentStageTrace['stage'],
+  result: ChatCompletionResult,
+): MatchPulseCommentaryEnrichmentStageTrace {
+  let commentary: string | undefined;
+  try {
+    commentary = parseCommentaryLlmJson(result.content).commentary.trim();
+  } catch {
+    // Invalid structured output is still useful as a failed stage measurement.
+  }
+  return {
+    stage,
+    durationMs: result.durationMs,
+    ...(commentary ? { commentary } : {}),
+    ...(result.usage ? { usage: result.usage } : {}),
+  };
 }
 
 export function buildCommentaryEnrichmentPrompt(
@@ -357,6 +436,7 @@ export function buildCommentaryEnrichmentPrompt(
         'The currentBeat and its mustCoverFacts are the only authority for what happened now. Broadcast memory is continuity context, not evidence for a new current fact.',
         'Cover every mustCoverFact in its supplied seq order. coveredFrameIds is an auditable claim of which supplied facts the line covers, not permission to add facts.',
         'Sparse event data is not full play-by-play. Do not invent causal links, player names, formations, injuries, exact locations, possession, chance quality, or event outcomes.',
+        'Do not invent crowd, stadium, celebration, referee-action, score-state, or atmosphere details. Mention a lead or score only when currentBeat.score supplies it.',
         'Do not mention the box, goalkeeper, save, miss, block, clearance, delivery, cross, header, goal, card, penalty, VAR, or score change unless that fact is explicitly supplied for the current entry.',
         'In particular, when current events contain only shots, corners, free kicks, or throw-ins, do not use goal, goalward, goalmouth, net, scorer, opener, breakthrough, or scoring language.',
         'Never expose confidence, verification, source, validation, action-label, or schema terminology to the supporter.',
@@ -390,6 +470,11 @@ export function buildCommentaryReflectionPrompt(
         checklist: [
           'Cover every originally supplied fact and lifecycle meaning.',
           'Use only grounded teams, players, scores, actions, and continuity.',
+          'Use explicit grounded event language: say goal or scores for a goal, red card or yellow card for a card, and state the supplied restart context.',
+          'Copy or naturally shorten only the supplied playerName; never replace it with another player.',
+          'Describe only the current beat. Do not announce a future restart, phase, or action.',
+          'Do not add physical details about how an event happened unless those details are supplied.',
+          'Do not add crowd, stadium, celebration, referee-action, or score-state details unless they are supplied.',
           'Sound like natural live football commentary rather than an event log.',
           'Connect naturally with the supplied broadcast memory without repeating recent phrasing.',
           'Match the beat importance and remain concise.',
@@ -632,20 +717,19 @@ export function validateCommentaryLlmJson(
     throw new CommentaryValidationError('Commentary cannot include betting language.');
   }
 
-  const scoreClaims = [...combined.matchAll(/\b(\d{1,2})\s*[-:]\s*(\d{1,2})\b/g)];
-  if (scoreClaims.length > 1) {
-    throw new CommentaryValidationError('Commentary cannot state multiple score claims.');
+  assertScoreClaims(commentary, entry);
+  if (voiceLine) assertScoreClaims(voiceLine, entry);
+
+  if (!entry.scoreAtMoment && /\b(?:leads?|leading|trails?|trailing|level|ahead|behind)\b/i.test(combined)) {
+    throw new CommentaryValidationError('Commentary cannot state a score relationship without grounded score context.');
   }
-  const scoreClaim = scoreClaims[0];
-  if (scoreClaim && entry.scoreAtMoment) {
-    const home = Number(scoreClaim[1]);
-    const away = Number(scoreClaim[2]);
-    if (home !== entry.scoreAtMoment.home || away !== entry.scoreAtMoment.away) {
-      throw new CommentaryValidationError('Commentary score claim does not match source score.');
-    }
-  } else if (scoreClaim && !entry.scoreAtMoment) {
-    throw new CommentaryValidationError('Commentary cannot state a score without a source score.');
+  if (/\b(?:crowd|fans?|stadium|supporters?)\b/i.test(combined)) {
+    throw new CommentaryValidationError('Commentary cannot invent crowd or stadium atmosphere.');
   }
+  if (/\b(?:puts?|raises?) (?:the )?whistle\b|\bwhistle to (?:his|her|their) lips\b|\b(?:the )?referee blows?\b/i.test(combined)) {
+    throw new CommentaryValidationError('Commentary cannot invent a physical referee action.');
+  }
+  assertNoFutureSpeculation(combined, entry);
 
   assertClosedWorldMaterialActions(combined, sourceActions, entry);
   assertMaterialActionCoverage(commentary, sourceActions, entry);
@@ -672,6 +756,35 @@ export function validateCommentaryLlmJson(
       if (sourceEvent.id && !sourceIds.has(sourceEvent.id)) {
         throw new CommentaryValidationError(`Commentary references unknown source event ${sourceEvent.id}.`);
       }
+    }
+  }
+}
+
+function assertScoreClaims(text: string, entry: MatchPulseCommentaryEntry): void {
+  const claims = [...text.matchAll(/\b(\d{1,2})\s*[-:]\s*(\d{1,2})\b/g)];
+  if (claims.length > 1) throw new CommentaryValidationError('Commentary cannot state multiple score claims.');
+  const claim = claims[0];
+  if (!claim) return;
+  if (!entry.scoreAtMoment) {
+    throw new CommentaryValidationError('Commentary cannot state a score without a source score.');
+  }
+  if (Number(claim[1]) !== entry.scoreAtMoment.home || Number(claim[2]) !== entry.scoreAtMoment.away) {
+    throw new CommentaryValidationError('Commentary score claim does not match source score.');
+  }
+}
+
+function assertNoFutureSpeculation(text: string, entry: MatchPulseCommentaryEntry): void {
+  const groundedPlayerTokens = (entry.groundedFacts ?? [])
+    .map((fact) => fact.playerName)
+    .filter((value): value is string => Boolean(value))
+    .map((name) => new Set(normalizeForComparison(name).split(' ').filter(Boolean)));
+  for (const match of text.matchAll(/\bwill\b/gi)) {
+    const nextToken = text.slice((match.index ?? 0) + match[0].length).match(/^\s+([\p{L}'’.-]+)/u)?.[1];
+    const isGroundedPlayerName = match[0] === 'Will'
+      && nextToken !== undefined
+      && groundedPlayerTokens.some((tokens) => tokens.has('will') && tokens.has(normalizeForComparison(nextToken)));
+    if (!isGroundedPlayerName) {
+      throw new CommentaryValidationError('Commentary cannot speculate about a future action.');
     }
   }
 }
@@ -711,7 +824,7 @@ const MATERIAL_ACTIONS: readonly {
   { actions: ['throw_in'], pattern: /\bthrow[ -]?ins?\b/i, label: 'throw-in' },
   { actions: ['goal_kick'], pattern: /\bgoal[ -]?kicks?\b/i, label: 'goal kick' },
   { actions: ['penalty'], pattern: /\bpenalt(?:y|ies)\b/i, label: 'penalty' },
-  { actions: ['red_card', 'yellow_card'], pattern: /\b(?:(?:red|yellow)\s+)?cards?\b/i, label: 'card' },
+  { actions: ['red_card', 'yellow_card'], pattern: /\b(?:(?:(?:red|yellow)\s+)?cards?|straight red|sent off)\b/i, label: 'card' },
   { actions: ['substitution'], pattern: /\b(?:substitutions?|subs?|changes?|replaced|replaces|comes? (?:on|off))\b/i, label: 'substitution' },
   { actions: ['save'], pattern: /\b(?:sav(?:e|es|ed|ing)|goalkeeper)\b/i, label: 'save' },
   { actions: ['miss'], pattern: /\bmiss(?:es|ed|ing)?\b/i, label: 'miss' },
@@ -733,7 +846,13 @@ function assertClosedWorldMaterialActions(
 ): void {
   for (const claim of MATERIAL_ACTIONS) {
     const contextualGoal = claim.label === 'goal' && getRestartContext(entry) === 'after_goal';
-    if (claim.pattern.test(text) && !contextualGoal && !claim.actions.some((action) => sourceActions.has(action))) {
+    const contextualAddedTime = claim.label === 'additional time' && isClockGroundedStoppageTime(entry);
+    if (
+      claim.pattern.test(text)
+      && !contextualGoal
+      && !contextualAddedTime
+      && !claim.actions.some((action) => sourceActions.has(action))
+    ) {
       throw new CommentaryValidationError(`Commentary made unsupported ${claim.label} claim.`);
     }
   }
@@ -745,13 +864,13 @@ function assertMaterialActionCoverage(
   entry: MatchPulseCommentaryEntry,
 ): void {
   const requirements: readonly [readonly string[], RegExp, string][] = [
-    [['goal'], /\bgoal\b/i, 'goal'],
+    [['goal'], /\b(?:goal|scores?|scored|finds? the net|breakthrough)\b/i, 'goal'],
     [['corner'], /\bcorners?\b/i, 'corner'],
     [['shot'], /\b(?:shots?|efforts?|attempts?)\b/i, 'shot'],
     [['free_kick'], /\bfree[ -]?kick\b/i, 'free kick'],
     [['throw_in'], /\bthrow[ -]?in\b/i, 'throw-in'],
     [['penalty'], /\bpenalt(?:y|ies)\b/i, 'penalty'],
-    [['red_card', 'yellow_card'], /\b(?:red|yellow)?\s*card\b/i, 'card'],
+    [['red_card', 'yellow_card'], /\b(?:(?:red|yellow)?\s*card|straight red|sent off)\b/i, 'card'],
     [['substitution'], /\b(?:substitution|change|replaced|comes? (?:on|off))\b/i, 'substitution'],
     [['injury'], /\b(?:injur(?:y|ies|ed)|hurt)\b/i, 'injury'],
     [['var'], /\b(?:var|video assistant|video review|being checked)\b/i, 'VAR'],
@@ -778,10 +897,18 @@ function assertMaterialActionCoverage(
     if (restartContext === 'second_half' && !/\bsecond half\b/i.test(text)) {
       throw new CommentaryValidationError('Commentary omitted the required second-half restart context.');
     }
-    if (restartContext === 'after_goal' && !/\b(?:after|following) (?:the )?goal\b/i.test(text)) {
+    if (restartContext === 'after_goal' && !/\b(?:after|following) (?:(?:the|that) )?goal\b/i.test(text)) {
       throw new CommentaryValidationError('Commentary omitted the required post-goal restart context.');
     }
   }
+}
+
+function isClockGroundedStoppageTime(entry: MatchPulseCommentaryEntry): boolean {
+  const minute = entry.clock.minute;
+  return typeof minute === 'number' && (
+    (entry.period === 'first_half' && minute > 45)
+    || (entry.period === 'second_half' && minute > 90)
+  );
 }
 
 function getRestartContext(entry: MatchPulseCommentaryEntry): string | undefined {
@@ -854,7 +981,7 @@ function assertGroundedMultiplicity(text: string, entry: MatchPulseCommentaryEnt
 function assertGroundedMajorFacts(text: string, entry: MatchPulseCommentaryEntry): void {
   const facts = entry.groundedFacts ?? [];
   const goal = facts.find((fact) => normalizeAction(fact.action) === 'goal' || normalizeCueKind(fact.kind) === 'goal');
-  if (goal?.playerName && !normalizeForComparison(text).includes(normalizeForComparison(goal.playerName))) {
+  if (goal?.playerName && !hasGroundedPlayerReference(text, goal.playerName)) {
     throw new CommentaryValidationError('Commentary omitted or changed the grounded scorer name.');
   }
   if (goal && entry.scoreAtMoment) {
@@ -863,12 +990,19 @@ function assertGroundedMajorFacts(text: string, entry: MatchPulseCommentaryEntry
       throw new CommentaryValidationError('Goal commentary omitted the grounded score.');
     }
   }
-  if (facts.some((fact) => normalizeAction(fact.action) === 'red_card') && !/\bred\s+card\b/i.test(text)) {
+  if (facts.some((fact) => normalizeAction(fact.action) === 'red_card') && !/\b(?:red\s+card|straight red|sent off)\b/i.test(text)) {
     throw new CommentaryValidationError('Commentary omitted the grounded red-card type.');
   }
   if (facts.some((fact) => normalizeAction(fact.action) === 'yellow_card') && !/\byellow\s+card\b/i.test(text)) {
     throw new CommentaryValidationError('Commentary omitted the grounded yellow-card type.');
   }
+}
+
+function hasGroundedPlayerReference(text: string, playerName: string): boolean {
+  const supplied = [...new Set(normalizeForComparison(playerName).split(' ').filter((token) => token.length > 1))];
+  const spoken = new Set(normalizeForComparison(text).split(' '));
+  const requiredMatches = Math.min(2, supplied.length);
+  return supplied.filter((token) => spoken.has(token)).length >= requiredMatches;
 }
 
 function assertNoInventedPlayerName(
@@ -887,9 +1021,9 @@ function assertNoInventedPlayerName(
     for (const token of String(value ?? '').match(/\p{L}+/gu) ?? []) allowed.add(normalizeForComparison(token));
   }
   const common = new Set([
-    'a', 'additional', 'an', 'and', 'another', 'away', 'corner', 'first', 'free',
+    'a', 'additional', 'after', 'an', 'and', 'another', 'away', 'corner', 'deep', 'first', 'free',
     'both', 'full', 'goal', 'half', 'halftime', 'home', 'it', 'moments', 'now', 'one',
-    'play', 'pressure', 'second', 'still', 'substitution', 'that', 'the', 'these',
+    'play', 'pressure', 'second', 'still', 'straight', 'substitution', 'that', 'the', 'these',
     'they', 'this', 'those', 'var', 'with',
   ]);
   const capitalized = [...text.matchAll(/\b\p{Lu}[\p{L}'’.-]*\b/gu)];

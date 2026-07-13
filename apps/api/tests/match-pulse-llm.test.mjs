@@ -186,6 +186,16 @@ test('commentary validator rejects invented players, exact locations, and unsupp
   assert.doesNotThrow(
     () => validateCommentaryLlmJson(workerContext, current, candidate('That spell now brings a corner and an effort for Home.')),
   );
+  assert.doesNotThrow(
+    () => validateCommentaryLlmJson(workerContext, current, candidate('Deep into the half, Home take a corner before an effort.')),
+  );
+  assert.doesNotThrow(
+    () => validateCommentaryLlmJson(workerContext, current, candidate('After that spell, Home take a corner before an effort.')),
+  );
+  assert.throws(
+    () => validateCommentaryLlmJson(workerContext, current, candidate('El Tri take a corner before an effort.')),
+    /ungrounded proper name/,
+  );
   assert.throws(
     () => validateCommentaryLlmJson(workerContext, current, candidate('Home take a corner before an effort from range goes off target.')),
     /unsupported shot range claim/,
@@ -252,6 +262,23 @@ test('commentary validator preserves grounded counts and major-event details', (
   assert.throws(() => validateCommentaryLlmJson(workerContext, goal, goalCandidate('Goal for Home! It is 2-0.')), /scorer name/);
   assert.throws(() => validateCommentaryLlmJson(workerContext, goal, goalCandidate('Goal for Home, scored by Ana Silva.')), /grounded score/);
   assert.doesNotThrow(() => validateCommentaryLlmJson(workerContext, goal, goalCandidate('Goal for Home, scored by Ana Silva. It is 2-0.')));
+  assert.doesNotThrow(() => validateCommentaryLlmJson(workerContext, goal, {
+    ...goalCandidate('Goal for Home, scored by Ana Silva. It is 2-0.'),
+    voiceLine: 'Ana Silva scores for Home. It is 2-0.',
+  }));
+  assert.doesNotThrow(() => validateCommentaryLlmJson(workerContext, {
+    ...goal,
+    groundedFacts: [{ ...goal.groundedFacts[0], playerName: 'Quinones Quinones, Julian Andres' }],
+  }, goalCandidate('Goal for Home! Julian Quinones makes it 2-0.')));
+  const willGoal = {
+    ...goal,
+    scoreAtMoment: { home: 1, away: 0 },
+    groundedFacts: [{ ...goal.groundedFacts[0], playerName: 'Will Smallbone' }],
+  };
+  assert.doesNotThrow(() => validateCommentaryLlmJson(workerContext, willGoal, {
+    ...goalCandidate('Goal for Home, scored by Will Smallbone. It is 1-0.'),
+    voiceLine: 'Will Smallbone scores for Home. It is 1-0.',
+  }));
   assert.throws(
     () => validateCommentaryLlmJson(workerContext, goal, goalCandidate('Goal for Away, scored by Ana Silva. It is 2-0.')),
     /wrong team/,
@@ -259,6 +286,10 @@ test('commentary validator preserves grounded counts and major-event details', (
   assert.throws(
     () => validateCommentaryLlmJson(workerContext, goal, goalCandidate('Goal for Home, scored by Ana Silva. It is 2-0, not 9-9.')),
     /multiple score claims/,
+  );
+  assert.throws(
+    () => validateCommentaryLlmJson(workerContext, goal, goalCandidate('Goal for Home, scored by Ana Silva. It is 2-0 and the stadium erupts.')),
+    /crowd or stadium atmosphere/,
   );
 
   const red = entry({
@@ -275,6 +306,57 @@ test('commentary validator preserves grounded counts and major-event details', (
     commentary: 'Away receive a card.',
     coveredFrameIds: red.sourceFrameIds,
   }), /red-card type/);
+  assert.doesNotThrow(() => validateCommentaryLlmJson(workerContext, red, {
+    entryId: red.id,
+    batchId: red.batchId,
+    projectionGeneration: 4,
+    commentary: 'Away are shown a straight red and sent off.',
+    coveredFrameIds: red.sourceFrameIds,
+  }));
+  assert.doesNotThrow(() => validateCommentaryLlmJson(workerContext, {
+    ...red, period: 'second_half', clock: { minute: 95, label: "95'" },
+  }, {
+    entryId: red.id,
+    batchId: red.batchId,
+    projectionGeneration: 4,
+    commentary: 'Away are shown a straight red in stoppage time.',
+    coveredFrameIds: red.sourceFrameIds,
+  }));
+  assert.throws(() => validateCommentaryLlmJson(workerContext, red, {
+    entryId: red.id,
+    batchId: red.batchId,
+    projectionGeneration: 4,
+    commentary: 'Straight red for Away, and Home will see this one out a player up.',
+    coveredFrameIds: red.sourceFrameIds,
+  }), /future action/);
+});
+
+test('commentary cannot invent score state when the current beat has no grounded score', () => {
+  const current = entry({
+    scoreAtMoment: undefined,
+    sourceFrameIds: ['semantic-frame-20'],
+    sourceEvents: [{ kind: 'system', id: 'semantic-frame-20', seq: 20, action: 'phase_change' }],
+    groundedFacts: [{ id: 'half', kind: 'phase_change', action: 'phase_change', lifecycle: 'confirmed', basis: 'direct', value: { phase: 'half_time' }, sourceSeqs: [20] }],
+  });
+  const candidate = {
+    entryId: current.id,
+    batchId: current.batchId,
+    projectionGeneration: 4,
+    commentary: 'It is half-time and Home lead at the break.',
+    coveredFrameIds: current.sourceFrameIds,
+  };
+  assert.throws(() => validateCommentaryLlmJson(workerContext, current, candidate), /score relationship/);
+});
+
+test('commentary cannot invent a physical referee action', () => {
+  const current = entry();
+  assert.throws(() => validateCommentaryLlmJson(workerContext, current, {
+    entryId: current.id,
+    batchId: current.batchId,
+    projectionGeneration: 4,
+    commentary: 'The referee blows before Home take a corner and have an effort.',
+    coveredFrameIds: current.sourceFrameIds,
+  }), /physical referee action/);
 });
 
 test('commentary validator rejects every unsupported material action claim', () => {
@@ -348,6 +430,13 @@ test('commentary validator requires lifecycle meaning for every narrated cue fam
     });
     const validationContext = { homeTeam: workerContext.homeTeam, awayTeam: workerContext.awayTeam };
     assert.doesNotThrow(() => validateCommentaryLlmJson(validationContext, current, candidate(item.valid)), item.action);
+    if (item.restartContext === 'after_goal') {
+      assert.doesNotThrow(() => validateCommentaryLlmJson(
+        validationContext,
+        current,
+        candidate('Home get us back underway after that goal.'),
+      ));
+    }
     assert.throws(() => validateCommentaryLlmJson(validationContext, current, candidate(item.omitted)), /omitted|required/, item.action);
   }
 });
@@ -371,7 +460,10 @@ test('major beats reflect once and revise an invalid draft', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_url, init) => {
     requests.push(JSON.parse(init.body));
-    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(responses.shift()) } }] }), {
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(responses.shift()) } }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     });
@@ -426,7 +518,10 @@ test('pressure beats reflect a valid draft once before saving the improved line'
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_url, init) => {
     requests.push(JSON.parse(init.body));
-    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(responses.shift()) } }] }), {
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(responses.shift()) } }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     });
@@ -445,6 +540,10 @@ test('pressure beats reflect a valid draft once before saving the improved line'
     assert.equal(reflection.validationFailure, undefined);
     assert.equal(result.entries[0].commentary, 'That spell now brings a corner and an effort for Home.');
     assert.equal(result.entries[0].enrichmentPromptVersion, 'engine-commentary-v2-reflection');
+    assert.deepEqual(result.traces?.[0].stages.map((stage) => [stage.stage, stage.commentary, stage.usage?.totalTokens]), [
+      ['draft', 'Home have a corner and an effort.', 15],
+      ['reflection', 'That spell now brings a corner and an effort for Home.', 15],
+    ]);
   } finally {
     globalThis.fetch = originalFetch;
   }

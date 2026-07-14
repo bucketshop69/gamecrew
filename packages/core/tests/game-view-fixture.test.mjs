@@ -163,3 +163,16 @@ test('buildGameViewTimeline without pacing options omits playback timing entirel
     assert.equal(scene.playback, undefined, 'playback timing is opt-in via options.pacing');
   }
 });
+
+test('card and set_piece scenes carry the source incident action for renderer variants', () => {
+  const frames = loadFrames('18179759');
+  const scenes = buildGameViewTimeline(frames);
+  const cards = scenes.filter((scene) => scene.kind === 'card');
+  assert.ok(cards.length >= 3, 'fixture must contain card scenes');
+  for (const card of cards) {
+    assert.ok(['yellow_card', 'red_card'].includes(card.sourceAction), `card scene must carry yellow_card/red_card, got ${card.sourceAction}`);
+  }
+  assert.ok(cards.some((card) => card.sourceAction === 'red_card'), 'the 95\' red card must be distinguishable');
+  const setPieces = scenes.filter((scene) => scene.kind === 'set_piece');
+  assert.ok(setPieces.length > 0 && setPieces.every((scene) => typeof scene.sourceAction === 'string'), 'set_piece scenes must carry their action');
+});

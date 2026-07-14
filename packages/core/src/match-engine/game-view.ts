@@ -79,6 +79,12 @@ export interface GameViewScene {
   phase?: MatchEnginePhase;
   durationHint: GameViewDurationHint;
   lifecycle?: MatchEngineLifecycle;
+  /**
+   * The source cue's incident action for scenes whose rendering varies by it
+   * (card: yellow_card/red_card; set_piece: corner/free_kick/throw_in/penalty).
+   * Copied verbatim from the cue value; absent when the source omits it.
+   */
+  sourceAction?: string;
   /** Only present on goal_sequence scenes. See `GameViewGoalBeatKind` doc. */
   beats?: readonly GameViewGoalBeat[];
   /** Only present on goal_sequence celebration takeovers. */
@@ -367,6 +373,7 @@ function handleSetPiece(state: DirectorState, frame: SemanticFrame, cue: Simulat
     participant: cue.participant,
     teamId: cue.teamId,
     lifecycle: cue.lifecycle,
+    ...(typeof cue.value.action === 'string' ? { sourceAction: cue.value.action } : {}),
     durationHint: DEFAULT_DURATION.set_piece,
   };
   state.scenes.push(scene);
@@ -397,6 +404,7 @@ function handleCard(state: DirectorState, frame: SemanticFrame, cue: SimulationC
     teamId: cue.teamId,
     player: cue.player,
     lifecycle: cue.lifecycle,
+    ...(typeof cue.value.action === 'string' ? { sourceAction: cue.value.action } : {}),
     durationHint: DEFAULT_DURATION.card,
   };
   state.scenes.push(scene);

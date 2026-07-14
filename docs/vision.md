@@ -2,11 +2,11 @@
 
 GameCrew is a mobile-first live match companion for football fans watching with a phone in hand.
 
-The product is not a generic scoreboard, news feed, fantasy app, or betting app. It is the place a fan opens during a match to choose a game, understand what is happening, follow the live pulse, and join the conversation around that match.
+The product is not a generic scoreboard, news feed, fantasy app, or real-money betting app. It is the place a fan opens during a match to choose a game, understand what is happening, watch the play unfold, and mess around with friends and the crowd while it happens.
 
 The simplest version of the idea:
 
-**Pick a match. Follow the pulse. Talk with the room.**
+**Pick a match. Follow the pulse. Watch the play. Bet your Lambo (playfully).**
 
 ## Product Thesis
 
@@ -19,9 +19,24 @@ Those experiences are usually split across too many places:
 - feeds are noisy and detached from the live match
 - betting products use the match as a market, not a fan experience
 
-GameCrew should combine the useful parts without becoming any of those things.
+GameCrew combines the useful parts without becoming any of those things.
 
-It should feel like a match poster, a live timeline, and a watch party in one mobile flow.
+It should feel like a match poster, a live timeline, a stylized broadcast, and a rowdy group of friends in one mobile flow.
+
+## Confirmed Feature Set
+
+This is the committed scope for the current push (TxODDS World Cup hackathon, targeting first place). Everything below is confirmed direction, not exploration:
+
+1. **Match Pulse** — grounded live commentary timeline (built, wired to real API).
+2. **Game View** — top-down animated visualization of the play. Currently a scripted demo built for the video submission; the confirmed work is driving it from the backend semantic frames.
+3. **Global Game Chat** — one global chat per match. Everyone watching that game is in the same room. No private rooms for now.
+4. **Playful Asset Bets** — the way friends bet: "I'm betting my house", "my Lambo", "my bike". Users receive playful assets as gifts for joining/watching games, and stake them on match moments against the room. Assets live and circulate inside GameCrew only — no real money, no cash value. Implemented the Solana way: assets can be small NFTs / on-chain tokens, which is the product's crypto layer.
+5. **Coolness Points** — GameCrew's score for a user. You earn coolness, you show off coolness. It is deliberately playful, not a currency.
+6. **Leaderboard** — some form of ranking built on coolness points / winning playful bets.
+7. **Banger landing screen** — the current marketing site was a rushed overnight build; it needs to become a genuinely strong landing page.
+8. **Solana dApp Store submission** — the app gets submitted to the Solana dApp Store for credibility and distribution.
+
+The MVP core is **Game View + Global Chat + Playful Bets working together in one match screen**.
 
 ## Current Experience Direction
 
@@ -29,16 +44,17 @@ GameCrew starts from the match, not from a dashboard.
 
 The home screen is a large match carousel. Each match owns the screen visually through its teams or countries. The app shell stays black and white; the match brings the color.
 
-When a user taps a match, they should not go through another lobby or decision step. They should land directly inside the match detail screen, with tabs:
+When a user taps a match, they land directly inside the match detail screen — no lobby, no extra decision step — with modes:
 
-1. **Match Pulse** - the default view
-2. **Chat** - the watch-party conversation
+1. **Match Pulse** — the default view, the factual live timeline
+2. **Game View** — the animated top-down look at the play
+3. **Global Chat** — the room for that game, where playful bets happen
 
 This keeps the flow short:
 
 1. Home: choose a match.
-2. Match detail: follow the match pulse.
-3. Chat tab: join the watch-party layer.
+2. Match detail: follow the pulse, watch the play.
+3. Chat: talk with the room and throw down a playful bet.
 
 ## Visual Direction
 
@@ -85,7 +101,6 @@ Below the match poster, the user can switch between simple filters:
 - Live
 - Upcoming
 - Replay
-- Hosted
 
 The home screen should not become a news dashboard. If we add supporting content, it should stay quiet and match-oriented, such as recent games or replayable games.
 
@@ -98,15 +113,13 @@ It should keep the same visual language:
 - compact match header
 - team/country colors only in the header
 - black and white content shell
-- tabs for the main modes
-
-The default tab is **Match Pulse**.
+- tabs/modes for Match Pulse, Game View, and Global Chat
 
 ### Match Pulse
 
 Match Pulse is the live factual layer.
 
-It should show the match as a vertical timeline from kick-off to the current minute. The user should be able to scan what happened without reading a dense stats page.
+It shows the match as a vertical timeline from kick-off to the current minute. The user should be able to scan what happened without reading a dense stats page.
 
 Examples:
 
@@ -115,92 +128,59 @@ Examples:
 - `63m Yellow card - Argentina booked after stopping the break.`
 - `58m Goal - Portugal equalise.`
 
-This view is for the passive fan as much as the active fan. A user who does not care about watch parties should still get value here.
+This view is for the passive fan as much as the active fan. A user who does not care about chat or bets still gets value here.
 
-### Chat
+### Game View
 
-Chat is the watch-party layer.
+Game View is the visual layer: a stylized top-down animation of the play — players, ball, movement — built from the same TxLINE-grounded semantic frames that power Match Pulse.
 
-It should feel tied to the match, not like a generic group chat. Messages, reactions, and system moments should sit around the live game.
+The first version was hand-scripted as a demo for the hackathon video submission. The confirmed direction is that Game View consumes the backend's semantic frames so what the user sees is the real match, illustrated — not choreography.
 
-Users should be able to:
+Game View is the wow-moment of the product and part of the MVP core.
 
-- read the room conversation
-- send messages
-- react quickly
-- see system moments like confirmed goals, cards, corners, and phase changes
+### Global Chat
 
-Chat is where private rooms, public hosted rooms, and creator-hosted rooms can grow later.
+Global Chat is the social layer: one shared room per game.
 
-## Watch Parties
+Everyone watching a match is in the same conversation. It should feel tied to the match, not like a generic group chat — messages, reactions, and system moments (goals, cards, phase changes) sit around the live game.
 
-Watch parties are the social extension of the match detail screen.
+Global Chat is also where playful bets surface: challenges thrown to the room, assets on the line, results settled by real match events.
 
-There are two likely room types:
+Private rooms, hosted rooms, and creator rooms are explicitly **not** in scope right now. Global chat per game is the model.
 
-- **Private rooms** for friends
-- **Hosted rooms** for streamers, communities, bars, campuses, or fan groups
+## Playful Asset Bets
 
-The first product pass does not need complex room management. The important thing is that the app can show how a match becomes social without forcing every user to participate.
+This is GameCrew's take on how friends actually bet: nobody hands over money, they bet their house, their Lambo, their bike, their dignity.
 
-Passive user:
+The direction:
 
-- opens the match
-- reads Match Pulse
-- maybe checks Chat
+- users receive **playful assets** as gifts — for joining a game, for showing up, for moments ("we're sending you a gift")
+- assets are things like a house, a Lambo, a car, a bike — fun, recognizable, braggable
+- users stake these assets on match moments against the room ("I'm betting my Lambo there's a goal from this attack")
+- winning grows your garage; losing means the room saw you lose your Lambo
+- assets exist and circulate **inside GameCrew only** — no real money, no cash-out, no fiat value
+- implemented the Solana way: assets can be minted as small NFTs / on-chain tokens, giving them real ownership and giving GameCrew its on-chain layer
 
-Engaged user:
+The line we hold:
 
-- joins the room
-- reacts
-- makes calls
-- climbs a match leaderboard
+- **playful stakes, real match outcomes, zero real money**
+- betting *language* is fine here because the stakes are toys — what is banned is real-money mechanics: deposits, cash-out, odds pricing, payouts
 
-## Points And Calls
+## Coolness Points And Leaderboard
 
-GameCrew can use match points as a gamification layer, but this should come after the core match detail experience feels right.
+Coolness is GameCrew's status metric.
 
-The current direction:
+- users earn **coolness points** through activity: watching, chatting, winning playful bets, reading the match right
+- coolness is for showing off, not for spending — it is a flex, not a wallet
+- a **leaderboard** ranks users by coolness (per match, and some broader form — exact shape TBD)
 
-- every user gets a fixed number of points for a match
-- points are used for quick match calls
-- correct calls earn points
-- wrong calls lose points
-- leaderboards show who read the match best
-
-Examples of calls:
-
-- `Goal from this attack?`
-- `Next corner: Portugal or Argentina?`
-- `Card before half-time?`
-- `Who controls the next five minutes?`
-- `Will this pressure become a shot?`
-
-This must not use betting language.
-
-Avoid:
-
-- bet
-- wager
-- stake
-- odds boost
-- payout
-- cash out
-
-Use:
-
-- call
-- points
-- streak
-- room leaderboard
-- match receipt
-- verified moment
+The tone stays playful. Coolness points should never feel like a financial balance.
 
 ## TxLINE Boundary
 
-GameCrew should stay inside TxLINE's data boundary for the live product.
+GameCrew stays inside TxLINE's data boundary for the live product.
 
-TxLINE can power:
+TxLINE powers:
 
 - fixture discovery
 - live and upcoming matches
@@ -216,65 +196,58 @@ GameCrew adds the consumer layer:
 
 - mobile-first match selection
 - match pulse timeline
-- watch-party chat
-- reactions
-- match calls
-- points
-- room leaderboards
+- game view animation
+- global game chat
+- playful asset bets settled by real match events
+- coolness points and leaderboards
 - replay mode
 - demo-ready flow
 
-We should avoid anything that depends on:
+We avoid anything that depends on:
 
 - match video
 - official sports marks or unlicensed assets
 - real-money betting
 - editorial news unless a separate licensed/source-backed feed is added later
 
-## First Version
+## Solana Layer
 
-The first version should focus on one polished mobile flow:
+GameCrew's crypto angle is deliberately light and native to the product:
 
-1. Open the home screen.
-2. Swipe through live, upcoming, or replayable matches.
-3. Tap a match poster.
-4. Land directly on Match Pulse.
-5. Switch to Chat.
-6. See live/replay events drive the timeline and room context.
+- playful assets as small NFTs / on-chain tokens, owned by the user, circulating only within GameCrew
+- submission to the **Solana dApp Store** as the distribution and credibility channel
 
-The MVP should not try to solve everything. It should prove that a live match can become a beautiful, responsive, social mobile experience.
+Crypto serves the fan experience, not the other way around. No token speculation, no real-money rails.
 
-## Demo Goal
+## Hackathon Goal
 
-The demo should make the product clear in the first minute.
+GameCrew is being built for the TxODDS World Cup hackathon (Consumer and Fan Experiences track), and the target is **first place** — not second, not third.
 
-Judges should see:
+The demo should make the product clear in the first minute. Judges should see:
 
-- a match-driven home screen
-- team/country colors shaping the match poster
-- a live or replayed match detail screen
-- Match Pulse updating from TxLINE data
-- Chat connected to match moments
-- a clear explanation of how TxLINE powers the flow
+- a match-driven home screen with team/country colors shaping the poster
+- Match Pulse updating from real TxLINE data
+- Game View animating the actual play from backend semantic frames
+- Global Chat with playful bets happening around match moments
+- coolness and leaderboard giving the room stakes
+- a clear explanation of how TxLINE powers the whole flow
 
-Because live matches may not be active during judging, replay mode matters. Historical TxLINE data should let us replay a past match as if it is live.
+Because live matches may not be active during judging, replay mode matters. Historical TxLINE data lets us replay a past match as if it is live — that is the reliable demo path.
 
 The demo message:
 
-**GameCrew turns TxLINE live football data into a mobile match companion fans would actually keep open during a game.**
+**GameCrew turns TxLINE live football data into a mobile match companion fans would actually keep open during a game — and lets them bet their Lambo on it, playfully.**
 
 ## Long-Term Direction
 
-If the first version works, GameCrew can grow into:
+If this version works, GameCrew can grow into:
 
-- private crew rooms
-- public hosted watch parties
-- creator-hosted match rooms
-- bar and fan-zone leaderboards
-- match points and call-based games
+- private crew rooms and hosted watch parties (creators, bars, campuses, fan groups)
+- richer playful-asset economy and gifting
 - replay challenges
 - post-match receipts
 - sponsored room prompts
 - tournament-wide fan rankings
+- voice narration and richer Game View presentation
 
 The long-term opportunity is not to own scores. It is to own the interactive layer around live football.

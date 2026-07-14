@@ -2,7 +2,16 @@
 
 ## Status
 
-Backlog. Preserve this issue for a later Home Screen implementation phase.
+Implemented on 2026-07-13. Pending product review.
+
+The client now partitions the canonical `/matches` response into live/upcoming
+featured fixtures and newest-first completed fixtures. The Home Screen uses one
+vertical scroll owner with correction-free local navigation state, threshold
+hysteresis, reduced-motion behavior, destination focus, duplicate-press
+protection, and static team flags with muted team names. The existing backend contract
+now discovers the full TxLINE-supported 30-day historical fixture window, while
+archival score snapshots are cached so the client's 10-second refresh does not
+re-fetch settled results. Recently played fixtures stay fresh for corrections.
 
 ## Objective
 
@@ -11,9 +20,9 @@ Turn the Home Screen into one continuous vertical match surface:
 - the live or upcoming match poster remains the primary experience at the top
 - recent completed games appear directly below it in the same scroll view
 - a quiet contextual text control lets the user jump down to recent games and back up to live/upcoming games
-- arriving through that control gives the destination flags one brief, subtle wave so the screen feels alive
+- flags remain static so fixture browsing stays calm and visually stable
 
-This is a complete Home Screen layout and navigation change, not only a motion task.
+This is a complete Home Screen layout and navigation change.
 
 ## Penpot source of truth
 
@@ -47,7 +56,7 @@ The small amount of the next section or its navigation visible below the poster 
 ### Recent games section
 
 - Place recent completed games immediately below the featured section in the same vertical scroll surface.
-- Follow `Landing - Recent Games v1`: a clean grid using paired flags, the final score, and a small date/time or final-state line.
+- Follow `Landing - Recent Games v1`: a clean grid using paired flags, muted team names directly below each flag, the final score, and a small date/time or final-state line.
 - Keep the section visually embedded in the black Home Screen shell.
 - Do not add bordered fixture cards, heavy panels, decorative containers, `Match Archive`, `Completed Fixtures`, `Newest First`, or similar explanatory copy.
 - The Home Screen must have one vertical scroll owner. Do not introduce a nested vertically scrolling recent-games list.
@@ -77,7 +86,7 @@ The navigation occupies the same visual role at both ends of the interaction and
 
 ## Motion behavior
 
-Motion should explain the change in location and add one restrained expression of life.
+Motion should only explain the change in location.
 
 ### Section movement
 
@@ -85,21 +94,15 @@ Motion should explain the change in location and add one restrained expression o
 - Keep the contextual control visually stable while its label crossfades or shifts a few pixels and its arrow changes direction.
 - Do not animate unrelated Home Screen elements.
 
-### Flag wave on jump arrival
+### Static flags
 
-- Trigger the flag wave only after a contextual navigation press finishes scrolling to its destination.
-- When moving down, briefly wave the flags visible in the recent-games destination.
-- When moving up, briefly wave the featured live/upcoming match flags.
-- Keep the motion subtle and short: approximately `1–2 seconds` in total, low amplitude, and only one short sequence.
-- If several recent-game flags are visible, use a very small stagger rather than starting every flag on the exact same frame.
-- The animation must stop completely after the arrival response. Flags must not wave continuously.
-- Ordinary manual scrolling must not repeatedly trigger the wave.
-- Treat the wave as interface character, not match truth: it must not imply a goal, attack, score change, or other unconfirmed event.
+- Do not animate featured or recent-game flags.
+- Keep every flag stable during manual scrolling, carousel movement, and contextual section jumps.
 
 ### Reduced motion
 
 - Respect the operating system's reduced-motion preference.
-- With reduced motion enabled, use an immediate or minimally animated section jump and do not wave the flags.
+- With reduced motion enabled, use an immediate or minimally animated section jump.
 - Preserve the contextual label and arrow change so navigation remains understandable without animation.
 
 ## Interaction and accessibility requirements
@@ -117,6 +120,7 @@ Motion should explain the change in location and add one restrained expression o
 - The lower grid contains completed recent fixtures and their final scores.
 - Clients must consume GameCrew APIs and must not interpret TxLINE directly.
 - Match status, score, teams, timing, and home/away orientation must come from canonical GameCrew match data.
+- A completed fixture's visibility must not depend on Match Pulse commentary or engine materialization.
 - Motion may emphasize the interface but must never invent or alter match truth.
 
 ## Out of scope
@@ -124,7 +128,7 @@ Motion should explain the change in location and add one restrained expression o
 - Redesigning the match poster or recent-games visual style
 - Adding a separate Recent Games screen or bottom-navigation destination
 - Match Detail behavior after selecting a fixture
-- Continuous ambient flag animation
+- Any flag animation
 - Goal, card, substitution, or Match Pulse event animation
 - Adding panels, borders, archive filters, sorting controls, or editorial content
 
@@ -133,14 +137,15 @@ Motion should explain the change in location and add one restrained expression o
 - The live/upcoming section uses approximately `90%` of the usable viewport instead of consuming the entire screen.
 - `RECENT GAMES ↓` is visible near the lower-left edge of the first view without weakening the featured match hierarchy.
 - Recent completed games appear directly below in the same vertical scroll surface.
+- The grid includes every completed fixture returned by GameCrew from TxLINE's supported 30-day lookback, not only locally materialized Match Pulse fixtures.
 - The recent grid visually follows `Landing - Recent Games v1` and remains borderless.
 - Pressing `RECENT GAMES ↓` smoothly lands at the recent-games section.
 - At the recent-games section, the navigation becomes `LIVE & UPCOMING ↑` and returns the user to the featured section.
 - Manual scrolling works in both directions and updates the contextual navigation without flicker.
-- Programmatic arrival briefly waves only the destination flags, then fully settles.
-- Manual scrolling does not repeatedly trigger flag waves.
+- Featured and recent-game flags never animate.
+- Each recent-game flag has its canonical team name directly below it in muted text.
 - Repeated presses during an active jump do not produce competing scroll or animation sequences.
-- Reduced-motion mode removes the flag wave and minimizes the programmatic movement without removing navigation clarity.
+- Reduced-motion mode minimizes the programmatic movement without removing navigation clarity.
 - Both contextual states have accessible labels and at least `44 × 44` point touch targets.
 - The implementation introduces no bordered match cards, nested vertical scrolling, or non-canonical match information.
 
@@ -152,4 +157,4 @@ Motion should explain the change in location and add one restrained expression o
 - Test rapid repeated presses and crossing the section threshold slowly.
 - Test live-at-top and upcoming-at-top states.
 - Test reduced-motion and screen-reader behavior.
-- Confirm that all flag animations stop after their single arrival sequence.
+- Confirm that no flag animation occurs during carousel or section navigation.

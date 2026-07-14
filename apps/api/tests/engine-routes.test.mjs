@@ -220,7 +220,7 @@ test('lists durable replay fixtures when TxLINE is offline', async () => {
   assert.equal(body.source, 'engine');
 });
 
-test('deduplicates TxLINE metadata with canonical local score and phase before filtering and limiting', async () => {
+test('remote completion cannot be hidden by a stale local live checkpoint', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const path = new URL(String(input)).pathname;
@@ -237,12 +237,11 @@ test('deduplicates TxLINE metadata with canonical local score and phase before f
   try {
     const historical = {
       id: 'txline-18179759', txline: { fixtureId: '18179759', source: 'live' },
-      filter: 'replay', status: 'replayable', competition: 'Competition 72',
+      filter: 'live', status: 'live', competition: 'Competition 72',
       kickoffUtc: '2026-07-01T12:00:00.000Z',
       homeTeam: { id: 'home', name: 'Mexico', shortName: 'MEX', countryCode: 'MEX', colors: { primary: '#000', secondary: '#fff' }, flag: { code: 'MEX', bands: [] } },
       awayTeam: { id: 'away', name: 'Ecuador', shortName: 'ECU', countryCode: 'ECU', colors: { primary: '#000', secondary: '#fff' }, flag: { code: 'ECU', bands: [] } },
-      score: { home: 2, away: 0 }, clock: { label: 'Full time', phase: 'replay_ready' },
-      replay: { available: true, label: 'Replay ready' },
+      score: { home: 2, away: 0 }, clock: { label: "Live 70'", phase: 'second_half', minute: 70 },
     };
     const ingestion = {
       async listMatches() { return [historical]; },
@@ -256,6 +255,49 @@ test('deduplicates TxLINE metadata with canonical local score and phase before f
     assert.equal(body.matches[0].status, 'replayable');
     assert.deepEqual(body.matches[0].score, { home: 2, away: 0 });
     assert.equal(body.source, 'combined');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('a completed TxLINE score correction wins over stale completed materialization', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (path === '/auth/guest/start') return Response.json({ token: 'jwt' });
+    if (path === '/api/fixtures/snapshot') return Response.json([{
+      FixtureId: 18209181, StartTime: Date.parse('2026-07-09T20:00:00.000Z'),
+      Competition: 'Remote World Cup', CompetitionId: 72, FixtureGroupId: 10115677,
+      Participant1Id: 769, Participant1: 'France', Participant2Id: 1585,
+      Participant2: 'Morocco', Participant1IsHome: true, Ts: 1,
+    }]);
+    if (path === '/api/scores/snapshot/18209181') return Response.json([{
+      FixtureId: 18209181, Ts: Date.parse('2026-07-09T23:00:00.000Z'), Seq: 1,
+      StatusId: 5, Stats: { 1: 3, 2: 0 },
+    }]);
+    return new Response('Not found', { status: 404 });
+  };
+  try {
+    const staleCompleted = {
+      id: 'txline-18209181', txline: { fixtureId: '18209181', source: 'live' },
+      filter: 'replay', status: 'replayable', competition: 'Competition 72',
+      kickoffUtc: '2026-07-09T20:00:00.000Z',
+      homeTeam: { id: 'home', name: 'France', shortName: 'FRA', countryCode: 'FRA', colors: { primary: '#000', secondary: '#fff' }, flag: { code: 'FRA', bands: [] } },
+      awayTeam: { id: 'away', name: 'Morocco', shortName: 'MAR', countryCode: 'MAR', colors: { primary: '#000', secondary: '#fff' }, flag: { code: 'MAR', bands: [] } },
+      score: { home: 2, away: 0 }, clock: { label: 'Full time', phase: 'replay_ready' },
+      replay: { available: true, label: 'Replay ready' },
+    };
+    const ingestion = {
+      async listMatches() { return [staleCompleted]; },
+      activeFixtureCount() { return 0; },
+    };
+    const response = await createApp(config, ingestion).request('/matches?filter=replay');
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(body.matches.length, 1);
+    assert.deepEqual(body.matches[0].score, { home: 3, away: 0 });
+    assert.equal(body.matches[0].clock.label, 'Full time');
   } finally {
     globalThis.fetch = originalFetch;
   }

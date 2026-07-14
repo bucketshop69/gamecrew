@@ -1,12 +1,28 @@
 import type { GameCrewMatchFilter, GameCrewMatchStatus, MatchClock, MatchPulseEvent } from '../match';
 import type { TxlineScore } from './types';
-import { getGameState, getScoreClockSeconds } from './score';
+import { getGameState, getScoreClockSeconds, getScoreTimestamp } from './score';
+
+const LIVE_SIGNAL_FRESHNESS_MS = 60 * 60 * 1000;
 
 export function getMatchStatus(startTimeMs: number, latestScore?: TxlineScore): GameCrewMatchStatus {
   const now = Date.now();
   const liveWindowEnd = startTimeMs + 2.5 * 60 * 60 * 1000;
   const statusId = latestScore?.StatusId;
   const gameState = getGameState(latestScore);
+  const hasLiveSignal = Boolean(
+    latestScore?.Clock?.Running ||
+    statusId === 2 ||
+    statusId === 3 ||
+    statusId === 4 ||
+    statusId === 7 ||
+    statusId === 8 ||
+    statusId === 9 ||
+    statusId === 12
+  );
+  const scoreTimestamp = latestScore ? getScoreTimestamp(latestScore) : 0;
+  const hasFreshLiveSignal = hasLiveSignal &&
+    scoreTimestamp > 0 &&
+    scoreTimestamp >= now - LIVE_SIGNAL_FRESHNESS_MS;
 
   if (
     statusId === 5 ||
@@ -17,23 +33,16 @@ export function getMatchStatus(startTimeMs: number, latestScore?: TxlineScore): 
     return 'replayable';
   }
 
-  if (
-    latestScore?.Clock?.Running ||
-    statusId === 2 ||
-    statusId === 3 ||
-    statusId === 4 ||
-    statusId === 7 ||
-    statusId === 8 ||
-    statusId === 9 ||
-    statusId === 12 ||
-    (now >= startTimeMs && now <= liveWindowEnd)
-  ) {
+  // Fresh provider activity keeps extra-time and delayed fixtures live beyond
+  // the ordinary window. Old snapshots may retain an in-play StatusId, so a
+  // stale live signal cannot keep a historical fixture live forever.
+  if (hasFreshLiveSignal || (now >= startTimeMs && now <= liveWindowEnd)) {
     return 'live';
   }
 
-  if (now > liveWindowEnd) {
-    return 'replayable';
-  }
+  if (now > liveWindowEnd) return 'replayable';
+
+  if (hasLiveSignal) return 'live';
 
   return 'upcoming';
 }

@@ -5,9 +5,23 @@ import {
   getMatchTitle,
 } from '@gamecrew/core';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useState } from 'react';
+import {
+  type RefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import Carousel from 'react-native-reanimated-carousel';
 import {
+  AccessibilityInfo,
+  Animated,
+  findNodeHandle,
+  type LayoutChangeEvent,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -15,10 +29,15 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useGameCrewMatches } from '../hooks/use-gamecrew-matches';
 import { useMatchPulse } from '../hooks/use-match-pulse';
+import {
+  partitionHomeMatches,
+  resolveHomeSection,
+  type HomeSection,
+} from './home-screen-state';
 import {
   type GameViewPresentationState,
   MatchPreviewScreen,
@@ -37,25 +56,175 @@ interface PulseFeedItem {
   tone: PulseTone;
 }
 
+interface PendingHomeJump {
+  section: HomeSection;
+  timeoutId?: ReturnType<typeof setTimeout>;
+}
+
+const HOME_HEADER_HEIGHT = 44;
+const HOME_CAROUSEL_CHROME_HEIGHT = 24;
+const HOME_CONTEXT_CONTROL_CLEARANCE = 72;
+const HOME_JUMP_FALLBACK_MS = 900;
+const HOME_RECENT_SECTION_TOP_PADDING = 48;
+
 export function HomeScreen({ onOpenMatch }: { onOpenMatch: (match: GameCrewMatch) => void }) {
+  const insets = useSafeAreaInsets();
   const { height, width } = useWindowDimensions();
   const [activeIndex, setActiveIndex] = useState(0);
+  const [activeSection, setActiveSection] = useState<HomeSection>('featured');
+  const [jumpInProgress, setJumpInProgress] = useState(false);
   const { loadState, reload } = useGameCrewMatches();
+  const reduceMotion = useReducedMotionPreference();
+  const scrollRef = useRef<ScrollView>(null);
+  const featuredFocusRef = useRef<View>(null);
+  const recentHeadingRef = useRef<View>(null);
+  const recentSectionYRef = useRef<number | null>(null);
+  const activeSectionRef = useRef<HomeSection>('featured');
+  const pendingJumpRef = useRef<PendingHomeJump | null>(null);
+  const { featuredMatches, recentMatches } = useMemo(
+    () => partitionHomeMatches(loadState.matches),
+    [loadState.matches],
+  );
   const carouselWidth = Math.max(1, width - tokens.spacing.lg * 2);
-  const carouselHeight = Math.max(560, height - 130);
+  const usableContentHeight = Math.max(
+    500,
+    height - insets.top - insets.bottom - HOME_HEADER_HEIGHT - tokens.spacing.lg * 2,
+  );
+  const featuredSurfaceHeight = Math.max(440, Math.round(usableContentHeight * 0.9));
+  const carouselHeight = Math.max(420, featuredSurfaceHeight - HOME_CAROUSEL_CHROME_HEIGHT);
+  const recentSectionMinHeight = Math.max(360, height - insets.top - insets.bottom);
 
   useEffect(() => {
     setActiveIndex((current) =>
-      loadState.matches.length === 0 ? 0 : Math.min(current, loadState.matches.length - 1),
+      featuredMatches.length === 0 ? 0 : Math.min(current, featuredMatches.length - 1),
     );
-  }, [loadState.matches.length]);
+  }, [featuredMatches.length]);
 
-  const activeMatch = loadState.matches[activeIndex] ?? loadState.matches[0];
+  useEffect(() => () => {
+    const pendingJump = pendingJumpRef.current;
+    if (pendingJump?.timeoutId) clearTimeout(pendingJump.timeoutId);
+  }, []);
+
+  const activeMatch = featuredMatches[activeIndex] ?? featuredMatches[0];
+
+  const updateActiveSection = useCallback((section: HomeSection) => {
+    if (activeSectionRef.current === section) return;
+    activeSectionRef.current = section;
+    setActiveSection(section);
+  }, []);
+
+  const focusHomeDestination = useCallback((section: HomeSection) => {
+    const destination = section === 'recent' ? recentHeadingRef.current : featuredFocusRef.current;
+    if (Platform.OS === 'web') {
+      (destination as unknown as { focus?: () => void } | null)?.focus?.();
+      return;
+    }
+
+    const node = destination ? findNodeHandle(destination) : null;
+    if (node) AccessibilityInfo.setAccessibilityFocus(node);
+  }, []);
+
+  const finishPendingJump = useCallback((section: HomeSection) => {
+    const pendingJump = pendingJumpRef.current;
+    if (!pendingJump || pendingJump.section !== section) return;
+
+    if (pendingJump.timeoutId) clearTimeout(pendingJump.timeoutId);
+    pendingJumpRef.current = null;
+    setJumpInProgress(false);
+    updateActiveSection(section);
+
+    requestAnimationFrame(() => focusHomeDestination(section));
+  }, [focusHomeDestination, updateActiveSection]);
+
+  const cancelPendingJump = useCallback(() => {
+    const pendingJump = pendingJumpRef.current;
+    if (pendingJump?.timeoutId) clearTimeout(pendingJump.timeoutId);
+    pendingJumpRef.current = null;
+    setJumpInProgress(false);
+  }, []);
+
+  useEffect(() => {
+    if (recentMatches.length > 0) return;
+    recentSectionYRef.current = null;
+    cancelPendingJump();
+    updateActiveSection('featured');
+  }, [cancelPendingJump, recentMatches.length, updateActiveSection]);
+
+  const jumpToSection = useCallback(() => {
+    if (pendingJumpRef.current) return;
+
+    const destination: HomeSection = activeSectionRef.current === 'featured' ? 'recent' : 'featured';
+    const recentSectionY = recentSectionYRef.current;
+    if (destination === 'recent' && recentSectionY === null) return;
+
+    const targetY = destination === 'recent'
+      ? Math.max(
+          0,
+          (recentSectionY ?? 0) + HOME_RECENT_SECTION_TOP_PADDING - insets.top - tokens.spacing.sm,
+        )
+      : 0;
+
+    const pendingJump: PendingHomeJump = { section: destination };
+    pendingJumpRef.current = pendingJump;
+    setJumpInProgress(true);
+    scrollRef.current?.scrollTo({ y: targetY, animated: !reduceMotion });
+
+    if (reduceMotion) {
+      requestAnimationFrame(() => finishPendingJump(destination));
+      return;
+    }
+
+    pendingJump.timeoutId = setTimeout(
+      () => finishPendingJump(destination),
+      HOME_JUMP_FALLBACK_MS,
+    );
+  }, [finishPendingJump, insets.top, reduceMotion]);
+
+  const handleHomeScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const recentSectionY = recentSectionYRef.current;
+    if (recentSectionY === null) return;
+
+    const boundaryY = Math.max(
+      0,
+      recentSectionY + HOME_RECENT_SECTION_TOP_PADDING - Math.min(height * 0.35, 240),
+    );
+    const nextSection = resolveHomeSection(
+      activeSectionRef.current,
+      event.nativeEvent.contentOffset.y,
+      boundaryY,
+    );
+    updateActiveSection(nextSection);
+  }, [height, updateActiveSection]);
+
+  const handleRecentSectionLayout = useCallback((event: LayoutChangeEvent) => {
+    recentSectionYRef.current = event.nativeEvent.layout.y;
+  }, []);
+
+  const handleMomentumScrollEnd = useCallback(() => {
+    const pendingJump = pendingJumpRef.current;
+    if (pendingJump) finishPendingJump(pendingJump.section);
+  }, [finishPendingJump]);
 
   return (
     <View style={styles.root}>
       <StatusBar style="light" />
-      <View style={styles.homeContent}>
+      <ScrollView
+        ref={scrollRef}
+        contentContainerStyle={[
+          styles.homeContent,
+          {
+            paddingBottom: insets.bottom + HOME_CONTEXT_CONTROL_CLEARANCE,
+            paddingTop: insets.top + tokens.spacing.lg,
+          },
+        ]}
+        contentInsetAdjustmentBehavior="never"
+        onMomentumScrollEnd={handleMomentumScrollEnd}
+        onScroll={handleHomeScroll}
+        onScrollBeginDrag={cancelPendingJump}
+        scrollEventThrottle={16}
+        showsVerticalScrollIndicator={false}
+        style={styles.homeScroll}
+      >
         <HomeHeader />
 
         {loadState.status === 'error' && loadState.matches.length > 0 ? (
@@ -69,60 +238,265 @@ export function HomeScreen({ onOpenMatch }: { onOpenMatch: (match: GameCrewMatch
           />
         ) : null}
 
-        {loadState.status === 'loading' && loadState.matches.length === 0 ? (
-          <PosterSkeleton />
-        ) : loadState.status === 'error' && loadState.matches.length === 0 ? (
-          <StateMessage
-            eyebrow="TxLINE unavailable"
-            title="Could not load matches."
-            body={getErrorCopy(loadState.message)}
-            actionLabel="Retry"
-            onAction={reload}
-          />
-        ) : activeMatch ? (
-          <View style={styles.carousel}>
-            <Carousel
-              data={[...loadState.matches]}
-              enabled
-              height={carouselHeight}
-              loop={false}
-              onConfigurePanGesture={(gesture) => {
-                const panGesture = gesture as unknown as {
-                  activeOffsetX(offset: [number, number]): void;
-                  failOffsetY(offset: [number, number]): void;
-                };
-                panGesture.activeOffsetX([-8, 8]);
-                panGesture.failOffsetY([-28, 28]);
-              }}
-              onSnapToItem={setActiveIndex}
-              overscrollEnabled={false}
-              pagingEnabled
-              renderItem={({ item }) => (
-                <View style={styles.carouselPage}>
-                  <MatchPoster
-                    height={carouselHeight}
-                    match={item}
-                    onPress={() => onOpenMatch(item)}
-                  />
-                </View>
-              )}
-              windowSize={3}
-              width={carouselWidth}
+        <View style={[styles.featuredSection, { minHeight: featuredSurfaceHeight }]}>
+          {loadState.status === 'loading' && loadState.matches.length === 0 ? (
+            <PosterSkeleton height={carouselHeight} />
+          ) : loadState.status === 'error' && loadState.matches.length === 0 ? (
+            <StateMessage
+              eyebrow="GameCrew unavailable"
+              title="Could not load matches."
+              body={getErrorCopy(loadState.message)}
+              actionLabel="Retry"
+              onAction={reload}
             />
-            <CarouselDots activeIndex={activeIndex} count={loadState.matches.length} />
-          </View>
-        ) : (
-          <StateMessage
-            eyebrow="No fixtures"
-            title="No matches found."
-            body="Refresh the TxLINE feed to check for available fixtures."
-            actionLabel="Refresh"
-            onAction={reload}
+          ) : activeMatch ? (
+            <View style={styles.carousel}>
+              <Carousel
+                data={featuredMatches}
+                enabled={featuredMatches.length > 1}
+                height={carouselHeight}
+                loop={false}
+                onConfigurePanGesture={(gesture) => {
+                  const panGesture = gesture as unknown as {
+                    activeOffsetX(offset: [number, number]): void;
+                    failOffsetY(offset: [number, number]): void;
+                  };
+                  panGesture.activeOffsetX([-8, 8]);
+                  panGesture.failOffsetY([-28, 28]);
+                }}
+                onSnapToItem={setActiveIndex}
+                overscrollEnabled={false}
+                pagingEnabled
+                renderItem={({ index, item }) => (
+                  <View style={styles.carouselPage}>
+                    <MatchPoster
+                      focusRef={index === activeIndex ? featuredFocusRef : undefined}
+                      height={carouselHeight}
+                      match={item}
+                      onPress={() => onOpenMatch(item)}
+                    />
+                  </View>
+                )}
+                windowSize={3}
+                width={carouselWidth}
+              />
+              {featuredMatches.length > 1 ? (
+                <CarouselDots activeIndex={activeIndex} count={featuredMatches.length} />
+              ) : null}
+            </View>
+          ) : (
+            <StateMessage
+              eyebrow={recentMatches.length > 0 ? 'Between fixtures' : 'No fixtures'}
+              title={recentMatches.length > 0 ? 'No live or upcoming match right now.' : 'No matches found.'}
+              body={recentMatches.length > 0
+                ? 'Recent final scores are available below.'
+                : 'Refresh the GameCrew feed to check for available fixtures.'}
+              actionLabel="Refresh"
+              onAction={reload}
+            />
+          )}
+        </View>
+
+        {recentMatches.length > 0 ? (
+          <RecentGamesSection
+            headingRef={recentHeadingRef}
+            matches={recentMatches}
+            minHeight={recentSectionMinHeight}
+            onLayout={handleRecentSectionLayout}
+            onOpenMatch={onOpenMatch}
           />
-        )}
+        ) : null}
+      </ScrollView>
+
+      {recentMatches.length > 0 ? (
+        <HomeContextControl
+          bottomInset={insets.bottom}
+          disabled={jumpInProgress}
+          onPress={jumpToSection}
+          reduceMotion={reduceMotion}
+          section={activeSection}
+        />
+      ) : null}
+    </View>
+  );
+}
+
+function RecentGamesSection({
+  headingRef,
+  matches,
+  minHeight,
+  onLayout,
+  onOpenMatch,
+}: {
+  headingRef: RefObject<View | null>;
+  matches: readonly GameCrewMatch[];
+  minHeight: number;
+  onLayout: (event: LayoutChangeEvent) => void;
+  onOpenMatch: (match: GameCrewMatch) => void;
+}) {
+  return (
+    <View onLayout={onLayout} style={[styles.recentSection, { minHeight }]}>
+      <View
+        ref={headingRef}
+        accessible
+        accessibilityRole="header"
+        tabIndex={-1}
+      >
+        <Text style={styles.recentHeading}>RECENT GAMES</Text>
+      </View>
+
+      <View style={styles.recentGrid}>
+        {matches.map((match) => (
+          <RecentMatchTile
+            key={match.txline.fixtureId}
+            match={match}
+            onPress={() => onOpenMatch(match)}
+          />
+        ))}
       </View>
     </View>
   );
+}
+
+function RecentMatchTile({
+  match,
+  onPress,
+}: {
+  match: GameCrewMatch;
+  onPress: () => void;
+}) {
+  const scoreLabel = match.score ? `${match.score.home} - ${match.score.away}` : 'FT';
+  const label = match.score
+    ? `${getMatchTitle(match)}, final score ${match.score.home} to ${match.score.away}`
+    : `${getMatchTitle(match)}, final`;
+
+  return (
+    <Pressable
+      accessibilityHint="Opens the completed match"
+      accessibilityLabel={label}
+      accessibilityRole="button"
+      onPress={onPress}
+      style={({ pressed }) => [styles.recentMatch, pressed && styles.recentMatchPressed]}
+    >
+      <View style={styles.recentTeams}>
+        <View style={styles.recentTeam}>
+          <StaticFlag
+            bands={match.homeTeam.flag.bands}
+            countryCode={match.homeTeam.countryCode}
+            size="recent"
+          />
+          <Text numberOfLines={2} selectable style={styles.recentTeamName}>
+            {match.homeTeam.name}
+          </Text>
+        </View>
+        <View style={styles.recentTeam}>
+          <StaticFlag
+            bands={match.awayTeam.flag.bands}
+            countryCode={match.awayTeam.countryCode}
+            size="recent"
+          />
+          <Text numberOfLines={2} selectable style={styles.recentTeamName}>
+            {match.awayTeam.name}
+          </Text>
+        </View>
+      </View>
+      <Text selectable style={styles.recentScore}>
+        {scoreLabel}
+      </Text>
+      <Text selectable style={styles.recentMeta}>
+        {formatRecentMatchTime(match.kickoffUtc)}
+      </Text>
+    </Pressable>
+  );
+}
+
+function HomeContextControl({
+  bottomInset,
+  disabled,
+  onPress,
+  reduceMotion,
+  section,
+}: {
+  bottomInset: number;
+  disabled: boolean;
+  onPress: () => void;
+  reduceMotion: boolean;
+  section: HomeSection;
+}) {
+  const appearance = useRef(new Animated.Value(1)).current;
+  const targetsRecent = section === 'featured';
+
+  useEffect(() => {
+    appearance.stopAnimation();
+    if (reduceMotion) {
+      appearance.setValue(1);
+      return;
+    }
+
+    appearance.setValue(0);
+    Animated.timing(appearance, {
+      duration: 180,
+      toValue: 1,
+      useNativeDriver: true,
+    }).start();
+  }, [appearance, reduceMotion, section]);
+
+  return (
+    <Pressable
+      accessibilityLabel={targetsRecent
+        ? 'Go down to recent games'
+        : 'Go up to live and upcoming matches'}
+      accessibilityRole="button"
+      accessibilityState={{ disabled }}
+      disabled={disabled}
+      hitSlop={8}
+      onPress={onPress}
+      style={[
+        styles.homeContextControl,
+        { bottom: bottomInset + tokens.spacing.sm },
+        disabled && styles.homeContextControlDisabled,
+      ]}
+    >
+      <Animated.Text
+        style={[
+          styles.homeContextText,
+          {
+            opacity: appearance,
+            transform: [{
+              translateY: appearance.interpolate({
+                inputRange: [0, 1],
+                outputRange: [3, 0],
+              }),
+            }],
+          },
+        ]}
+      >
+        {targetsRecent ? 'RECENT GAMES ↓' : 'LIVE & UPCOMING ↑'}
+      </Animated.Text>
+    </Pressable>
+  );
+}
+
+function useReducedMotionPreference(): boolean {
+  const [reduceMotion, setReduceMotion] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    AccessibilityInfo.isReduceMotionEnabled().then((enabled) => {
+      if (mounted) setReduceMotion(enabled);
+    }).catch(() => undefined);
+    const subscription = AccessibilityInfo.addEventListener(
+      'reduceMotionChanged',
+      setReduceMotion,
+    );
+
+    return () => {
+      mounted = false;
+      subscription.remove();
+    };
+  }, []);
+
+  return reduceMotion;
 }
 
 function HomeHeader() {
@@ -140,10 +514,12 @@ function HomeHeader() {
 }
 
 function MatchPoster({
+  focusRef,
   height,
   match,
   onPress,
 }: {
+  focusRef?: RefObject<View | null>;
   height?: number;
   match: GameCrewMatch;
   onPress: () => void;
@@ -153,9 +529,11 @@ function MatchPoster({
   const homeBands = match.homeTeam.flag.bands;
   const awayBands = match.awayTeam.flag.bands;
   const isUpcoming = match.status === 'upcoming' && !match.score;
+  const compact = (height ?? posterMinHeight) < 520;
 
   return (
     <Pressable
+      ref={focusRef}
       accessibilityRole="button"
       accessibilityLabel={`Open ${getMatchTitle(match)}`}
       onPress={onPress}
@@ -166,11 +544,19 @@ function MatchPoster({
     >
       <View style={styles.posterBackdrop} />
 
-      <View style={styles.posterChrome}>
+      <View style={[styles.posterChrome, compact && styles.posterChromeCompact]}>
         {isUpcoming ? (
-          <UpcomingPosterContent match={match} />
+          <UpcomingPosterContent
+            compact={compact}
+            match={match}
+          />
         ) : (
-          <LivePosterContent homeBands={homeBands} awayBands={awayBands} match={match} />
+          <LivePosterContent
+            awayBands={awayBands}
+            compact={compact}
+            homeBands={homeBands}
+            match={match}
+          />
         )}
       </View>
     </Pressable>
@@ -179,53 +565,77 @@ function MatchPoster({
 
 function LivePosterContent({
   awayBands,
+  compact,
   homeBands,
   match,
 }: {
   awayBands: readonly string[];
+  compact: boolean;
   homeBands: readonly string[];
   match: GameCrewMatch;
 }) {
   return (
-    <View style={styles.posterStack}>
-      <FlagMark bands={homeBands} countryCode={match.homeTeam.countryCode} />
-      <Text style={styles.teamScoreText} selectable>
+    <View style={[styles.posterStack, compact && styles.posterStackCompact]}>
+      <FlagMark
+        bands={homeBands}
+        compact={compact}
+        countryCode={match.homeTeam.countryCode}
+      />
+      <Text style={[styles.teamScoreText, compact && styles.teamScoreTextCompact]} selectable>
         {getTeamCardLabel(match, 'home')}
       </Text>
-      <Text style={styles.clockText} selectable>
+      <Text style={[styles.clockText, compact && styles.clockTextCompact]} selectable>
         {getClockCardLabel(match)}
       </Text>
       <Text style={styles.matchupText} selectable>
         {getMatchTitle(match)}
       </Text>
-      <Text style={styles.competitionText} selectable>
+      <Text numberOfLines={2} style={styles.competitionText} selectable>
         {getMetaLabel(match)}
       </Text>
-      <Text style={styles.teamScoreText} selectable>
+      <Text style={[styles.teamScoreText, compact && styles.teamScoreTextCompact]} selectable>
         {getTeamCardLabel(match, 'away')}
       </Text>
-      <FlagMark bands={awayBands} countryCode={match.awayTeam.countryCode} />
+      <FlagMark
+        bands={awayBands}
+        compact={compact}
+        countryCode={match.awayTeam.countryCode}
+      />
     </View>
   );
 }
 
-function UpcomingPosterContent({ match }: { match: GameCrewMatch }) {
+function UpcomingPosterContent({
+  compact,
+  match,
+}: {
+  compact: boolean;
+  match: GameCrewMatch;
+}) {
   return (
-    <View style={styles.posterStack}>
-      <FlagMark bands={match.homeTeam.flag.bands} countryCode={match.homeTeam.countryCode} />
+    <View style={[styles.posterStack, compact && styles.posterStackCompact]}>
+      <FlagMark
+        bands={match.homeTeam.flag.bands}
+        compact={compact}
+        countryCode={match.homeTeam.countryCode}
+      />
       <Text style={styles.kickoffDateText} selectable>
         {formatKickoffDate(match.kickoffUtc)}
       </Text>
-      <Text style={styles.kickoffTimeText} selectable>
+      <Text style={[styles.kickoffTimeText, compact && styles.kickoffTimeTextCompact]} selectable>
         {formatKickoffTime(match.kickoffUtc)}
       </Text>
       <Text style={styles.matchupText} selectable>
         {getMatchTitle(match)}
       </Text>
-      <Text style={styles.competitionText} selectable>
+      <Text numberOfLines={2} style={styles.competitionText} selectable>
         {getMetaLabel(match)}
       </Text>
-      <FlagMark bands={match.awayTeam.flag.bands} countryCode={match.awayTeam.countryCode} />
+      <FlagMark
+        bands={match.awayTeam.flag.bands}
+        compact={compact}
+        countryCode={match.awayTeam.countryCode}
+      />
     </View>
   );
 }
@@ -258,9 +668,44 @@ function FlagField({ bands, align }: { bands: readonly string[]; align: 'left' |
   );
 }
 
-function FlagMark({ bands, countryCode }: { bands: readonly string[]; countryCode?: string }) {
+function FlagMark({
+  bands,
+  compact,
+  countryCode,
+}: {
+  bands: readonly string[];
+  compact: boolean;
+  countryCode?: string;
+}) {
   return (
-    <View style={[styles.flagMark, getFlagDirection(countryCode) === 'horizontal' && styles.flagMarkHorizontal]}>
+    <StaticFlag
+      bands={bands}
+      compact={compact}
+      countryCode={countryCode}
+      size="poster"
+    />
+  );
+}
+
+function StaticFlag({
+  bands,
+  compact = false,
+  countryCode,
+  size,
+}: {
+  bands: readonly string[];
+  compact?: boolean;
+  countryCode?: string;
+  size: 'poster' | 'recent';
+}) {
+  return (
+    <View
+      style={[
+        size === 'poster' ? styles.flagMark : styles.recentFlag,
+        size === 'poster' && compact && styles.flagMarkCompact,
+        getFlagDirection(countryCode) === 'horizontal' && styles.flagMarkHorizontal,
+      ]}
+    >
       {bands.map((band, index) => (
         <View key={`${band}-${index}`} style={[styles.flagMarkBand, { backgroundColor: band }]} />
       ))}
@@ -268,9 +713,9 @@ function FlagMark({ bands, countryCode }: { bands: readonly string[]; countryCod
   );
 }
 
-function PosterSkeleton() {
+function PosterSkeleton({ height }: { height?: number }) {
   return (
-    <View style={styles.skeletonPoster}>
+    <View style={[styles.skeletonPoster, height ? { minHeight: height } : undefined]}>
       <View style={[styles.skeletonGlow, styles.skeletonGlowTop]} />
       <View style={[styles.skeletonGlow, styles.skeletonGlowBottom]} />
       <View style={styles.skeletonFlag} />
@@ -801,6 +1246,20 @@ function formatKickoffTime(kickoffUtc: string): string {
   }).format(new Date(kickoffUtc));
 }
 
+function formatRecentMatchTime(kickoffUtc: string): string {
+  const kickoff = new Date(kickoffUtc);
+  const date = new Intl.DateTimeFormat(undefined, {
+    day: '2-digit',
+    month: 'short',
+  }).format(kickoff).replace(',', '').toUpperCase();
+  const time = new Intl.DateTimeFormat(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(kickoff);
+
+  return `${date} · ${time}`;
+}
+
 function getFlagDirection(countryCode?: string): 'horizontal' | 'vertical' {
   return horizontalFlagCodes.has(countryCode ?? '') ? 'horizontal' : 'vertical';
 }
@@ -828,12 +1287,16 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: tokens.shell.background,
   },
+  homeScroll: {
+    flex: 1,
+  },
   homeContent: {
     flexGrow: 1,
     gap: tokens.spacing.lg,
     paddingHorizontal: tokens.spacing.lg,
-    paddingBottom: tokens.spacing.xxl,
-    paddingTop: tokens.spacing.lg,
+  },
+  featuredSection: {
+    justifyContent: 'flex-start',
   },
   header: {
     alignItems: 'center',
@@ -901,11 +1364,16 @@ const styles = StyleSheet.create({
     paddingBottom: 48,
     paddingTop: 42,
   },
+  posterChromeCompact: {
+    paddingBottom: tokens.spacing.lg,
+    paddingTop: tokens.spacing.lg,
+  },
   competitionText: {
     color: tokens.shell.textMuted,
     fontSize: tokens.typography.size.label,
     fontWeight: tokens.typography.weight.bold,
     lineHeight: tokens.typography.lineHeight.caption,
+    maxWidth: '100%',
     textAlign: 'center',
     textTransform: 'uppercase',
   },
@@ -915,6 +1383,11 @@ const styles = StyleSheet.create({
     height: 120,
     overflow: 'hidden',
     width: 234,
+  },
+  flagMarkCompact: {
+    borderRadius: tokens.radii.sm,
+    height: 78,
+    width: 156,
   },
   flagMarkHorizontal: {
     flexDirection: 'column',
@@ -927,6 +1400,9 @@ const styles = StyleSheet.create({
     gap: tokens.spacing.md,
     width: '100%',
   },
+  posterStackCompact: {
+    gap: tokens.spacing.sm,
+  },
   teamScoreText: {
     color: tokens.shell.text,
     fontSize: 62,
@@ -935,6 +1411,10 @@ const styles = StyleSheet.create({
     lineHeight: 66,
     textAlign: 'center',
   },
+  teamScoreTextCompact: {
+    fontSize: 46,
+    lineHeight: 48,
+  },
   clockText: {
     color: tokens.shell.text,
     fontSize: 54,
@@ -942,6 +1422,10 @@ const styles = StyleSheet.create({
     fontWeight: tokens.typography.weight.bold,
     lineHeight: 58,
     textAlign: 'center',
+  },
+  clockTextCompact: {
+    fontSize: 40,
+    lineHeight: 44,
   },
   matchupText: {
     color: tokens.shell.text,
@@ -965,6 +1449,10 @@ const styles = StyleSheet.create({
     fontWeight: tokens.typography.weight.bold,
     lineHeight: 62,
     textAlign: 'center',
+  },
+  kickoffTimeTextCompact: {
+    fontSize: 42,
+    lineHeight: 46,
   },
   scoreBlock: {
     alignItems: 'center',
@@ -992,6 +1480,27 @@ const styles = StyleSheet.create({
   carouselPage: {
     justifyContent: 'center',
   },
+  homeContextControl: {
+    alignItems: 'flex-start',
+    backgroundColor: tokens.shell.background,
+    justifyContent: 'center',
+    left: tokens.spacing.lg,
+    minHeight: 44,
+    minWidth: 148,
+    paddingRight: tokens.spacing.sm,
+    position: 'absolute',
+    zIndex: 20,
+  },
+  homeContextControlDisabled: {
+    opacity: 0.48,
+  },
+  homeContextText: {
+    color: tokens.shell.text,
+    fontSize: tokens.typography.size.caption,
+    fontWeight: tokens.typography.weight.bold,
+    letterSpacing: 1.2,
+    lineHeight: tokens.typography.lineHeight.caption,
+  },
   carouselDots: {
     alignItems: 'center',
     flexDirection: 'row',
@@ -1011,6 +1520,79 @@ const styles = StyleSheet.create({
     height: 4,
     opacity: 1,
     width: 24,
+  },
+  recentSection: {
+    gap: tokens.spacing.xl,
+    paddingTop: HOME_RECENT_SECTION_TOP_PADDING,
+  },
+  recentHeading: {
+    color: tokens.shell.textMuted,
+    fontSize: tokens.typography.size.caption,
+    fontWeight: tokens.typography.weight.bold,
+    letterSpacing: 1.5,
+    lineHeight: tokens.typography.lineHeight.caption,
+  },
+  recentGrid: {
+    columnGap: tokens.spacing.md,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    rowGap: tokens.spacing.xxl,
+  },
+  recentMatch: {
+    alignItems: 'center',
+    flexBasis: '47%',
+    flexGrow: 1,
+    gap: tokens.spacing.sm,
+    justifyContent: 'flex-start',
+    minHeight: 136,
+    paddingVertical: tokens.spacing.sm,
+  },
+  recentMatchPressed: {
+    opacity: 0.64,
+  },
+  recentTeams: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    gap: tokens.spacing.lg,
+    justifyContent: 'center',
+  },
+  recentTeam: {
+    alignItems: 'center',
+    gap: tokens.spacing.xs,
+    width: 68,
+  },
+  recentTeamName: {
+    color: tokens.shell.textMuted,
+    fontSize: tokens.typography.size.caption,
+    fontWeight: tokens.typography.weight.medium,
+    lineHeight: tokens.typography.lineHeight.caption,
+    minHeight: tokens.typography.lineHeight.caption * 2,
+    textAlign: 'center',
+  },
+  recentFlag: {
+    borderRadius: tokens.radii.sm,
+    flexDirection: 'row',
+    height: 38,
+    overflow: 'hidden',
+    width: 56,
+  },
+  recentScore: {
+    color: tokens.shell.text,
+    fontSize: 30,
+    fontVariant: ['tabular-nums'],
+    fontWeight: tokens.typography.weight.bold,
+    lineHeight: 36,
+    textAlign: 'center',
+  },
+  recentMeta: {
+    color: tokens.shell.textMuted,
+    fontSize: tokens.typography.size.caption,
+    fontVariant: ['tabular-nums'],
+    fontWeight: tokens.typography.weight.bold,
+    letterSpacing: 0.6,
+    lineHeight: tokens.typography.lineHeight.caption,
+    textAlign: 'center',
+    textTransform: 'uppercase',
   },
   skeletonPoster: {
     alignItems: 'center',

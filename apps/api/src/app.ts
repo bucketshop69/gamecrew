@@ -157,7 +157,12 @@ function mergeMatches(
   const merged = new Map(remoteMatches.map((match) => [match.txline.fixtureId, match]));
   for (const local of localMatches) {
     const remote = merged.get(local.txline.fixtureId);
-    merged.set(local.txline.fixtureId, remote ? {
+    if (!remote) {
+      merged.set(local.txline.fixtureId, local);
+      continue;
+    }
+
+    const combined = {
       ...remote,
       ...local,
       competition: remote.competition || local.competition,
@@ -165,9 +170,25 @@ function mergeMatches(
       kickoffUtc: remote.kickoffUtc || local.kickoffUtc,
       homeTeam: mergeRemoteTeamMetadata(local.homeTeam, remote),
       awayTeam: mergeRemoteTeamMetadata(local.awayTeam, remote),
-    } : local);
+    };
+
+    merged.set(local.txline.fixtureId, isCompletedMatch(remote)
+      ? {
+          ...combined,
+          filter: remote.filter,
+          status: remote.status,
+          score: remote.score ?? local.score,
+          clock: remote.clock,
+          pulse: remote.pulse,
+          replay: remote.replay,
+        }
+      : combined);
   }
   return [...merged.values()];
+}
+
+function isCompletedMatch(match: GameCrewMatch): boolean {
+  return match.status === 'finished' || match.status === 'replayable';
 }
 
 function mergeRemoteTeamMetadata(local: MatchTeam, remoteMatch: GameCrewMatch): MatchTeam {

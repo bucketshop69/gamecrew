@@ -34,15 +34,12 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useGameCrewMatches } from '../hooks/use-gamecrew-matches';
 import { useMatchPulse } from '../hooks/use-match-pulse';
 import { GameViewDebugToggle } from './game-view-debug-panel';
+import { GameViewScreen, type GameViewPresentationState } from './game-view/game-view-screen';
 import {
   partitionHomeMatches,
   resolveHomeSection,
   type HomeSection,
 } from './home-screen-state';
-import {
-  type GameViewPresentationState,
-  MatchPreviewScreen,
-} from './match-preview-screen';
 
 const tokens = gameCrewTokens;
 
@@ -898,7 +895,7 @@ export function MatchDetailScreen({
         </ScrollView>
       ) : (
         <View style={styles.gameViewContent}>
-          <MatchPreviewScreen match={match} onPresentationChange={setGamePresentation} />
+          <GameViewScreen match={match} onPresentationChange={setGamePresentation} />
           {__DEV__ ? (
             <GameViewDebugToggle fixtureId={match.txline.fixtureId} isLive={match.status === 'live'} />
           ) : null}

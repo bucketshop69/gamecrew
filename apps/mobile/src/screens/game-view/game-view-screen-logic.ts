@@ -1,4 +1,4 @@
-import type { GameCrewMatchStatus, GameViewSceneKind } from '@gamecrew/core';
+import type { GameCrewMatchStatus, GameViewScene, GameViewSceneKind, MatchEngineScore } from '@gamecrew/core';
 
 import type { MatchSessionStatus } from '../../state/match-session';
 import type { PlaybackMode } from '../../state/playback-engine';
@@ -24,6 +24,58 @@ export interface GameViewPresentationState {
   clockLabel: string;
   phaseLabel: string;
   score: { home: number; away: number };
+}
+
+// ---------------------------------------------------------------------------
+// No score spoiler (fix #3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves the score the header/score rail should show for the current
+ * scene, holding the pre-goal score through a `goal_sequence` scene's
+ * `tension` beat and committing the new score only once the `celebration`
+ * beat starts (fix #3: "NO SCORE SPOILER" -- the board plays "GOAL? CHECKING"
+ * while the header must not already show the committed scoreline).
+ *
+ * `scene.scoreAtMoment` on a `goal_sequence` scene is already the
+ * *post-goal* score once the celebration beat exists (see
+ * packages/core's `handleGoalConfirmed`), so simply reading
+ * `currentScene.scoreAtMoment` -- what `GameViewScreen` did before this fix
+ * -- leaks the new score during the still-checking tension beat. This
+ * function instead:
+ *
+ * - for any non-`goal_sequence` scene, or a `goal_sequence` scene with no
+ *   beats, returns the scene's own `scoreAtMoment` (unchanged behavior);
+ * - for a `goal_sequence` scene whose *current* beat is `tension`, returns
+ *   `previousScore` (the score the rail was already showing before this
+ *   scene started) rather than the scene's post-goal `scoreAtMoment`;
+ * - for a `goal_sequence` scene whose current beat is `celebration` (or any
+ *   later beat), returns that beat's own `scoreAtMoment` (falling back to
+ *   the scene's) -- the commit moment.
+ *
+ * `activeBeatIndex` identifies which beat is currently playing within the
+ * scene's own beat choreography (see `GoalSequenceTakeover`'s
+ * `planGoalSequenceBeats`); the screen doesn't independently track beat
+ * playback today, so callers that haven't wired per-beat tracking can pass
+ * `0` to conservatively hold at the first (tension) beat until a
+ * celebration beat is known to be active.
+ */
+export function resolveScoreRailScore(
+  scene: GameViewScene | null | undefined,
+  previousScore: MatchEngineScore | undefined,
+  activeBeatIndex = 0,
+): MatchEngineScore | undefined {
+  if (!scene) return previousScore;
+  if (scene.kind !== 'goal_sequence') return scene.scoreAtMoment;
+
+  const beats = scene.beats ?? [];
+  if (beats.length === 0) return scene.scoreAtMoment;
+
+  const clampedIndex = Math.min(Math.max(activeBeatIndex, 0), beats.length - 1);
+  const activeBeat = beats[clampedIndex];
+
+  if (activeBeat?.kind === 'tension') return previousScore;
+  return activeBeat?.scoreAtMoment ?? scene.scoreAtMoment;
 }
 
 // ---------------------------------------------------------------------------
@@ -181,4 +233,37 @@ export function mapSourceActionToSetPieceVariant(
     default:
       return undefined;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Minor set-piece badge vs full vignette (fix #2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Set-piece variants minor enough that stopping the world for a full-screen
+ * `SetPieceVignette` overstates them -- a throw-in or free kick is a routine
+ * restart, not a moment. `corner` and `penalty` keep the full vignette
+ * because they carry real goal threat. Kept as its own set (rather than
+ * inverting `SET_PIECE_LABELS` or similar) so this decision reads as a
+ * product call, not a byproduct of some other list's shape.
+ */
+const MINOR_SET_PIECE_VARIANTS: ReadonlySet<ScreenSetPieceVariant> = new Set(['throw_in', 'free_kick']);
+
+/**
+ * Decides whether a `set_piece` scene should take over the full screen
+ * (`SetPieceVignette`) or render as a compact badge over the still-visible
+ * ambient board (fix #2: "minor set pieces stop blanking the board").
+ * Unrecognized/missing `sourceAction` defaults to the full vignette --
+ * same safe-default posture as `mapSourceActionToSetPieceVariant`, since an
+ * unrecognized set-piece type shouldn't silently downgrade to a badge.
+ *
+ * This does not change the playback advancement contract: the scene still
+ * occupies its full playback window either way (see
+ * `shouldTakeoverOnCompleteAdvancePlayback`'s doc comment) -- this function
+ * only decides which visual treatment renders for that window.
+ */
+export function shouldSetPieceUseFullVignette(sourceAction: string | undefined): boolean {
+  const variant = mapSourceActionToSetPieceVariant(sourceAction);
+  if (!variant) return true;
+  return !MINOR_SET_PIECE_VARIANTS.has(variant);
 }

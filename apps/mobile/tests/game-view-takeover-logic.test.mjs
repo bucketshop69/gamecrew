@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  activeGoalSequenceBeatIndex,
   escalationLabel,
   formatPlayerDisplayName,
   formatScoreline,
@@ -129,6 +130,40 @@ test('planGoalSequenceBeats enforces a minimum readable hold per beat even with 
 
 test('totalGoalSequenceDurationMs returns 0 for an empty plan', () => {
   assert.equal(totalGoalSequenceDurationMs([]), 0);
+});
+
+// ---------------------------------------------------------------------------
+// Active beat resolution (fix #3: no score spoiler)
+// ---------------------------------------------------------------------------
+
+test('activeGoalSequenceBeatIndex returns 0 for an empty plan', () => {
+  assert.equal(activeGoalSequenceBeatIndex([], 0), 0);
+  assert.equal(activeGoalSequenceBeatIndex([], 5000), 0);
+});
+
+test('activeGoalSequenceBeatIndex returns the first beat at elapsed 0', () => {
+  const tension = { kind: 'tension', lifecycle: 'provisional', sourceFrameIds: ['f1'] };
+  const celebration = { kind: 'celebration', lifecycle: 'confirmed', sourceFrameIds: ['f2'] };
+  const plan = planGoalSequenceBeats(goalSequenceScene([tension, celebration]));
+  assert.equal(activeGoalSequenceBeatIndex(plan, 0), 0);
+});
+
+test('activeGoalSequenceBeatIndex stays on the tension beat until the celebration beat\'s offset is reached', () => {
+  const tension = { kind: 'tension', lifecycle: 'provisional', sourceFrameIds: ['f1'] };
+  const celebration = { kind: 'celebration', lifecycle: 'confirmed', sourceFrameIds: ['f2'] };
+  const plan = planGoalSequenceBeats(goalSequenceScene([tension, celebration]));
+  const celebrationOffset = plan[1].offsetMs;
+
+  assert.equal(activeGoalSequenceBeatIndex(plan, celebrationOffset - 1), 0);
+  assert.equal(activeGoalSequenceBeatIndex(plan, celebrationOffset), 1);
+  assert.equal(activeGoalSequenceBeatIndex(plan, celebrationOffset + 500), 1);
+});
+
+test('activeGoalSequenceBeatIndex clamps to the last beat once elapsed exceeds the whole plan', () => {
+  const tension = { kind: 'tension', lifecycle: 'provisional', sourceFrameIds: ['f1'] };
+  const celebration = { kind: 'celebration', lifecycle: 'confirmed', sourceFrameIds: ['f2'] };
+  const plan = planGoalSequenceBeats(goalSequenceScene([tension, celebration]));
+  assert.equal(activeGoalSequenceBeatIndex(plan, totalGoalSequenceDurationMs(plan) + 10_000), 1);
 });
 
 // ---------------------------------------------------------------------------

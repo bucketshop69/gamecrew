@@ -1,9 +1,14 @@
-import { type GameCrewMatch, gameCrewTokens } from '@gamecrew/core';
+import { type GameCrewMatch, type GameViewScene, gameCrewTokens, type MatchEngineScore } from '@gamecrew/core';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AccessibilityInfo, StyleSheet, View } from 'react-native';
 
 import { usePlaybackEngine } from '../../state/use-playback-engine';
+import {
+  activeGoalSequenceBeatIndex,
+  planGoalSequenceBeats,
+} from '../game-view-takeovers/game-view-takeover-logic';
 import { GameViewTakeover } from '../game-view-takeovers/game-view-takeover';
+import { MinorSetPieceBadge } from '../game-view-takeovers/minor-set-piece-badge';
 import { GameViewBoard } from './game-view-board';
 import { GameViewStatePanel, GameViewStaleBanner } from './game-view-state-panel';
 import {
@@ -13,7 +18,9 @@ import {
   mapSourceActionToCardVariant,
   mapSourceActionToSetPieceVariant,
   resolveGameViewLoadState,
+  resolveScoreRailScore,
   selectPlaybackModeForMatchStatus,
+  shouldSetPieceUseFullVignette,
 } from './game-view-screen-logic';
 import { DEFAULT_AWAY_COLOR, DEFAULT_HOME_COLOR, getTeamColor } from './game-view-team-colors';
 
@@ -99,20 +106,29 @@ export function GameViewScreen({
     hasScenes,
   );
 
+  // Fix #3 (no score spoiler): tracks which goal_sequence beat is currently
+  // active so `resolveScoreRailScore` can hold the pre-goal score through
+  // the tension beat and commit only once celebration starts. See
+  // `useGoalSequenceScoreHold`'s doc comment.
+  const { activeBeatIndex, previousScoreRef } = useGoalSequenceScoreHold(currentScene, reduceMotion);
+
   useEffect(() => {
     if (!currentScene) {
       onPresentationChange?.(null);
       return;
     }
+    const railScore = resolveScoreRailScore(currentScene, previousScoreRef.current, activeBeatIndex);
+    if (railScore) previousScoreRef.current = railScore;
+
     onPresentationChange?.({
       clockLabel: formatClockLabel(currentScene.clockSeconds),
       phaseLabel: formatPhaseLabel(currentScene.phase, isLive),
       score: {
-        home: currentScene.scoreAtMoment?.participant1 ?? 0,
-        away: currentScene.scoreAtMoment?.participant2 ?? 0,
+        home: railScore?.participant1 ?? 0,
+        away: railScore?.participant2 ?? 0,
       },
     });
-  }, [currentScene, isLive, onPresentationChange]);
+  }, [activeBeatIndex, currentScene, isLive, onPresentationChange, previousScoreRef]);
 
   useEffect(() => () => onPresentationChange?.(null), [onPresentationChange]);
 
@@ -144,7 +160,23 @@ export function GameViewScreen({
     );
   }
 
-  const overlay = currentScene && isTakeoverSceneKind(currentScene.kind) ? (
+  // Fix #2: a minor set piece (throw-in, free kick) renders as a compact
+  // badge over the still-visible ambient board instead of the full-screen
+  // SetPieceVignette that corner/penalty use -- see
+  // `shouldSetPieceUseFullVignette`'s doc comment. The scene still occupies
+  // its full playback window either way; only the visual treatment differs.
+  const isMinorSetPiece = currentScene?.kind === 'set_piece'
+    && !shouldSetPieceUseFullVignette(currentScene.sourceAction);
+
+  const overlay = currentScene && isMinorSetPiece ? (
+    <MinorSetPieceBadge
+      awayTeam={awayTeam}
+      homeTeam={homeTeam}
+      reduceMotion={reduceMotion}
+      scene={currentScene}
+      variant={mapSourceActionToSetPieceVariant(currentScene.sourceAction)}
+    />
+  ) : currentScene && isTakeoverSceneKind(currentScene.kind) ? (
     <GameViewTakeover
       awayTeam={awayTeam}
       cardVariant={mapSourceActionToCardVariant(currentScene.sourceAction)}
@@ -167,6 +199,66 @@ export function GameViewScreen({
       {isStale ? <GameViewStaleBanner /> : null}
     </View>
   );
+}
+
+/**
+ * Fix #3 (no score spoiler): tracks which beat of the *current* scene, if
+ * it's a `goal_sequence`, is active -- so `resolveScoreRailScore` can hold
+ * the header's score at `previousScoreRef.current` through the tension beat
+ * and only advance it once the celebration beat actually starts, instead of
+ * reading the scene's (already post-goal) `scoreAtMoment` the instant the
+ * takeover mounts.
+ *
+ * Schedules its own timers from `planGoalSequenceBeats` (the same pure plan
+ * `GoalSequenceTakeover` uses to choreograph its beat content) rather than
+ * reaching into that component's internal state, keeping the score-rail
+ * decision independent of whichever takeover component happens to render
+ * the scene. `previousScoreRef` is exposed (not just read) so the caller can
+ * update it once a score has actually been shown, without this hook needing
+ * to know what "the score to show" resolves to for non-goal_sequence scenes.
+ *
+ * Under reduce-motion, `GoalSequenceTakeover` renders only the final
+ * (most-informative) beat statically -- see `ReducedMotionGoalSequence` in
+ * goal-sequence-takeover.tsx -- so there is no tension beat shown to hold
+ * against; this hook mirrors that by jumping straight to the last beat
+ * instead of scheduling per-beat timers.
+ */
+function useGoalSequenceScoreHold(scene: GameViewScene | undefined, reduceMotion: boolean) {
+  const [activeBeatIndex, setActiveBeatIndex] = useState(0);
+  const previousScoreRef = useRef<MatchEngineScore | undefined>(undefined);
+
+  useEffect(() => {
+    if (!scene || scene.kind !== 'goal_sequence') {
+      setActiveBeatIndex(0);
+      return;
+    }
+
+    const plan = planGoalSequenceBeats(scene);
+
+    if (reduceMotion) {
+      setActiveBeatIndex(plan.length > 0 ? plan.length - 1 : 0);
+      return;
+    }
+
+    setActiveBeatIndex(activeGoalSequenceBeatIndex(plan, 0));
+
+    const timers = plan
+      .map((entry) => {
+        if (entry.offsetMs === 0) return undefined;
+        return setTimeout(() => setActiveBeatIndex(entry.index), entry.offsetMs);
+      })
+      .filter((handle): handle is ReturnType<typeof setTimeout> => handle !== undefined);
+
+    return () => {
+      timers.forEach(clearTimeout);
+    };
+    // Re-run only when the scene identity or reduce-motion mode changes,
+    // matching AnimatedGoalSequence's own timer-reset-on-scene.id pattern in
+    // goal-sequence-takeover.tsx.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reduceMotion, scene?.id, scene?.kind]);
+
+  return { activeBeatIndex, previousScoreRef };
 }
 
 function formatClockLabel(clockSeconds: number | undefined): string {

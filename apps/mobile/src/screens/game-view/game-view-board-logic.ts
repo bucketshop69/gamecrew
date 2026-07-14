@@ -47,6 +47,30 @@ export const ZONE_LABELS: Record<GameViewZone, string> = {
 export type BoardDirection = 'up' | 'down';
 
 /**
+ * Direction-relative zone labels: the same semantic band reads differently
+ * depending which edge the ball is moving toward, so the board's static
+ * chrome (fix #1, "zone labels acquire meaning") can label each row as
+ * "toward <edge>" rather than a direction-agnostic "Attacking third" that
+ * doesn't say which way. `edge` is a short board-edge descriptor (e.g. a
+ * team name or "top"/"bottom"); callers decide what that descriptor is.
+ */
+export function zoneLabelForDirection(zone: GameViewZone, direction: BoardDirection): string {
+  const towardTopEdge = direction === 'up';
+  switch (zone) {
+    case 'high_danger':
+    case 'danger':
+      return towardTopEdge ? `Danger ↑` : `Danger ↓`;
+    case 'attack':
+      return towardTopEdge ? `Attacking ↑` : `Attacking ↓`;
+    case 'neutral':
+      return 'Midfield';
+    case 'safe':
+    default:
+      return towardTopEdge ? `Own third ↓` : `Own third ↑`;
+  }
+}
+
+/**
  * Which visual direction (up the board toward the top edge, or down toward
  * the bottom edge) participant 1 attacks. Participant 2 always attacks the
  * opposite edge. This is presentation-only: it lets home/away flip sides
@@ -61,6 +85,41 @@ export function directionForParticipant(
   if (participant === undefined) return undefined;
   if (participant === 1) return participant1Direction;
   return participant1Direction === 'up' ? 'down' : 'up';
+}
+
+export interface GoalEndLabels {
+  /** Label for the board's top edge, e.g. "ECUADOR GOAL". */
+  top: string;
+  /** Label for the board's bottom edge. */
+  bottom: string;
+}
+
+/**
+ * Resolves the attack-direction affordance labels for fix #1: a subtle
+ * gray label at each pitch end naming the team whose GOAL sits there (i.e.
+ * the team the *other* side attacks toward), so the existing zone-band
+ * chrome reads as "toward a real goal" instead of an unlabeled abstract
+ * gradient. Participant 1's own attacking edge (`participant1Direction`)
+ * is where participant 2's goal sits, and vice versa.
+ */
+export function resolveGoalEndLabels(
+  homeTeam: BoardTeamInfoName,
+  awayTeam: BoardTeamInfoName,
+  participant1Direction: BoardDirection = 'up',
+): GoalEndLabels {
+  const homeGoalName = `${homeTeam.name.toUpperCase()} GOAL`;
+  const awayGoalName = `${awayTeam.name.toUpperCase()} GOAL`;
+
+  // Participant 1 attacks toward participant1Direction, i.e. that edge is
+  // where participant 2 (away) defends its own goal.
+  return participant1Direction === 'up'
+    ? { top: awayGoalName, bottom: homeGoalName }
+    : { top: homeGoalName, bottom: awayGoalName };
+}
+
+/** Minimal team shape `resolveGoalEndLabels` needs -- just the display name. */
+export interface BoardTeamInfoName {
+  name: string;
 }
 
 /**
@@ -117,13 +176,25 @@ const MIN_PULSE_DURATION_MS = 900;
 const MAX_PULSE_DURATION_MS = 2200;
 
 /**
+ * Visibility floors (fix #5): the walkthrough found the low-pressure
+ * presence near-invisible against the #0b0b0b board. These are the lowest
+ * opacity/scale values the presence may render at, regardless of intensity;
+ * the gradient above the floor is unchanged, only the bottom is lifted so
+ * every pressure level stays legible.
+ */
+const MIN_OUTER_OPACITY = 0.32;
+const MIN_INNER_OPACITY = 0.55;
+const MIN_SCALE = 1.08;
+
+/**
  * Converts a semantic zone/pressure pair into concrete presence visuals.
  * "Rising pressure moves the presence toward goal and increases visual
  * intensity" (PRD): higher intensity means a larger, more opaque presence
  * pulsing faster. `pressure` (when present) takes precedence over the zone
  * baseline because pressure is the more specific signal; the zone baseline
  * is the fallback so the presence still reacts when a scene only carries a
- * zone.
+ * zone. Opacity/scale are floored (see `MIN_*` above) so the presence is
+ * always clearly visible, even at the lowest pressure reading.
  */
 export function pressureToIntensity(
   zone: GameViewZone | undefined,
@@ -134,14 +205,29 @@ export function pressureToIntensity(
 
   return {
     intensity,
-    scale: 1 + intensity * 0.55,
-    outerOpacity: 0.14 + intensity * 0.26,
-    innerOpacity: 0.32 + intensity * 0.5,
+    scale: Math.max(MIN_SCALE, 1 + intensity * 0.55),
+    outerOpacity: Math.max(MIN_OUTER_OPACITY, 0.14 + intensity * 0.26),
+    innerOpacity: Math.max(MIN_INNER_OPACITY, 0.32 + intensity * 0.5),
     pulseDurationMs: Math.round(
       MAX_PULSE_DURATION_MS - intensity * (MAX_PULSE_DURATION_MS - MIN_PULSE_DURATION_MS),
     ),
   };
 }
+
+/**
+ * Dimmed, static treatment for a "last known position" or neutral-midfield
+ * presence (fix #4): reduced opacity, minimum scale, and no pulse (an
+ * effectively infinite pulse duration -- the renderer also disables the
+ * pulse/drift loops outright when `isHeld` is true, this is a defensive
+ * floor for anything that reads `pulseDurationMs` directly).
+ */
+const HELD_PRESENCE_INTENSITY: PresenceIntensity = {
+  intensity: 0,
+  scale: MIN_SCALE,
+  outerOpacity: 0.16,
+  innerOpacity: 0.26,
+  pulseDurationMs: MAX_PULSE_DURATION_MS,
+};
 
 export interface BoardTeamInfo {
   name: string;
@@ -156,6 +242,13 @@ export interface BoardPresenceState {
   teamName: string;
   zoneLabel: string;
   intensity: PresenceIntensity;
+  /**
+   * True when this presence is not a live possession reading but a carried
+   * "last known position" or the neutral match-start placement (fix #4).
+   * The renderer uses this to suppress pulse/drift and apply the dimmed
+   * treatment instead of treating it as an active possession state.
+   */
+  isHeld: boolean;
 }
 
 /**
@@ -184,7 +277,69 @@ export function resolveAmbientPresence(
     teamName: team.name,
     zoneLabel: ZONE_LABELS[zone ?? 'neutral'] ?? ZONE_LABELS.neutral,
     intensity: pressureToIntensity(scene.zone, scene.pressure),
+    isHeld: false,
   };
+}
+
+/**
+ * Neutral, centered midfield presence shown at match start (or whenever no
+ * prior presence exists to carry forward): no team owns it, so it renders in
+ * a neutral gray rather than either team's color, per fix #4's "genuinely no
+ * prior position" case.
+ */
+const NEUTRAL_PRESENCE_COLOR = '#5A5A5A';
+const NEUTRAL_PRESENCE_LABEL = 'Kickoff';
+
+/**
+ * Resolves the presence the board should show when the current scene has no
+ * possession presence of its own (ambient scene with no zone/participant, or
+ * a non-ambient scene with the board visible underneath -- e.g. a minor set
+ * piece badge, fix #2). Fix #4: instead of leaving the board dead/black,
+ * carry forward the last known live presence, dimmed and static. Falls back
+ * to a centered, neutral-colored placement when there is no prior presence
+ * at all (match start). Pure carry logic: callers own the "last known
+ * presence" ref/state and pass it in; this function never mutates it.
+ */
+export function resolveHeldPresence(
+  lastPresence: BoardPresenceState | undefined,
+): BoardPresenceState {
+  if (lastPresence) {
+    return {
+      ...lastPresence,
+      intensity: HELD_PRESENCE_INTENSITY,
+      isHeld: true,
+    };
+  }
+
+  return {
+    position: zoneToBandPosition('neutral', 'up'),
+    direction: 'up',
+    color: NEUTRAL_PRESENCE_COLOR,
+    teamName: NEUTRAL_PRESENCE_LABEL,
+    zoneLabel: ZONE_LABELS.neutral,
+    intensity: HELD_PRESENCE_INTENSITY,
+    isHeld: true,
+  };
+}
+
+/**
+ * Decides what the board should actually render for a given scene, carrying
+ * forward the last live presence when the scene doesn't supply its own (fix
+ * #4). `lastLivePresence` should be the most recent non-held
+ * `resolveAmbientPresence` result the caller has seen (renderer owns that
+ * memory, e.g. a ref); this function is pure and makes no assumption about
+ * how it's stored.
+ */
+export function resolveBoardPresence(
+  scene: GameViewScene | null | undefined,
+  homeTeam: BoardTeamInfo,
+  awayTeam: BoardTeamInfo,
+  lastLivePresence: BoardPresenceState | undefined,
+  participant1Direction: BoardDirection = 'up',
+): BoardPresenceState {
+  const live = resolveAmbientPresence(scene, homeTeam, awayTeam, participant1Direction);
+  if (live) return live;
+  return resolveHeldPresence(lastLivePresence);
 }
 
 /**
@@ -196,6 +351,11 @@ export function buildBoardAccessibilityLabel(
   presence: BoardPresenceState | undefined,
 ): string {
   if (!presence) return 'Game View board. No active possession to show.';
+  if (presence.isHeld) {
+    return presence.teamName === NEUTRAL_PRESENCE_LABEL
+      ? 'Game View board. Waiting for kickoff.'
+      : `Game View board. Last known play: ${presence.teamName} in the ${presence.zoneLabel.toLowerCase()}.`;
+  }
 
   const intensityWord = intensityToVerb(presence.intensity.intensity);
   return `${presence.teamName} ${intensityWord} in the ${presence.zoneLabel.toLowerCase()}.`;

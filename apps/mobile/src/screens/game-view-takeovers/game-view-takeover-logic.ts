@@ -129,6 +129,30 @@ export function totalGoalSequenceDurationMs(plan: readonly GoalBeatPlanEntry[]):
   return last.offsetMs + last.durationMs;
 }
 
+/**
+ * Resolves which beat of a planned goal_sequence should be considered
+ * "active" at `elapsedMs` since the takeover started. `GoalSequenceTakeover`
+ * itself tracks its active beat with its own timer-driven React state (see
+ * `AnimatedGoalSequence`); this pure function gives `GameViewScreen` a way
+ * to derive the same beat-boundary information independently, for fix #3
+ * (no score spoiler) -- it schedules an equivalent beat-boundary timer so it
+ * knows when the celebration beat has actually started and it's safe to
+ * commit the new score to the header/score rail, see `resolveScoreRailScore`
+ * in game-view-screen-logic.ts. Clamps to the last beat once `elapsedMs`
+ * exceeds the plan (matches "the takeover holds on the last beat"
+ * behavior). Returns 0 for an empty plan.
+ */
+export function activeGoalSequenceBeatIndex(
+  plan: readonly GoalBeatPlanEntry[],
+  elapsedMs: number,
+): number {
+  if (plan.length === 0) return 0;
+  for (let index = plan.length - 1; index >= 0; index -= 1) {
+    if (elapsedMs >= plan[index]!.offsetMs) return index;
+  }
+  return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Goal sequence: score-event variant escalation
 // ---------------------------------------------------------------------------

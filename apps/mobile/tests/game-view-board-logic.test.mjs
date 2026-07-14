@@ -7,7 +7,11 @@ import {
   GAME_VIEW_STATE_COPY,
   pressureToIntensity,
   resolveAmbientPresence,
+  resolveBoardPresence,
+  resolveGoalEndLabels,
+  resolveHeldPresence,
   selectStatePanelCopy,
+  zoneLabelForDirection,
   zoneToBandPosition,
   ZONE_LABELS,
 } from '../src/screens/game-view/game-view-board-logic.ts';
@@ -247,4 +251,157 @@ test('selectStatePanelCopy: error copy matches the PRD exactly and offers retry'
 
 test('GAME_VIEW_STATE_COPY: stale banner copy matches the PRD exactly', () => {
   assert.deepEqual(GAME_VIEW_STATE_COPY.stale, { title: 'Waiting for the next match update.' });
+});
+
+// --- pressureToIntensity: visibility floor (fix #5) ---
+
+test('pressureToIntensity: safe (lowest) zone still clears the visibility floor', () => {
+  const lowest = pressureToIntensity('safe', undefined);
+  assert.ok(lowest.outerOpacity >= 0.32, `expected outerOpacity floor, got ${lowest.outerOpacity}`);
+  assert.ok(lowest.innerOpacity >= 0.55, `expected innerOpacity floor, got ${lowest.innerOpacity}`);
+  assert.ok(lowest.scale >= 1.08, `expected scale floor, got ${lowest.scale}`);
+});
+
+test('pressureToIntensity: the floor does not clip the high end of the gradient', () => {
+  const low = pressureToIntensity('safe', undefined);
+  const high = pressureToIntensity('high_danger', undefined);
+  assert.ok(high.outerOpacity > low.outerOpacity);
+  assert.ok(high.innerOpacity > low.innerOpacity);
+  assert.ok(high.scale > low.scale);
+});
+
+// --- resolveGoalEndLabels (fix #1) ---
+
+test('resolveGoalEndLabels: participant 1 attacking up puts participant 2\'s (away) goal at the top', () => {
+  const home = { name: 'Mexico' };
+  const away = { name: 'Ecuador' };
+  const labels = resolveGoalEndLabels(home, away, 'up');
+  assert.equal(labels.top, 'ECUADOR GOAL');
+  assert.equal(labels.bottom, 'MEXICO GOAL');
+});
+
+test('resolveGoalEndLabels: flips when participant 1 attacks down', () => {
+  const home = { name: 'Mexico' };
+  const away = { name: 'Ecuador' };
+  const labels = resolveGoalEndLabels(home, away, 'down');
+  assert.equal(labels.top, 'MEXICO GOAL');
+  assert.equal(labels.bottom, 'ECUADOR GOAL');
+});
+
+// --- zoneLabelForDirection (fix #1) ---
+
+test('zoneLabelForDirection: midfield reads the same regardless of direction', () => {
+  assert.equal(zoneLabelForDirection('neutral', 'up'), zoneLabelForDirection('neutral', 'down'));
+});
+
+test('zoneLabelForDirection: danger/attack point toward the edge they advance toward', () => {
+  assert.match(zoneLabelForDirection('danger', 'up'), /↑/);
+  assert.match(zoneLabelForDirection('danger', 'down'), /↓/);
+  assert.match(zoneLabelForDirection('attack', 'up'), /↑/);
+  assert.match(zoneLabelForDirection('attack', 'down'), /↓/);
+});
+
+test('zoneLabelForDirection: high_danger shares danger\'s direction-relative label', () => {
+  assert.equal(zoneLabelForDirection('high_danger', 'up'), zoneLabelForDirection('danger', 'up'));
+});
+
+// --- resolveHeldPresence / resolveBoardPresence (fix #4) ---
+
+test('resolveHeldPresence: with no prior presence, centers a neutral placement at midfield', () => {
+  const held = resolveHeldPresence(undefined);
+  assert.equal(held.isHeld, true);
+  assert.equal(held.position, zoneToBandPosition('neutral', 'up'));
+  assert.equal(held.zoneLabel, ZONE_LABELS.neutral);
+});
+
+test('resolveHeldPresence: carries forward a prior presence, dimmed and marked held', () => {
+  const home = team('Mexico', '#00753F', 1);
+  const away = team('Ecuador', '#FFD400', 2);
+  const live = resolveAmbientPresence(
+    scene({ kind: 'ambient', participant: 1, zone: 'danger' }),
+    home,
+    away,
+  );
+  const held = resolveHeldPresence(live);
+
+  assert.equal(held.isHeld, true);
+  assert.equal(held.teamName, 'Mexico');
+  assert.equal(held.color, '#00753F');
+  assert.equal(held.position, live.position);
+});
+
+test('resolveHeldPresence: dimmed opacity is lower than the live visibility floor', () => {
+  const home = team('Mexico', '#00753F', 1);
+  const away = team('Ecuador', '#FFD400', 2);
+  const live = resolveAmbientPresence(
+    scene({ kind: 'ambient', participant: 1, zone: 'safe' }),
+    home,
+    away,
+  );
+  const held = resolveHeldPresence(live);
+  assert.ok(held.intensity.outerOpacity < live.intensity.outerOpacity);
+});
+
+test('resolveBoardPresence: returns the live presence directly when the scene has one', () => {
+  const home = team('Mexico', '#00753F', 1);
+  const away = team('Ecuador', '#FFD400', 2);
+  const result = resolveBoardPresence(
+    scene({ kind: 'ambient', participant: 1, zone: 'attack' }),
+    home,
+    away,
+    undefined,
+  );
+  assert.equal(result.isHeld, false);
+  assert.equal(result.teamName, 'Mexico');
+});
+
+test('resolveBoardPresence: carries the last live presence forward for a scene with none (fix #4)', () => {
+  const home = team('Mexico', '#00753F', 1);
+  const away = team('Ecuador', '#FFD400', 2);
+  const lastLive = resolveAmbientPresence(
+    scene({ kind: 'ambient', participant: 2, zone: 'danger' }),
+    home,
+    away,
+  );
+  // A takeover scene (e.g. a minor set-piece badge scene) carries no ambient
+  // possession presence of its own.
+  const result = resolveBoardPresence(
+    scene({ kind: 'set_piece', participant: 1 }),
+    home,
+    away,
+    lastLive,
+  );
+  assert.equal(result.isHeld, true);
+  assert.equal(result.teamName, 'Ecuador');
+  assert.equal(result.position, lastLive.position);
+});
+
+test('resolveBoardPresence: falls back to the neutral placement when there is no scene and no prior presence', () => {
+  const home = team('Mexico', '#00753F', 1);
+  const away = team('Ecuador', '#FFD400', 2);
+  const result = resolveBoardPresence(null, home, away, undefined);
+  assert.equal(result.isHeld, true);
+  assert.equal(result.position, zoneToBandPosition('neutral', 'up'));
+});
+
+// --- buildBoardAccessibilityLabel: held presence (fix #4) ---
+
+test('buildBoardAccessibilityLabel: describes a neutral held presence as waiting for kickoff', () => {
+  const held = resolveHeldPresence(undefined);
+  const label = buildBoardAccessibilityLabel(held);
+  assert.match(label, /kickoff/i);
+});
+
+test('buildBoardAccessibilityLabel: describes a carried presence as last known play', () => {
+  const home = team('Mexico', '#00753F', 1);
+  const away = team('Ecuador', '#FFD400', 2);
+  const live = resolveAmbientPresence(
+    scene({ kind: 'ambient', participant: 1, zone: 'danger' }),
+    home,
+    away,
+  );
+  const held = resolveHeldPresence(live);
+  const label = buildBoardAccessibilityLabel(held);
+  assert.match(label, /last known play/i);
+  assert.match(label, /Mexico/);
 });

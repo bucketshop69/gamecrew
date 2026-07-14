@@ -7,7 +7,9 @@ import {
   mapSourceActionToCardVariant,
   mapSourceActionToSetPieceVariant,
   resolveGameViewLoadState,
+  resolveScoreRailScore,
   selectPlaybackModeForMatchStatus,
+  shouldSetPieceUseFullVignette,
   shouldTakeoverOnCompleteAdvancePlayback,
 } from '../src/screens/game-view/game-view-screen-logic.ts';
 
@@ -131,4 +133,117 @@ test('mapSourceActionToSetPieceVariant maps every known set-piece action', () =>
 test('mapSourceActionToSetPieceVariant returns undefined for unrecognized or missing sourceAction', () => {
   assert.equal(mapSourceActionToSetPieceVariant(undefined), undefined);
   assert.equal(mapSourceActionToSetPieceVariant('goal_kick'), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Minor set-piece badge vs full vignette (fix #2)
+// ---------------------------------------------------------------------------
+
+test('shouldSetPieceUseFullVignette: corner and penalty keep the full vignette', () => {
+  assert.equal(shouldSetPieceUseFullVignette('corner'), true);
+  assert.equal(shouldSetPieceUseFullVignette('penalty'), true);
+});
+
+test('shouldSetPieceUseFullVignette: throw-in and free kick render as a compact badge instead', () => {
+  assert.equal(shouldSetPieceUseFullVignette('throw_in'), false);
+  assert.equal(shouldSetPieceUseFullVignette('free_kick'), false);
+});
+
+test('shouldSetPieceUseFullVignette: unrecognized or missing sourceAction defaults to the full vignette', () => {
+  assert.equal(shouldSetPieceUseFullVignette(undefined), true);
+  assert.equal(shouldSetPieceUseFullVignette('goal_kick'), true);
+  assert.equal(shouldSetPieceUseFullVignette(''), true);
+});
+
+// ---------------------------------------------------------------------------
+// No score spoiler (fix #3)
+// ---------------------------------------------------------------------------
+
+function goalSequenceScene(beats, overrides = {}) {
+  return {
+    id: 'goal-1',
+    fixtureId: 'fx-1',
+    kind: 'goal_sequence',
+    startRevision: 1,
+    sourceFrameIds: ['f1'],
+    durationHint: { minMs: 4000, maxMs: 8000 },
+    beats,
+    ...overrides,
+  };
+}
+
+test('resolveScoreRailScore: non-goal_sequence scenes just report their own scoreAtMoment', () => {
+  const scene = {
+    id: 's1',
+    fixtureId: 'fx-1',
+    kind: 'ambient',
+    startRevision: 1,
+    sourceFrameIds: ['f1'],
+    durationHint: { minMs: 0, maxMs: 0 },
+    scoreAtMoment: { participant1: 1, participant2: 0 },
+  };
+  const result = resolveScoreRailScore(scene, { participant1: 0, participant2: 0 }, 0);
+  assert.deepEqual(result, { participant1: 1, participant2: 0 });
+});
+
+test('resolveScoreRailScore: holds the previous score while the active beat is tension', () => {
+  const previousScore = { participant1: 0, participant2: 0 };
+  const scene = goalSequenceScene(
+    [
+      { kind: 'tension', lifecycle: 'provisional', sourceFrameIds: ['f1'] },
+      { kind: 'celebration', lifecycle: 'confirmed', sourceFrameIds: ['f2'], scoreAtMoment: { participant1: 1, participant2: 0 } },
+    ],
+    { scoreAtMoment: { participant1: 1, participant2: 0 } },
+  );
+
+  const result = resolveScoreRailScore(scene, previousScore, 0);
+  assert.deepEqual(result, previousScore, 'tension beat must not leak the post-goal score');
+});
+
+test('resolveScoreRailScore: commits the new score once the celebration beat is active', () => {
+  const previousScore = { participant1: 0, participant2: 0 };
+  const scene = goalSequenceScene(
+    [
+      { kind: 'tension', lifecycle: 'provisional', sourceFrameIds: ['f1'] },
+      { kind: 'celebration', lifecycle: 'confirmed', sourceFrameIds: ['f2'], scoreAtMoment: { participant1: 1, participant2: 0 } },
+    ],
+    { scoreAtMoment: { participant1: 1, participant2: 0 } },
+  );
+
+  const result = resolveScoreRailScore(scene, previousScore, 1);
+  assert.deepEqual(result, { participant1: 1, participant2: 0 });
+});
+
+test('resolveScoreRailScore: a still-provisional goal (tension-only beats) never commits a score', () => {
+  const previousScore = { participant1: 0, participant2: 0 };
+  const scene = goalSequenceScene([
+    { kind: 'tension', lifecycle: 'provisional', sourceFrameIds: ['f1'] },
+  ], { scoreAtMoment: { participant1: 1, participant2: 0 } });
+
+  const result = resolveScoreRailScore(scene, previousScore, 0);
+  assert.deepEqual(result, previousScore);
+});
+
+test('resolveScoreRailScore: a beat-less goal_sequence scene falls back to its own scoreAtMoment', () => {
+  const scene = goalSequenceScene(undefined, { scoreAtMoment: { participant1: 2, participant2: 1 } });
+  const result = resolveScoreRailScore(scene, { participant1: 1, participant2: 1 }, 0);
+  assert.deepEqual(result, { participant1: 2, participant2: 1 });
+});
+
+test('resolveScoreRailScore: clamps an out-of-range beat index to the last beat', () => {
+  const scene = goalSequenceScene(
+    [
+      { kind: 'tension', lifecycle: 'provisional', sourceFrameIds: ['f1'] },
+      { kind: 'celebration', lifecycle: 'confirmed', sourceFrameIds: ['f2'], scoreAtMoment: { participant1: 3, participant2: 1 } },
+    ],
+    { scoreAtMoment: { participant1: 3, participant2: 1 } },
+  );
+  const result = resolveScoreRailScore(scene, { participant1: 2, participant2: 1 }, 99);
+  assert.deepEqual(result, { participant1: 3, participant2: 1 });
+});
+
+test('resolveScoreRailScore: a missing/null current scene returns the previous score unchanged', () => {
+  const previousScore = { participant1: 1, participant2: 2 };
+  assert.deepEqual(resolveScoreRailScore(null, previousScore, 0), previousScore);
+  assert.deepEqual(resolveScoreRailScore(undefined, previousScore, 0), previousScore);
 });

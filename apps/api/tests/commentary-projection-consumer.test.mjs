@@ -1,12 +1,27 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { CommentaryProjectionConsumer } from '../src/ingestion/commentary-projection-consumer.ts';
+import { CommentaryProjectionConsumer, commentaryEntryFromBeat } from '../src/ingestion/commentary-projection-consumer.ts';
 import { SemanticFrameHub } from '../src/ingestion/semantic-frame-hub.ts';
 import { FileMatchPulseCommentaryStore, SqliteMatchPulseCommentaryStore } from '../src/match-pulse-commentary-store.ts';
+
+const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
+
+function readLastError(path, entryId) {
+  const db = new DatabaseSync(path);
+  try {
+    const row = db.prepare(
+      'SELECT last_error FROM match_pulse_commentary_enrichment_jobs WHERE entry_id = ?',
+    ).get(entryId);
+    return row?.last_error ?? undefined;
+  } finally {
+    db.close();
+  }
+}
 
 const fixtureId = '18179759';
 const teams = [
@@ -627,6 +642,111 @@ test('settles a final provider error as a failed grounded fallback', async () =>
   }
 });
 
+test('a terminal provider error persists its message as the enrichment job last_error', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gamecrew-commentary-provider-error-'));
+  const path = join(directory, 'commentary.sqlite');
+  const frames = [cornerFrame(1)];
+  const frameStore = {
+    async getCheckpoint() { return { phase: 'first_half', projectionGeneration: 0, stateRevision: 1 }; },
+    async listFramesAfter(_fixtureId, afterRevision) { return frames.filter((item) => item.stateRevision > afterRevision); },
+  };
+  const hub = new SemanticFrameHub(frameStore);
+  const store = new SqliteMatchPulseCommentaryStore(path);
+  const consumer = new CommentaryProjectionConsumer(frameStore, hub, store, {
+    workerId: 'terminal-worker',
+    enrichmentMaxAttempts: 1,
+    onEnrichmentError() {},
+    enrichment: { async enrichCommentaryEntries() { throw new Error('provider unavailable'); } },
+  });
+  try {
+    await consumer.ensureFixture(fixtureId, teams);
+    await flush();
+    await consumer.close();
+    const [persisted] = await store.listEntries(fixtureId);
+    assert.equal(persisted.enrichmentStatus, 'failed');
+    assert.equal(readLastError(path, persisted.id), 'provider unavailable');
+  } finally {
+    await consumer.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('releaseEnrichmentClaim persists a last_error reason for terminal and retry outcomes', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gamecrew-commentary-last-error-'));
+  const path = join(directory, 'commentary.sqlite');
+  const store = new SqliteMatchPulseCommentaryStore(path);
+  const entry = {
+    id: 'last-error-beat', fixtureId, batchId: 'engine:0:1-1', fromSeq: 1, toSeq: 1,
+    period: 'first_half', clock: { label: "1'" }, kind: 'corner', sourceEvents: [],
+    commentary: 'Fallback.', intensity: 'building', momentumSide: 'home',
+    confidence: 'source_backed', generation: 'rule_based', fallbackCommentary: 'Fallback.',
+    enrichmentStatus: 'pending', projectionGeneration: 0,
+  };
+  try {
+    await store.commitEngineProjection(fixtureId, 0, 1, [entry], { replace: true });
+    const claim = await store.claimEnrichmentBatch(fixtureId, 'worker-a', 1, 30_000, 100);
+    assert.ok(claim);
+    await store.releaseEnrichmentClaim(claim, 'retry', Date.now(), 'temporary provider outage');
+    assert.equal(readLastError(path, entry.id), 'temporary provider outage');
+
+    const reclaimed = await store.claimEnrichmentBatch(fixtureId, 'worker-a', 1, 30_000, Date.now() + 1);
+    assert.ok(reclaimed);
+    await store.releaseEnrichmentClaim(reclaimed, 'terminal', Date.now(), 'Commentary omitted or changed the grounded scorer name.');
+    assert.equal(
+      readLastError(path, entry.id),
+      'Commentary omitted or changed the grounded scorer name.',
+    );
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('persists the caught validation error as the enrichment job last_error for a terminal per-entry failure', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gamecrew-commentary-terminal-reason-'));
+  const path = join(directory, 'commentary.sqlite');
+  const frames = [cornerFrame(1)];
+  const frameStore = {
+    async getCheckpoint() { return { phase: 'first_half', projectionGeneration: 0, stateRevision: 1 }; },
+    async listFramesAfter(_fixtureId, afterRevision) { return frames.filter((item) => item.stateRevision > afterRevision); },
+  };
+  const hub = new SemanticFrameHub(frameStore);
+  const store = new SqliteMatchPulseCommentaryStore(path);
+  const enrichment = {
+    async enrichCommentaryEntries(_context, pending) {
+      return {
+        entries: pending.map((entry) => ({ ...entry, enrichmentStatus: 'failed' })),
+        provider: 'openai-compatible',
+        attempted: pending.length,
+        completed: 0,
+        failed: pending.length,
+        traces: pending.map((entry) => ({
+          entryId: entry.id,
+          stages: [],
+          failureReason: 'Commentary omitted or changed the grounded scorer name.',
+        })),
+      };
+    },
+  };
+  const consumer = new CommentaryProjectionConsumer(frameStore, hub, store, { enrichment, workerId: 'worker-a' });
+  try {
+    await consumer.ensureFixture(fixtureId, teams);
+    await flush();
+    await consumer.close();
+    const [persisted] = await store.listEntries(fixtureId);
+    assert.equal(persisted.enrichmentStatus, 'failed');
+    assert.equal(
+      readLastError(path, persisted.id),
+      'Commentary omitted or changed the grounded scorer name.',
+    );
+  } finally {
+    await consumer.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('coalesces a large initial frame publication instead of rebuilding per delivery', async () => {
   const frames = Array.from({ length: 886 }, (_, index) => cornerFrame(index + 1));
   let fullReads = 0;
@@ -655,6 +775,178 @@ test('coalesces a large initial frame publication instead of rebuilding per deli
     assert.equal(fullReads, commits + 1);
   } finally {
     await consumer.close();
+    store.close();
+  }
+});
+
+// --- narrative attachment (commentaryEntryFromBeat) -----------------------
+
+function narrativeCue(id, kind, overrides = {}) {
+  return {
+    id,
+    kind,
+    updateMode: 'incident_upsert',
+    lifecycle: 'confirmed',
+    basis: 'direct',
+    revision: 1,
+    value: {},
+    sourceSeqs: [1],
+    factIds: [],
+    ...overrides,
+  };
+}
+
+function narrativeScoreCue(id, participant1, participant2, seq) {
+  return narrativeCue(id, 'score_commit', {
+    updateMode: 'state_replace',
+    value: { participant1, participant2 },
+    sourceSeqs: [seq],
+  });
+}
+
+function narrativeGoalCue(id, participant, teamId, seq, player) {
+  return narrativeCue(id, 'goal_confirmed', {
+    participant,
+    teamId,
+    value: { action: 'goal' },
+    sourceSeqs: [seq],
+    ...(player ? { player } : {}),
+  });
+}
+
+function narrativeCardCue(id, participant, teamId, seq, action) {
+  return narrativeCue(id, 'card', {
+    participant,
+    teamId,
+    value: { action },
+    sourceSeqs: [seq],
+  });
+}
+
+function narrativeBeat(id, kind, cues, overrides = {}) {
+  return {
+    id,
+    fixtureId,
+    projectionGeneration: 0,
+    kind,
+    mustCover: kind === 'major',
+    fromSeq: cues[0]?.sourceSeqs[0] ?? 0,
+    toSeq: cues[cues.length - 1]?.sourceSeqs[0] ?? 0,
+    participant: cues[0]?.participant,
+    teamId: cues[0]?.teamId,
+    sourceFrameIds: [],
+    sources: [],
+    factIds: [],
+    cueIds: cues.map((cue) => cue.id),
+    facts: [],
+    simulationCues: cues,
+    fallbackCommentary: 'Fallback commentary.',
+    ...overrides,
+  };
+}
+
+const narrativeState = {
+  fixtureId,
+  lastAppliedSeq: 0,
+  stateRevision: 0,
+  phase: 'first_half',
+  confirmedScore: { participant1: 0, participant2: 0 },
+  possibleEvents: {},
+  activePlayerIdsByParticipant: { 1: [1, 2, 3], 2: [4, 5, 6] },
+  disciplineByPlayerId: {},
+  incidents: {},
+  supportedFacts: {},
+  simulationCues: {},
+  integrityWarnings: [],
+};
+
+test('commentaryEntryFromBeat attaches scoreStory narrative to a goal beat', () => {
+  const beats = [
+    narrativeBeat('goal-beat', 'major', [
+      narrativeGoalCue('goal:1', 1, 10, 10, { normativeId: 501, sourcePreferredName: 'Scorer One' }),
+      narrativeScoreCue('score:1', 1, 0, 10),
+    ], { matchClockSeconds: 600 }),
+  ];
+  const entry = commentaryEntryFromBeat(beats[0], 'first_half', teams, {
+    beats, beatIndex: 0, state: narrativeState,
+  });
+  assert.ok(entry.narrative, 'expected a narrative slice on a goal beat');
+  assert.deepEqual(entry.narrative.scoreStory.events, ['opener']);
+  assert.equal(entry.narrative.playerMemory.scorerGoalsThisMatch, 1);
+  assert.equal(entry.narrative.discipline, undefined);
+  assert.equal(entry.scoreAtMoment.home, 1);
+  assert.equal(entry.scoreAtMoment.away, 0);
+});
+
+test('commentaryEntryFromBeat attaches discipline narrative to a card beat', () => {
+  const beats = [
+    narrativeBeat('yellow-1', 'major', [narrativeCardCue('card:1', 1, 10, 20, 'yellow_card')], { matchClockSeconds: 1200 }),
+    narrativeBeat('yellow-2', 'major', [narrativeCardCue('card:2', 1, 10, 30, 'yellow_card')], { matchClockSeconds: 1500 }),
+  ];
+  const entry = commentaryEntryFromBeat(beats[1], 'first_half', teams, {
+    beats, beatIndex: 1, state: narrativeState,
+  });
+  assert.ok(entry.narrative, 'expected a narrative slice on a card beat');
+  assert.equal(entry.narrative.discipline.teamYellowCount, 2);
+  assert.equal(entry.narrative.scoreStory, undefined);
+});
+
+test('commentaryEntryFromBeat threads the latest known score onto a non-goal beat', () => {
+  const beats = [
+    narrativeBeat('goal-beat', 'major', [
+      narrativeGoalCue('goal:1', 1, 10, 10),
+      narrativeScoreCue('score:1', 1, 0, 10),
+    ], { matchClockSeconds: 600 }),
+    narrativeBeat('corner-beat', 'pressure', [
+      narrativeCue('corner:1', 'set_piece', { participant: 2, teamId: 20, value: { action: 'corner' }, sourceSeqs: [11] }),
+    ], { matchClockSeconds: 660 }),
+  ];
+  const entry = commentaryEntryFromBeat(beats[1], 'first_half', teams, {
+    beats, beatIndex: 1, state: narrativeState,
+  });
+  assert.deepEqual(entry.scoreAtMoment, { home: 1, away: 0 });
+});
+
+test('commentaryEntryFromBeat omits narrative when no state is available (existing checkpoint shape)', () => {
+  const beats = [
+    narrativeBeat('goal-beat', 'major', [
+      narrativeGoalCue('goal:1', 1, 10, 10),
+      narrativeScoreCue('score:1', 1, 0, 10),
+    ], { matchClockSeconds: 600 }),
+  ];
+  const entry = commentaryEntryFromBeat(beats[0], 'first_half', teams, { beats, beatIndex: 0, state: undefined });
+  assert.equal(entry.narrative, undefined);
+  // Score threading still works without a CanonicalMatchState, since it only
+  // reads simulationCues off the beats themselves.
+  assert.deepEqual(entry.scoreAtMoment, { home: 1, away: 0 });
+});
+
+test('commentaryEntryFromBeat omits narrative entirely when no narrative context is supplied (back-compat)', () => {
+  const beat = narrativeBeat('goal-beat', 'major', [
+    narrativeGoalCue('goal:1', 1, 10, 10),
+    narrativeScoreCue('score:1', 1, 0, 10),
+  ], { matchClockSeconds: 600 });
+  const entry = commentaryEntryFromBeat(beat, 'first_half', teams);
+  assert.equal(entry.narrative, undefined);
+  assert.deepEqual(entry.scoreAtMoment, { home: 1, away: 0 });
+});
+
+test('a narrative-bearing entry round-trips whole through the commentary store', async () => {
+  const beats = [
+    narrativeBeat('goal-beat', 'major', [
+      narrativeGoalCue('goal:1', 1, 10, 10, { normativeId: 501, sourcePreferredName: 'Scorer One' }),
+      narrativeScoreCue('score:1', 1, 0, 10),
+    ], { matchClockSeconds: 600 }),
+  ];
+  const entry = commentaryEntryFromBeat(beats[0], 'first_half', teams, {
+    beats, beatIndex: 0, state: narrativeState,
+  });
+  const store = new SqliteMatchPulseCommentaryStore(':memory:');
+  try {
+    await store.commitEngineProjection(fixtureId, 0, 1, [entry], { replace: true });
+    const [persisted] = await store.listEntries(fixtureId);
+    assert.deepEqual(persisted.narrative, entry.narrative);
+  } finally {
     store.close();
   }
 });

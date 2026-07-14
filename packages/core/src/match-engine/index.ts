@@ -1,5 +1,16 @@
 export { replayMatchEngine } from './replay';
 export { planCommentaryBeats } from './commentary';
+export { computeBeatNarrative } from './narrative';
+export type {
+  BeatNarrative,
+  BeatNarrativeDiscipline,
+  BeatNarrativeMomentum,
+  BeatNarrativePlayerMemory,
+  BeatNarrativeScoreStory,
+  ComputeBeatNarrativeArgs,
+  NarrativeScoreEvent,
+  NarrativeTimeContext,
+} from './narrative';
 export type {
   CanonicalIncident,
   CanonicalMatchState,

@@ -1,5 +1,7 @@
 import {
+  computeBeatNarrative,
   planCommentaryBeats,
+  type CanonicalMatchState,
   type CommentaryBeat,
   type MatchEnginePhase,
   type MatchEngineTeam,
@@ -24,6 +26,7 @@ export interface CommentaryProjectionFrameStore {
     phase: MatchEnginePhase;
     projectionGeneration: number;
     stateRevision?: number;
+    state?: CanonicalMatchState;
   } | undefined>;
 }
 
@@ -182,10 +185,11 @@ export class CommentaryProjectionConsumer {
       teams: state.teams,
     });
     const phases = phasesByFrame(semanticFrames);
-    const entries = beats.map((beat) => commentaryEntryFromBeat(
+    const entries = beats.map((beat, index) => commentaryEntryFromBeat(
       beat,
       phases.get(beat.sourceFrameIds[0] ?? '') ?? checkpoint.phase,
       state.teams,
+      { beats, beatIndex: index, state: checkpoint.state },
     ));
     const lastStateRevision = semanticFrames.reduce(
       (latest, frame) => Math.max(latest, frame.stateRevision),
@@ -277,6 +281,9 @@ export class CommentaryProjectionConsumer {
       if (processingError !== undefined) {
         const terminal = claim.attempt >= (this.options.enrichmentMaxAttempts ?? 3);
         const delay = (this.options.enrichmentRetryBaseMs ?? 1_000) * (2 ** Math.max(0, claim.attempt - 1));
+        const processingErrorReason = processingError instanceof Error
+          ? processingError.message
+          : String(processingError);
         if (terminal) {
           const resultGeneration = pending[0]?.projectionGeneration;
           if (resultGeneration !== undefined) {
@@ -285,7 +292,7 @@ export class CommentaryProjectionConsumer {
               resultGeneration,
               requestCursor.lastStateRevision,
               pending.map((entry) => ({ ...entry, enrichmentStatus: 'failed' })),
-              { expectedCursor: requestCursor },
+              { expectedCursor: requestCursor, failureReason: processingErrorReason },
             );
             if (!commit.applied) {
               await this.commentary.releaseEnrichmentClaim(claim, 'retry', Date.now());
@@ -296,6 +303,7 @@ export class CommentaryProjectionConsumer {
         }
         await this.commentary.releaseEnrichmentClaim(
           claim, terminal ? 'terminal' : 'retry', Date.now() + delay,
+          processingErrorReason,
         );
         this.options.onEnrichmentError?.(processingError, fixtureId);
         if (!terminal && this.fixtures.has(fixtureId)) {
@@ -320,6 +328,10 @@ export class CommentaryProjectionConsumer {
         failed: settledEntries.filter((entry) => entry.enrichmentStatus === 'failed').length,
       };
       this.options.onEnrichmentResult?.(settledResult, fixtureId);
+      const hasFailure = settledEntries.some((entry) => entry.enrichmentStatus === 'failed');
+      const failureReason = settledResult.traces
+        ?.find((trace) => trace.failureReason !== undefined)
+        ?.failureReason;
       const resultGeneration = pending[0]?.projectionGeneration;
       if (resultGeneration !== undefined) {
         const commit = await this.commentary.commitEngineProjection(
@@ -327,7 +339,7 @@ export class CommentaryProjectionConsumer {
           resultGeneration,
           requestCursor.lastStateRevision,
           settledEntries,
-          { expectedCursor: requestCursor },
+          { expectedCursor: requestCursor, failureReason },
         );
         if (!commit.applied) {
           await this.commentary.releaseEnrichmentClaim(claim, 'retry', Date.now());
@@ -337,17 +349,27 @@ export class CommentaryProjectionConsumer {
       }
       await this.commentary.releaseEnrichmentClaim(
         claim,
-        settledEntries.some((entry) => entry.enrichmentStatus === 'failed') ? 'terminal' : 'complete',
+        hasFailure ? 'terminal' : 'complete',
+        Date.now(),
+        failureReason,
       );
       state.enrichmentRequested = true;
     }
   }
 }
 
+export interface CommentaryEntryNarrativeContext {
+  /** Ordered full beat history up to and including `beat` (beats[beatIndex] === beat). */
+  beats: readonly CommentaryBeat[];
+  beatIndex: number;
+  state?: CanonicalMatchState;
+}
+
 export function commentaryEntryFromBeat(
   beat: CommentaryBeat,
   phase: MatchEnginePhase,
   teams: readonly MatchEngineTeam[] = [],
+  narrativeContext?: CommentaryEntryNarrativeContext,
 ): MatchPulseCommentaryEntry {
   const team = teams.find((candidate) =>
     (beat.teamId !== undefined && String(candidate.teamId) === String(beat.teamId))
@@ -355,7 +377,14 @@ export function commentaryEntryFromBeat(
   const opponent = team && teams.find((candidate) => candidate.participant !== team.participant);
   const clockSeconds = beat.matchClockSeconds;
   const scoreCue = beat.simulationCues.find((cue) => cue.kind === 'score_commit');
-  const score = scoreCue?.value;
+  const score = scoreCue?.value
+    ?? (narrativeContext && latestKnownScoreValue(narrativeContext.beats, narrativeContext.beatIndex));
+  const narrative = narrativeContext?.state && computeBeatNarrative({
+    beat,
+    beatIndex: narrativeContext.beatIndex,
+    beats: narrativeContext.beats,
+    state: narrativeContext.state,
+  });
 
   return {
     id: beat.id,
@@ -434,7 +463,29 @@ export function commentaryEntryFromBeat(
         : cue.value,
       sourceSeqs: cue.sourceSeqs,
     })),
+    ...(narrative ? { narrative } : {}),
   };
+}
+
+/**
+ * The most recently committed score at or before `beats[beatIndex]`, searched
+ * backward through beat history. Threading this forward lets every beat
+ * (not only the one carrying the `score_commit` cue) ground lead/trail/level
+ * commentary language in a known score.
+ */
+function latestKnownScoreValue(
+  beats: readonly CommentaryBeat[],
+  beatIndex: number,
+): { participant1: number; participant2: number } | undefined {
+  for (let index = beatIndex; index >= 0; index -= 1) {
+    const value = beats[index]?.simulationCues.find((cue) => cue.kind === 'score_commit')?.value as
+      | { participant1?: unknown; participant2?: unknown }
+      | undefined;
+    if (typeof value?.participant1 === 'number' && typeof value.participant2 === 'number') {
+      return { participant1: value.participant1, participant2: value.participant2 };
+    }
+  }
+  return undefined;
 }
 
 function entryKind(beat: CommentaryBeat): MatchPulseCommentaryEntryKind {

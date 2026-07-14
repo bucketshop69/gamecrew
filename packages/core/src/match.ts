@@ -1,3 +1,5 @@
+import type { BeatNarrative } from './match-engine/narrative';
+
 export type GameCrewMatchFilter = 'live' | 'upcoming' | 'replay' | 'hosted';
 
 export type GameCrewMatchStatus =
@@ -289,6 +291,8 @@ export interface MatchPulseCommentaryEntry {
   groundedFacts?: readonly MatchPulseCommentaryGroundedFact[];
   coveredFrameIds?: readonly string[];
   enrichmentPromptVersion?: string;
+  /** Deterministic match-memory context for this beat; relevance-gated, computed by computeBeatNarrative. */
+  narrative?: BeatNarrative;
 }
 
 export interface MatchPulseCommentaryGroundedFact {

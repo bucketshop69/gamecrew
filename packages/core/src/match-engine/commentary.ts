@@ -308,12 +308,15 @@ function fallbackFor(
   const subject = teamName ?? 'One side';
   const goal = cues.find((cue) => cue.kind === 'goal_confirmed');
   if (goal) {
-    const scorer = goal.player?.displayName ?? goal.player?.sourcePreferredName;
+    const rawScorer = goal.player?.displayName ?? goal.player?.sourcePreferredName;
+    const scorer = rawScorer ? displayPlayerName(rawScorer) : undefined;
     const score = cues.find((cue) => cue.kind === 'score_commit')?.value;
     const scoreText = typeof score?.participant1 === 'number' && typeof score?.participant2 === 'number'
-      ? ` It is ${score.participant1}-${score.participant2}.`
+      ? ` ${score.participant1}-${score.participant2}.`
       : '';
-    return scorer ? `Goal for ${subject}, scored by ${scorer}.${scoreText}` : `Goal for ${subject}.${scoreText}`;
+    return scorer
+      ? `${scorer} scores for ${subject}.${scoreText}`
+      : `Goal for ${subject}.${scoreText}`;
   }
 
   const phase = cues.find((cue) => cue.kind === 'phase_change')?.value.phase;
@@ -322,9 +325,10 @@ function fallbackFor(
 
   const card = cues.find((cue) => cue.kind === 'card');
   if (card) {
-    const player = card.player?.displayName ?? card.player?.sourcePreferredName;
+    const rawPlayer = card.player?.displayName ?? card.player?.sourcePreferredName;
+    const player = rawPlayer ? displayPlayerName(rawPlayer) : undefined;
     const cardName = card.value.action === 'red_card' ? 'red card' : 'yellow card';
-    return player ? `${player} is shown a ${cardName}.` : `${subject} receive a ${cardName}.`;
+    return player ? `${player} is shown a ${cardName} for ${subject}.` : `${subject} receive a ${cardName}.`;
   }
   if (cues.some((cue) => cue.kind === 'substitution')) return `${subject} make a substitution.`;
   if (cues.some((cue) => cue.kind === 'injury')) return `Play is stopped for an injury involving ${subject}.`;
@@ -380,4 +384,38 @@ function uniqueFrames(frames: readonly SemanticFrame[]): SemanticFrame[] {
 
 function compareFrames(left: SemanticFrame, right: SemanticFrame): number {
   return left.seq - right.seq || left.id.localeCompare(right.id);
+}
+
+/**
+ * Source player names arrive in reversed CRM-style form, e.g.
+ * "Quinones Quinones, Julian Andres" (note the duplicated surname) or
+ * "Mbappe Lottin, Kylian". Reorder to natural "Firstname Surname" display
+ * form and dedupe an exactly-repeated adjacent surname token. Names without
+ * a comma, or with a single token, pass through unchanged.
+ *
+ * NOTE: this is duplicated from apps/api/src/match-pulse-llm.ts
+ * (displayPlayerName) because that file cannot share an export with this
+ * one without touching reserved index/export wiring. Keep both in sync.
+ */
+function displayPlayerName(rawName: string): string {
+  const trimmed = rawName.trim();
+  const commaIndex = trimmed.indexOf(',');
+  if (commaIndex === -1) return dedupeAdjacentTokens(trimmed);
+
+  const surnamePart = trimmed.slice(0, commaIndex).trim();
+  const givenPart = trimmed.slice(commaIndex + 1).trim();
+  if (!surnamePart || !givenPart) return dedupeAdjacentTokens(trimmed.replace(/,/g, ' ').replace(/\s+/g, ' ').trim());
+
+  const surname = dedupeAdjacentTokens(surnamePart);
+  return `${givenPart} ${surname}`.replace(/\s+/g, ' ').trim();
+}
+
+function dedupeAdjacentTokens(value: string): string {
+  const tokens = value.split(/\s+/).filter(Boolean);
+  const deduped: string[] = [];
+  for (const token of tokens) {
+    if (deduped.length > 0 && deduped[deduped.length - 1]!.toLowerCase() === token.toLowerCase()) continue;
+    deduped.push(token);
+  }
+  return deduped.join(' ');
 }

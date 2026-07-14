@@ -19,6 +19,8 @@ export interface MatchPulseCommentaryStore {
     options?: {
       replace?: boolean;
       expectedCursor?: Pick<MatchPulseCommentaryProjectionCursor, 'projectionGeneration' | 'lastStateRevision'>;
+      /** Caught error message for entries settling as enrichmentStatus 'failed' in this commit. */
+      failureReason?: string;
     },
   ): Promise<MatchPulseCommentaryCommitResult>;
   claimEnrichmentBatch(
@@ -37,6 +39,7 @@ export interface MatchPulseCommentaryStore {
     claim: MatchPulseCommentaryEnrichmentClaim,
     outcome: 'complete' | 'terminal' | 'retry',
     retryAt?: number,
+    reason?: string,
   ): Promise<void>;
 }
 
@@ -83,6 +86,8 @@ interface PersistedEnrichmentJob {
   leaseUntil?: number;
   attempts: number;
   nextAttemptAt: number;
+  /** Last caught error message for this job, for debugging terminal/retry failures. */
+  lastError?: string;
 }
 
 export interface CreateMatchPulseCommentaryStoreOptions {
@@ -94,7 +99,7 @@ export interface CreateMatchPulseCommentaryStoreOptions {
 interface SqliteStatement {
   all(...params: unknown[]): unknown[];
   get(...params: unknown[]): unknown;
-  run(...params: unknown[]): unknown;
+  run(...params: unknown[]): { changes: number | bigint };
 }
 
 interface SqliteDatabase {
@@ -195,6 +200,7 @@ export class FileMatchPulseCommentaryStore implements MatchPulseCommentaryStore 
     options: {
       replace?: boolean;
       expectedCursor?: Pick<MatchPulseCommentaryProjectionCursor, 'projectionGeneration' | 'lastStateRevision'>;
+      failureReason?: string;
     } = {},
   ): Promise<MatchPulseCommentaryCommitResult> {
     await this.load();
@@ -230,7 +236,7 @@ export class FileMatchPulseCommentaryStore implements MatchPulseCommentaryStore 
           : lastStateRevision,
       });
       const result = this.applyUpserts(entries);
-      this.syncEnrichmentJobs(fixtureId, entries, replacing);
+      this.syncEnrichmentJobs(fixtureId, entries, replacing, options.failureReason);
       await this.persist();
       return { ...result, applied: true };
     });
@@ -272,6 +278,7 @@ export class FileMatchPulseCommentaryStore implements MatchPulseCommentaryStore 
     claim: MatchPulseCommentaryEnrichmentClaim,
     outcome: 'complete' | 'terminal' | 'retry',
     retryAt = Date.now(),
+    reason?: string,
   ): Promise<void> {
     await this.load();
     await this.withMutation(async () => {
@@ -283,6 +290,7 @@ export class FileMatchPulseCommentaryStore implements MatchPulseCommentaryStore 
           ...job, status: outcome === 'terminal' ? 'terminal' : 'pending',
           owner: undefined, leaseUntil: undefined,
           nextAttemptAt: outcome === 'retry' ? retryAt : Number.MAX_SAFE_INTEGER,
+          ...(reason !== undefined ? { lastError: reason } : {}),
         });
       }
       await this.persist();
@@ -307,7 +315,10 @@ export class FileMatchPulseCommentaryStore implements MatchPulseCommentaryStore 
   }
 
   private syncEnrichmentJobs(
-    fixtureId: string, entries: readonly MatchPulseCommentaryEntry[], pruneMissing = false,
+    fixtureId: string,
+    entries: readonly MatchPulseCommentaryEntry[],
+    pruneMissing = false,
+    failureReason?: string,
   ): void {
     const ids = new Set(entries.map((entry) => entry.id));
     if (pruneMissing) for (const [id, job] of this.enrichmentJobs) {
@@ -317,6 +328,19 @@ export class FileMatchPulseCommentaryStore implements MatchPulseCommentaryStore 
     for (const entry of entries) {
       if (entry.enrichmentStatus === 'pending' && !this.enrichmentJobs.has(entry.id)) {
         this.enrichmentJobs.set(entry.id, { entryId: entry.id, status: 'pending', attempts: 0, nextAttemptAt: 0 });
+      } else if (entry.enrichmentStatus === 'failed') {
+        // Keep the job row as 'terminal' (rather than deleting it) so a
+        // caught failure reason survives this commit for debugging; it is
+        // never reclaimed since claimEnrichmentBatch only selects entries
+        // whose current enrichmentStatus is 'pending'.
+        const existing = this.enrichmentJobs.get(entry.id);
+        this.enrichmentJobs.set(entry.id, {
+          entryId: entry.id,
+          status: 'terminal',
+          attempts: existing?.attempts ?? 0,
+          nextAttemptAt: Number.MAX_SAFE_INTEGER,
+          lastError: failureReason ?? existing?.lastError,
+        });
       } else if (entry.enrichmentStatus !== 'pending') this.enrichmentJobs.delete(entry.id);
     }
   }
@@ -465,6 +489,7 @@ export class SqliteMatchPulseCommentaryStore implements MatchPulseCommentaryStor
       CREATE INDEX IF NOT EXISTS idx_commentary_enrichment_claim
         ON match_pulse_commentary_enrichment_jobs (fixture_id, status, next_attempt_at, lease_until);
     `);
+    this.ensureColumn('match_pulse_commentary_enrichment_jobs', 'last_error', 'TEXT');
     this.db.exec(`
       UPDATE match_pulse_commentary_entries
       SET enrichment_status = 'failed',
@@ -477,6 +502,13 @@ export class SqliteMatchPulseCommentaryStore implements MatchPulseCommentaryStor
           WHERE status = 'terminal'
         );
     `);
+  }
+
+  private ensureColumn(table: string, name: string, definition: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === name)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+    }
   }
 
   async listEntries(fixtureId: string): Promise<readonly MatchPulseCommentaryEntry[]> {
@@ -602,6 +634,7 @@ export class SqliteMatchPulseCommentaryStore implements MatchPulseCommentaryStor
     claim: MatchPulseCommentaryEnrichmentClaim,
     outcome: 'complete' | 'terminal' | 'retry',
     retryAt = Date.now(),
+    reason?: string,
   ): Promise<void> {
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -614,12 +647,14 @@ export class SqliteMatchPulseCommentaryStore implements MatchPulseCommentaryStor
       } else {
         const release = this.db.prepare(`
           UPDATE match_pulse_commentary_enrichment_jobs
-          SET status = ?, owner = NULL, lease_until = NULL, next_attempt_at = ?
+          SET status = ?, owner = NULL, lease_until = NULL, next_attempt_at = ?,
+              last_error = COALESCE(?, last_error)
           WHERE entry_id = ? AND owner = ? AND status = 'in_progress'
         `);
         for (const entry of claim.entries) {
           release.run(outcome === 'terminal' ? 'terminal' : 'pending',
-            outcome === 'terminal' ? Number.MAX_SAFE_INTEGER : retryAt, entry.id, claim.owner);
+            outcome === 'terminal' ? Number.MAX_SAFE_INTEGER : retryAt,
+            reason ?? null, entry.id, claim.owner);
         }
       }
       this.db.exec('COMMIT');
@@ -692,6 +727,7 @@ export class SqliteMatchPulseCommentaryStore implements MatchPulseCommentaryStor
     options: {
       replace?: boolean;
       expectedCursor?: Pick<MatchPulseCommentaryProjectionCursor, 'projectionGeneration' | 'lastStateRevision'>;
+      failureReason?: string;
     } = {},
   ): Promise<MatchPulseCommentaryCommitResult> {
     const result = { inserted: 0, updated: 0, unchanged: 0 };
@@ -757,7 +793,7 @@ export class SqliteMatchPulseCommentaryStore implements MatchPulseCommentaryStor
           projection_generation = excluded.projection_generation,
           updated_at = excluded.updated_at
       `).run(fixtureId, projectionGeneration, lastStateRevision, new Date().toISOString());
-      this.syncEnrichmentJobs(fixtureId, entries, replacing);
+      this.syncEnrichmentJobs(fixtureId, entries, replacing, options.failureReason);
       this.db.exec('COMMIT');
       return { ...result, applied: true };
     } catch (error) {
@@ -866,7 +902,10 @@ export class SqliteMatchPulseCommentaryStore implements MatchPulseCommentaryStor
   }
 
   private syncEnrichmentJobs(
-    fixtureId: string, entries: readonly MatchPulseCommentaryEntry[], pruneMissing = false,
+    fixtureId: string,
+    entries: readonly MatchPulseCommentaryEntry[],
+    pruneMissing = false,
+    failureReason?: string,
   ): void {
     const incomingIds = new Set(entries.map((entry) => entry.id));
     const jobs = this.db.prepare(
@@ -880,9 +919,24 @@ export class SqliteMatchPulseCommentaryStore implements MatchPulseCommentaryStor
       ) VALUES (?, ?, 'pending', 0, 0)
       ON CONFLICT(entry_id) DO NOTHING
     `);
+    // A 'failed' entry keeps its job row as 'terminal' (rather than deleting
+    // it) so a caught failure reason survives this commit for debugging; it
+    // is never reclaimed since claimEnrichmentBatch only selects entries
+    // whose current enrichmentStatus is 'pending'. If no job row exists yet
+    // (e.g. an entry that failed before ever being claimed), insert one.
+    const markTerminal = this.db.prepare(`
+      INSERT INTO match_pulse_commentary_enrichment_jobs (
+        entry_id, fixture_id, status, attempts, next_attempt_at, last_error
+      ) VALUES (?, ?, 'terminal', 0, ?, ?)
+      ON CONFLICT(entry_id) DO UPDATE SET
+        status = 'terminal', owner = NULL, lease_until = NULL, next_attempt_at = excluded.next_attempt_at,
+        last_error = COALESCE(excluded.last_error, last_error)
+    `);
     for (const entry of entries) {
       if (entry.enrichmentStatus === 'pending') add.run(entry.id, fixtureId);
-      else remove.run(entry.id);
+      else if (entry.enrichmentStatus === 'failed') {
+        markTerminal.run(entry.id, fixtureId, Number.MAX_SAFE_INTEGER, failureReason ?? null);
+      } else remove.run(entry.id);
     }
   }
 }

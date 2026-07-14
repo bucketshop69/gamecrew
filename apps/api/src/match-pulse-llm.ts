@@ -4,8 +4,10 @@ import {
   parseTxlineMatchPulseLlmJson,
   validateTxlineMatchPulseMoment,
   validateTxlineMatchPulseMoments,
+  type BeatNarrative,
   type MatchPulseCommentaryEntry,
   type MatchPulseMoment,
+  type NarrativeTimeContext,
   type TxlineMatchPulseSourceContext,
   type TxlineMatchPulseValidationReport,
 } from '@gamecrew/core';
@@ -53,6 +55,8 @@ export interface MatchPulseCommentaryEnrichmentResult {
 export interface MatchPulseCommentaryEnrichmentTrace {
   entryId: string;
   stages: readonly MatchPulseCommentaryEnrichmentStageTrace[];
+  /** Caught error message for an entry that terminated in enrichmentStatus 'failed'. */
+  failureReason?: string;
 }
 
 export interface MatchPulseCommentaryEnrichmentStageTrace {
@@ -164,6 +168,7 @@ class OpenAiCompatibleMatchPulseEnrichmentService implements MatchPulseEnrichmen
 
     for (const entry of pendingEntries) {
       const stages: MatchPulseCommentaryEnrichmentStageTrace[] = [];
+      let failureReason: string | undefined;
       try {
         const prompt = buildCommentaryEnrichmentPrompt(context, entry, previousContext);
         const draftCompletion = await this.createChatCompletionResult(prompt);
@@ -188,6 +193,7 @@ class OpenAiCompatibleMatchPulseEnrichmentService implements MatchPulseEnrichmen
             prompt,
             content,
             draftFailure?.message,
+            classifyMomentClass(entry.kind, entry.narrative),
           );
           const reflectionCompletion = await this.createChatCompletionResult(reflectionPrompt);
           const reflectedContent = reflectionCompletion.content;
@@ -207,17 +213,18 @@ class OpenAiCompatibleMatchPulseEnrichmentService implements MatchPulseEnrichmen
       } catch (error) {
         if (error instanceof CommentaryProviderError) throw error;
         failed += 1;
+        failureReason = error instanceof Error ? error.message : 'Unknown enrichment error';
         console.warn(JSON.stringify({
           event: 'match_pulse_commentary_enrichment_failed',
           entryId: entry.id,
-          reason: error instanceof Error ? error.message : 'Unknown enrichment error',
+          reason: failureReason,
         }));
         enrichedEntries.push({
           ...entry,
           enrichmentStatus: 'failed',
         });
       } finally {
-        traces.push({ entryId: entry.id, stages });
+        traces.push({ entryId: entry.id, stages, ...(failureReason ? { failureReason } : {}) });
       }
     }
 
@@ -338,7 +345,9 @@ export function buildCommentaryEnrichmentPrompt(
 ): readonly { role: 'system' | 'user'; content: string }[] {
   const orderedSources = [...entry.sourceEvents].sort(compareSourceEventsBySeq);
   const mustCoverFacts = entry.groundedFacts?.length
-    ? entry.groundedFacts
+    ? entry.groundedFacts.map((fact) => fact.playerName
+      ? { ...fact, playerName: displayPlayerName(fact.playerName) }
+      : fact)
     : orderedSources.map((source, index) => ({
         id: getSourceFrameId(source, index),
         frameId: entry.sourceFrameIds?.[index] ?? getSourceFrameId(source, index),
@@ -354,6 +363,7 @@ export function buildCommentaryEnrichmentPrompt(
     .filter((previous) => previous.commentary.trim().length > 0)
     .slice(-4);
   const immediatelyPrevious = recentSpoken.at(-1);
+  const momentClass = classifyMomentClass(entry.kind, entry.narrative);
   const modelInput = {
     match: {
       home: context.homeTeam.name,
@@ -380,7 +390,9 @@ export function buildCommentaryEnrichmentPrompt(
       team: entry.team?.name,
       opponent: entry.opponent?.name,
       development: classifyBeatDevelopment(entry, immediatelyPrevious),
+      momentClass,
       mustCoverFacts,
+      ...(entry.narrative ? { narrative: serializeNarrativeForPrompt(entry.narrative) } : {}),
     },
     broadcastMemory: {
       lastMajorIncident: [...previousEntries]
@@ -421,7 +433,8 @@ export function buildCommentaryEnrichmentPrompt(
         'VOICE:',
         'Use natural spoken football English with varied sentence openings and rhythm.',
         'Match the currentBeat importance: routine needs one concise connected sentence; developing may use one or two connected sentences; major may breathe for two or three short sentences.',
-        'Be lively when the facts deserve it, but do not manufacture drama.',
+        getMomentClassRegisterInstruction(momentClass),
+        'Do not manufacture drama beyond the register instruction above; never invent facts to justify excitement.',
         'Avoid event-log phrasing, stat-list phrasing, and stock lines such as looking to, setting the tempo, building pressure, knocking on the door, early doors, warning signs, or asking questions.',
         'For kickoff, prefer one direct line such as "And we are underway" or "[Team] get us underway". Do not say kickoff and the game begins in the same line.',
         '',
@@ -458,6 +471,7 @@ export function buildCommentaryReflectionPrompt(
   original: readonly { role: 'system' | 'user'; content: string }[],
   draftContent: string,
   validationFailure?: string,
+  momentClass: MomentClass = 'standard',
 ): readonly { role: 'system' | 'user'; content: string }[] {
   return [
     ...original,
@@ -478,6 +492,7 @@ export function buildCommentaryReflectionPrompt(
           'Sound like natural live football commentary rather than an event log.',
           'Connect naturally with the supplied broadcast memory without repeating recent phrasing.',
           'Match the beat importance and remain concise.',
+          `Confirm the register matches the supplied momentClass ("${momentClass}"): ${getMomentClassRegisterInstruction(momentClass)}`,
         ],
         instruction: 'Critique the draft silently, then return only one improved final JSON object. Echo the original contract metadata and requiredCoveredFrameIds exactly.',
       }),
@@ -519,6 +534,91 @@ function getCommentaryImportance(entry: MatchPulseCommentaryEntry): CommentaryIm
     return 'developing';
   }
   return 'routine';
+}
+
+/**
+ * Deterministic tone register for a beat, ordered least to most intense.
+ * The model never picks its own register: `classifyMomentClass` computes it
+ * from beat kind plus narrative memory, and the system/reflection prompts
+ * select a fixed instruction for the resulting class.
+ */
+export type MomentClass = 'standard' | 'notable' | 'elevated' | 'maximum';
+
+const LATE_TIME_CONTEXTS: ReadonlySet<NarrativeTimeContext> = new Set(['closing_stages', 'stoppage']);
+
+/**
+ * Classifies the tone register for a beat from its kind plus its
+ * (relevance-gated) narrative memory. Pure and deterministic: the same
+ * `(kind, narrative)` pair always yields the same class.
+ *
+ * - `maximum`: a goal whose scoreStory includes `comeback` or `late_winner`.
+ * - `elevated`: any other goal; a second-yellow red card; any red card.
+ * - `notable`: pressure toward an equaliser with a sustained spell
+ *   (`momentum.pressureSpellBeats >= 3`); a card once the carded team has
+ *   `discipline.teamYellowCount >= 4`; a substitution in the closing stages
+ *   or stoppage time.
+ * - `standard`: everything else (the default, calm register).
+ */
+export function classifyMomentClass(
+  kind: MatchPulseCommentaryEntry['kind'],
+  narrative: BeatNarrative | undefined,
+): MomentClass {
+  if (kind === 'goal') {
+    const events = narrative?.scoreStory?.events ?? [];
+    if (events.includes('comeback') || events.includes('late_winner')) return 'maximum';
+    return 'elevated';
+  }
+  if (kind === 'card') {
+    if (narrative?.discipline?.secondYellowRed) return 'elevated';
+    if (narrative?.discipline?.menRemainingReduced) return 'elevated';
+    if ((narrative?.discipline?.teamYellowCount ?? 0) >= 4) return 'notable';
+    return 'standard';
+  }
+  if (narrative?.momentum && narrative.momentum.pressureSpellBeats >= 3) return 'notable';
+  if (kind === 'substitution' && narrative?.timeContext && LATE_TIME_CONTEXTS.has(narrative.timeContext)) {
+    return 'notable';
+  }
+  return 'standard';
+}
+
+const MOMENT_CLASS_REGISTER: Record<MomentClass, string> = {
+  standard: 'Be lively when the facts deserve it, but keep the calm, measured register of routine commentary.',
+  notable: 'This moment carries weight — let the line acknowledge it without shouting.',
+  elevated: 'This is a major moment. Higher energy, short punchy sentences, an exclamation is appropriate.',
+  maximum: 'This is one of the biggest moments a match can produce. Let it breathe with real excitement — two or three short, high-energy sentences. An exclamation is expected.',
+};
+
+function getMomentClassRegisterInstruction(momentClass: MomentClass): string {
+  return MOMENT_CLASS_REGISTER[momentClass];
+}
+
+/**
+ * Compacts a beat's narrative memory for the prompt: only present slices ride
+ * along, and each slice's `derivedFrom` audit trail is dropped since it is
+ * for validator/debugging use only and would otherwise waste prompt tokens.
+ */
+function serializeNarrativeForPrompt(narrative: BeatNarrative): Record<string, unknown> {
+  const compact: Record<string, unknown> = {};
+  if (narrative.scoreStory) {
+    const { derivedFrom: _derivedFrom, ...rest } = narrative.scoreStory;
+    compact.scoreStory = rest;
+  }
+  if (narrative.discipline) {
+    const { derivedFrom: _derivedFrom, ...rest } = narrative.discipline;
+    compact.discipline = rest;
+  }
+  if (narrative.playerMemory) {
+    const { derivedFrom: _derivedFrom, ...rest } = narrative.playerMemory;
+    compact.playerMemory = rest;
+  }
+  if (narrative.momentum) {
+    const { derivedFrom: _derivedFrom, ...rest } = narrative.momentum;
+    compact.momentum = rest;
+  }
+  if (narrative.timeContext) {
+    compact.timeContext = narrative.timeContext;
+  }
+  return compact;
 }
 
 function getRequiredFrameIds(entry: MatchPulseCommentaryEntry): readonly string[] {
@@ -739,6 +839,7 @@ export function validateCommentaryLlmJson(
   if (!entry.scoreAtMoment && /\b(?:leads?|leading|trails?|trailing|level|ahead|behind)\b/i.test(combined)) {
     throw new CommentaryValidationError('Commentary cannot state a score relationship without grounded score context.');
   }
+  assertGroundedNarrativeClaims(combined, entry);
   if (/\b(?:crowd|fans?|stadium|supporters?|hear the place|place (?:lifts?|erupts?))\b/i.test(combined)) {
     throw new CommentaryValidationError('Commentary cannot invent crowd or stadium atmosphere.');
   }
@@ -1000,8 +1101,14 @@ function assertGroundedMultiplicity(text: string, entry: MatchPulseCommentaryEnt
 function assertGroundedMajorFacts(text: string, entry: MatchPulseCommentaryEntry): void {
   const facts = entry.groundedFacts ?? [];
   const goal = facts.find((fact) => normalizeAction(fact.action) === 'goal' || normalizeCueKind(fact.kind) === 'goal');
-  if (goal?.playerName && !hasGroundedPlayerReference(text, goal.playerName)) {
-    throw new CommentaryValidationError('Commentary omitted or changed the grounded scorer name.');
+  if (goal?.playerName) {
+    const otherPlayerNames = facts
+      .filter((fact) => fact !== goal)
+      .map((fact) => fact.playerName)
+      .filter((value): value is string => Boolean(value));
+    if (!hasGroundedPlayerReference(text, goal.playerName, otherPlayerNames)) {
+      throw new CommentaryValidationError('Commentary omitted or changed the grounded scorer name.');
+    }
   }
   if (goal && entry.scoreAtMoment) {
     const score = new RegExp(`\\b${entry.scoreAtMoment.home}\\s*[-:]\\s*${entry.scoreAtMoment.away}\\b`);
@@ -1017,11 +1124,55 @@ function assertGroundedMajorFacts(text: string, entry: MatchPulseCommentaryEntry
   }
 }
 
-function hasGroundedPlayerReference(text: string, playerName: string): boolean {
-  const supplied = [...new Set(normalizeForComparison(playerName).split(' ').filter((token) => token.length > 1))];
+/**
+ * Parses a supplied player name into normalized, deduped tokens, tracking
+ * which tokens came from the surname group. Source names commonly arrive in
+ * reversed CRM-style form ("Surname [Surname2], Firstname [Firstname2]"),
+ * including an exactly-repeated adjacent surname ("Quinones Quinones,
+ * Julian Andres"). Names without a comma have no distinguished surname
+ * group, since we cannot tell which token is the surname.
+ */
+function parseGroundedPlayerName(playerName: string): { tokens: string[]; surnameTokens: Set<string> } {
+  const commaIndex = playerName.indexOf(',');
+  const surnamePart = commaIndex === -1 ? undefined : playerName.slice(0, commaIndex);
+  const dedupedWhole = normalizeForComparison(displayPlayerName(playerName));
+  const tokens = [...new Set(dedupedWhole.split(' ').filter((token) => token.length > 1))];
+  const surnameTokens = new Set(
+    surnamePart === undefined
+      ? []
+      : normalizeForComparison(dedupeAdjacentTokens(surnamePart)).split(' ').filter((token) => token.length > 1),
+  );
+  return { tokens, surnameTokens };
+}
+
+/**
+ * True when `text` grounds `playerName` for the current entry. Requires
+ * either (a) at least two of the player's canonical tokens appear in the
+ * text, or (b) exactly one matched token is a canonical surname token that
+ * is not shared by any other grounded player supplied via `otherPlayerNames`
+ * (ambiguity guard — when two grounded players share a surname, a lone
+ * surname mention cannot be resolved and must still fail).
+ */
+function hasGroundedPlayerReference(
+  text: string,
+  playerName: string,
+  otherPlayerNames: readonly string[] = [],
+): boolean {
+  const { tokens: supplied, surnameTokens } = parseGroundedPlayerName(playerName);
   const spoken = new Set(normalizeForComparison(text).split(' '));
-  const requiredMatches = Math.min(2, supplied.length);
-  return supplied.filter((token) => spoken.has(token)).length >= requiredMatches;
+  const matched = supplied.filter((token) => spoken.has(token));
+  if (matched.length >= 2) return true;
+  if (matched.length !== 1) return false;
+
+  const [onlyMatch] = matched;
+  if (!surnameTokens.has(onlyMatch!)) return false;
+
+  const sharedByOtherPlayer = otherPlayerNames.some((other) => {
+    if (normalizeForComparison(other) === normalizeForComparison(playerName)) return false;
+    return parseGroundedPlayerName(other).surnameTokens.has(onlyMatch!)
+      || parseGroundedPlayerName(other).tokens.includes(onlyMatch!);
+  });
+  return !sharedByOtherPlayer;
 }
 
 function assertNoInventedPlayerName(
@@ -1081,7 +1232,11 @@ function assertNoInventedPlayerName(
   if (
     subject
     && !groundedTeams.includes(subject)
-    && !groundedPlayerNames.some((player) => hasGroundedPlayerReference(subject, player))
+    && !groundedPlayerNames.some((player, index) => hasGroundedPlayerReference(
+      subject,
+      player,
+      groundedPlayerNames.filter((_, otherIndex) => otherIndex !== index),
+    ))
   ) {
     throw new CommentaryValidationError('Commentary used an ungrounded player as the actor.');
   }
@@ -1136,8 +1291,140 @@ function assertGroundedContinuity(
   }
 }
 
+const ORDINAL_WORDS: readonly string[] = [
+  'zeroth', 'first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth',
+];
+
+/** Matches an ordinal (numeral or word) immediately before `noun`, e.g. "fourth yellow" or "4th yellow". */
+function ordinalClaimPattern(noun: string): RegExp {
+  return new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+${noun}\\b|\\b(${ORDINAL_WORDS.join('|')})\\s+${noun}\\b`, 'i');
+}
+
+function ordinalValue(match: RegExpMatchArray): number | undefined {
+  if (match[1]) return Number(match[1]);
+  if (match[2]) {
+    const index = ORDINAL_WORDS.indexOf(match[2].toLowerCase());
+    return index === -1 ? undefined : index;
+  }
+  return undefined;
+}
+
+/**
+ * Validates memory-derived claim vocabulary (discipline counts, player goal
+ * tallies, and score-story language) against `entry.narrative`. A claim word
+ * with no supporting narrative fact still fails closed, exactly like any
+ * other unsupported claim - this only widens what counts as "grounded", it
+ * never loosens the closed-world default.
+ */
+function assertGroundedNarrativeClaims(text: string, entry: MatchPulseCommentaryEntry): void {
+  const narrative = entry.narrative;
+
+  // "Second yellow" is football idiom for a player's own second booking
+  // (which produces a red card), never a team's cumulative yellow tally - so
+  // it is checked against `secondYellowRed`, not the team-ordinal count
+  // below. Team-ordinal card claims ("fourth yellow", "third booking") start
+  // from "third" to avoid colliding with that idiom.
+  if (/\bsecond yellow\b/i.test(text)) {
+    if (!narrative?.discipline?.secondYellowRed) {
+      throw new CommentaryValidationError('Commentary made an unsupported second-yellow claim.');
+    }
+  }
+
+  const yellowMatch = text.match(ordinalClaimPattern('yellow(?:s|\\s+cards?)?'));
+  const bookingMatch = text.match(ordinalClaimPattern('bookings?'));
+  const ordinalCardMatch = yellowMatch ?? bookingMatch;
+  if (ordinalCardMatch) {
+    const claimed = ordinalValue(ordinalCardMatch);
+    if (claimed === 2) {
+      // Already validated above as the second-yellow-red idiom.
+    } else {
+      const teamYellowCount = narrative?.discipline?.teamYellowCount;
+      if (claimed === undefined || teamYellowCount === undefined || claimed !== teamYellowCount) {
+        throw new CommentaryValidationError('Commentary made an unsupported card-count claim.');
+      }
+    }
+  }
+
+  if (/\bdown to ten\b|\bdown to 10\b|\bten men\b|\b10 men\b/i.test(text)) {
+    if (!narrative?.discipline?.menRemainingReduced) {
+      throw new CommentaryValidationError('Commentary made an unsupported men-remaining claim.');
+    }
+  }
+
+  if (/\bbrace\b|\bhis second\b|\bher second\b|\btheir second\b/i.test(text)) {
+    if (narrative?.playerMemory?.scorerGoalsThisMatch !== 2) {
+      throw new CommentaryValidationError('Commentary made an unsupported brace claim.');
+    }
+  }
+  if (/\bhat[ -]?trick\b|\bhis third\b|\bher third\b|\btheir third\b/i.test(text)) {
+    if (narrative?.playerMemory?.scorerGoalsThisMatch !== 3) {
+      throw new CommentaryValidationError('Commentary made an unsupported hat-trick claim.');
+    }
+  }
+
+  if (/\bcomeback\b|\bturned it around\b|\bturn it around\b/i.test(text)) {
+    if (!narrative?.scoreStory?.events.includes('comeback')) {
+      throw new CommentaryValidationError('Commentary made an unsupported comeback claim.');
+    }
+  }
+  if (/\bequalis(?:e|es|ed|ing)|\bequaliz(?:e|es|ed|ing)|\blevels?\b/i.test(text)) {
+    if (!narrative?.scoreStory?.events.includes('equaliser')) {
+      throw new CommentaryValidationError('Commentary made an unsupported equaliser claim.');
+    }
+  }
+  if (/\blate winner\b/i.test(text)) {
+    if (!narrative?.scoreStory?.events.includes('late_winner')) {
+      throw new CommentaryValidationError('Commentary made an unsupported late-winner claim.');
+    }
+  }
+  if (/\bin stoppage time\b|\bstoppage[ -]time\b/i.test(text)) {
+    const isLateWinner = narrative?.scoreStory?.events.includes('late_winner');
+    const isStoppageTimeContext = narrative?.timeContext === 'stoppage';
+    // "Additional time" fact coverage already grounds stoppage time from the
+    // clock directly (isClockGroundedStoppageTime); narrative is one more way
+    // to ground the same claim, not the only way.
+    if (!isLateWinner && !isStoppageTimeContext && !isClockGroundedStoppageTime(entry)) {
+      throw new CommentaryValidationError('Commentary made an unsupported stoppage-time claim.');
+    }
+  }
+}
+
 function normalizeForComparison(value: string): string {
   return value.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/**
+ * Source player names arrive in reversed CRM-style form, e.g.
+ * "Quinones Quinones, Julian Andres" (note the duplicated surname) or
+ * "Mbappe Lottin, Kylian". Reorder to natural "Firstname Surname" display
+ * form and dedupe an exactly-repeated adjacent surname token. Names without
+ * a comma, or with a single token, pass through unchanged.
+ *
+ * NOTE: this is duplicated in packages/core/src/match-engine/commentary.ts
+ * (fallbackFor) because that file cannot share an export with this one
+ * without touching reserved index/export wiring. Keep both in sync.
+ */
+export function displayPlayerName(rawName: string): string {
+  const trimmed = rawName.trim();
+  const commaIndex = trimmed.indexOf(',');
+  if (commaIndex === -1) return dedupeAdjacentTokens(trimmed);
+
+  const surnamePart = trimmed.slice(0, commaIndex).trim();
+  const givenPart = trimmed.slice(commaIndex + 1).trim();
+  if (!surnamePart || !givenPart) return dedupeAdjacentTokens(trimmed.replace(/,/g, ' ').replace(/\s+/g, ' ').trim());
+
+  const surname = dedupeAdjacentTokens(surnamePart);
+  return `${givenPart} ${surname}`.replace(/\s+/g, ' ').trim();
+}
+
+function dedupeAdjacentTokens(value: string): string {
+  const tokens = value.split(/\s+/).filter(Boolean);
+  const deduped: string[] = [];
+  for (const token of tokens) {
+    if (deduped.length > 0 && deduped[deduped.length - 1]!.toLowerCase() === token.toLowerCase()) continue;
+    deduped.push(token);
+  }
+  return deduped.join(' ');
 }
 
 function normalizeCommentary(value: string): string {

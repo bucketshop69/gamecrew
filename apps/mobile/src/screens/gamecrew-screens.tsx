@@ -15,13 +15,19 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useGameCrewMatches } from '../hooks/use-gamecrew-matches';
 import { useMatchPulse } from '../hooks/use-match-pulse';
+import {
+  type GameViewPresentationState,
+  MatchPreviewScreen,
+} from './match-preview-screen';
 
 const tokens = gameCrewTokens;
 
 type PulseTone = 'major' | 'danger' | 'building' | 'quiet';
+type MatchDetailMode = 'pulse' | 'game';
 
 interface PulseFeedItem {
   id: string;
@@ -320,102 +326,136 @@ export function MatchDetailScreen({
   match: GameCrewMatch;
   onBack: () => void;
 }) {
+  const [activeMode, setActiveMode] = useState<MatchDetailMode>('pulse');
+  const [gamePresentation, setGamePresentation] = useState<GameViewPresentationState | null>(null);
   const { pulseLoadState, reload } = useMatchPulse(
     match.txline.fixtureId,
     match.status === 'live',
   );
   const pulseItems = getPulseFeedItems(pulseLoadState.entries);
+  const visibleGamePresentation = activeMode === 'game' ? gamePresentation : null;
 
   return (
-    <View style={styles.detailScreen}>
+    <SafeAreaView edges={['top', 'bottom']} style={styles.detailScreen}>
       <StatusBar style="light" />
       <View style={styles.detailFixed}>
-        <Pressable accessibilityRole="button" onPress={onBack} style={styles.backButton}>
-          <Text style={styles.backButtonText}>Back</Text>
-        </Pressable>
+        <View style={styles.detailUtilityRow}>
+          <Pressable accessibilityRole="button" onPress={onBack} style={styles.backButton}>
+            <Text style={styles.backButtonText}>Back</Text>
+          </Pressable>
+          <Text numberOfLines={1} style={styles.detailCompetition}>
+            {match.competition}
+          </Text>
+        </View>
 
         <View style={styles.detailHeader}>
-          <View style={styles.detailTeamColumn}>
-            <MiniFlag bands={match.homeTeam.flag.bands} countryCode={match.homeTeam.countryCode} />
-            <Text style={styles.detailTeamName} selectable>
-              {match.homeTeam.shortName}
-            </Text>
-            <Text style={styles.detailTeamScore} selectable>
-              {getDetailScoreLabel(match, 'home')}
-            </Text>
-          </View>
+          <DetailTeamScore
+            align="left"
+            bands={match.homeTeam.flag.bands}
+            countryCode={match.homeTeam.countryCode}
+            name={match.homeTeam.name}
+            score={visibleGamePresentation
+              ? String(visibleGamePresentation.score.home)
+              : getDetailScoreLabel(match, 'home')}
+          />
 
-          <View style={styles.detailCenterColumn}>
-            <Text style={styles.detailClock} selectable>
-              {getClockCardLabel(match)}
-            </Text>
-            <Text style={styles.detailTitle} selectable>
-              {getMatchTitle(match)}
-            </Text>
-            <Text style={styles.detailMeta} selectable>
-              {getMetaLabel(match)}
-            </Text>
-          </View>
+          <DetailMatchClock match={match} presentation={visibleGamePresentation} />
 
-          <View style={styles.detailTeamColumn}>
-            <MiniFlag bands={match.awayTeam.flag.bands} countryCode={match.awayTeam.countryCode} />
-            <Text style={styles.detailTeamName} selectable>
-              {match.awayTeam.shortName}
-            </Text>
-            <Text style={styles.detailTeamScore} selectable>
-              {getDetailScoreLabel(match, 'away')}
-            </Text>
-          </View>
+          <DetailTeamScore
+            align="right"
+            bands={match.awayTeam.flag.bands}
+            countryCode={match.awayTeam.countryCode}
+            name={match.awayTeam.name}
+            score={visibleGamePresentation
+              ? String(visibleGamePresentation.score.away)
+              : getDetailScoreLabel(match, 'away')}
+          />
         </View>
 
         <View style={styles.detailTabs} accessibilityRole="tablist">
-          <View style={[styles.detailTab, styles.detailTabSelected]}>
-            <Text style={styles.detailTabSelectedText}>Match Pulse</Text>
-          </View>
-          <View style={styles.detailTab}>
-            <Text style={styles.detailTabText}>Chat</Text>
-          </View>
+          <Pressable
+            accessibilityLabel="Show Match Pulse"
+            accessibilityRole="tab"
+            accessibilityState={{ selected: activeMode === 'pulse' }}
+            onPress={() => setActiveMode('pulse')}
+            style={({ pressed }) => [
+              styles.detailTab,
+              activeMode === 'pulse' && styles.detailTabSelected,
+              pressed && styles.detailTabPressed,
+            ]}
+          >
+            <Text style={activeMode === 'pulse'
+              ? styles.detailTabSelectedText
+              : styles.detailTabText}
+            >
+              Match Pulse
+            </Text>
+          </Pressable>
+          <Pressable
+            accessibilityLabel="Show Game View"
+            accessibilityRole="tab"
+            accessibilityState={{ selected: activeMode === 'game' }}
+            onPress={() => setActiveMode('game')}
+            style={({ pressed }) => [
+              styles.detailTab,
+              activeMode === 'game' && styles.detailTabSelected,
+              pressed && styles.detailTabPressed,
+            ]}
+          >
+            <Text style={activeMode === 'game'
+              ? styles.detailTabSelectedText
+              : styles.detailTabText}
+            >
+              Game View
+            </Text>
+          </Pressable>
         </View>
       </View>
 
-      <ScrollView
-        style={styles.pulseScroll}
-        contentContainerStyle={styles.pulseStack}
-        contentInsetAdjustmentBehavior="automatic"
-      >
-        {pulseLoadState.status === 'loading' && pulseItems.length === 0 ? (
-          <PulseStatePanel title="Loading Match Pulse" body="Loading the saved match story." />
-        ) : pulseLoadState.status === 'error' && pulseItems.length === 0 ? (
-          <PulseStatePanel
-            title="Match Pulse unavailable"
-            body={getPulseErrorCopy(pulseLoadState.message)}
-            actionLabel="Retry"
-            onAction={reload}
-          />
-        ) : pulseItems.length === 0 ? (
-          <PulseStatePanel
-            title={match.status === 'live' ? 'No match updates yet' : 'No saved Match Pulse yet'}
-            body={match.status === 'live'
-              ? 'The match story will appear here as moments are confirmed.'
-              : 'Refresh to check whether this completed match has been added to the archive.'}
-            actionLabel="Refresh"
-            onAction={reload}
-          />
-        ) : (
-          <>
-            {pulseLoadState.status === 'error' ? (
-              <PulseStatePanel
-                title="Latest update unavailable"
-                body="Showing the saved Match Pulse timeline. Try again shortly for the latest moments."
-                actionLabel="Retry"
-                onAction={reload}
-              />
-            ) : null}
-            {pulseItems.map((item) => <PulseMomentRow key={item.id} item={item} />)}
-          </>
-        )}
-      </ScrollView>
-    </View>
+      {activeMode === 'pulse' ? (
+        <ScrollView
+          style={styles.pulseScroll}
+          contentContainerStyle={styles.pulseStack}
+          contentInsetAdjustmentBehavior="automatic"
+        >
+          {pulseLoadState.status === 'loading' && pulseItems.length === 0 ? (
+            <PulseStatePanel title="Loading Match Pulse" body="Loading the saved match story." />
+          ) : pulseLoadState.status === 'error' && pulseItems.length === 0 ? (
+            <PulseStatePanel
+              title="Match Pulse unavailable"
+              body={getPulseErrorCopy(pulseLoadState.message)}
+              actionLabel="Retry"
+              onAction={reload}
+            />
+          ) : pulseItems.length === 0 ? (
+            <PulseStatePanel
+              title={match.status === 'live' ? 'No match updates yet' : 'No saved Match Pulse yet'}
+              body={match.status === 'live'
+                ? 'The match story will appear here as moments are confirmed.'
+                : 'Refresh to check whether this completed match has been added to the archive.'}
+              actionLabel="Refresh"
+              onAction={reload}
+            />
+          ) : (
+            <>
+              {pulseLoadState.status === 'error' ? (
+                <PulseStatePanel
+                  title="Latest update unavailable"
+                  body="Showing the saved Match Pulse timeline. Try again shortly for the latest moments."
+                  actionLabel="Retry"
+                  onAction={reload}
+                />
+              ) : null}
+              {pulseItems.map((item) => <PulseMomentRow key={item.id} item={item} />)}
+            </>
+          )}
+        </ScrollView>
+      ) : (
+        <View style={styles.gameViewContent}>
+          <MatchPreviewScreen match={match} onPresentationChange={setGamePresentation} />
+        </View>
+      )}
+    </SafeAreaView>
   );
 }
 
@@ -435,7 +475,7 @@ export function MatchDetailStateScreen({
   title: string;
 }) {
   return (
-    <View style={styles.detailScreen}>
+    <View style={[styles.detailScreen, styles.detailStateScreen]}>
       <StatusBar style="light" />
       <Pressable accessibilityRole="button" onPress={onBack} style={styles.backButton}>
         <Text style={styles.backButtonText}>Back</Text>
@@ -499,6 +539,106 @@ function PulseStatePanel({
   );
 }
 
+function DetailTeamScore({
+  align,
+  bands,
+  countryCode,
+  name,
+  score,
+}: {
+  align: 'left' | 'right';
+  bands: readonly string[];
+  countryCode?: string;
+  name: string;
+  score: string;
+}) {
+  const team = (
+    <View style={styles.detailTeamIdentity}>
+      <MiniFlag bands={bands} countryCode={countryCode} />
+      <Text
+        adjustsFontSizeToFit
+        ellipsizeMode="tail"
+        minimumFontScale={0.78}
+        numberOfLines={1}
+        selectable
+        style={styles.detailTeamName}
+      >
+        {name}
+      </Text>
+    </View>
+  );
+
+  return (
+    <View style={[styles.detailTeamColumn, align === 'right' && styles.detailTeamColumnRight]}>
+      {align === 'left' ? team : null}
+      {score ? (
+        <Text selectable style={styles.detailTeamScore}>
+          {score}
+        </Text>
+      ) : null}
+      {align === 'right' ? team : null}
+    </View>
+  );
+}
+
+function DetailMatchClock({
+  match,
+  presentation,
+}: {
+  match: GameCrewMatch;
+  presentation?: GameViewPresentationState | null;
+}) {
+  if (presentation) {
+    return (
+      <View style={styles.detailCenterColumn}>
+        <Text numberOfLines={1} selectable style={styles.detailClock}>
+          {presentation.clockLabel}
+        </Text>
+        <Text numberOfLines={1} selectable style={styles.detailPhase}>
+          {presentation.phaseLabel}
+        </Text>
+      </View>
+    );
+  }
+
+  const isScheduled = match.status === 'upcoming' || match.status === 'hosted';
+
+  if (isScheduled) {
+    return (
+      <View style={styles.detailCenterColumn}>
+        <Text numberOfLines={1} selectable style={styles.detailKickoffDate}>
+          {formatKickoffDate(match.kickoffUtc).toUpperCase()}
+        </Text>
+        <Text
+          adjustsFontSizeToFit
+          minimumFontScale={0.82}
+          numberOfLines={1}
+          selectable
+          style={styles.detailClock}
+        >
+          {formatKickoffTime(match.kickoffUtc)}
+        </Text>
+        {match.status === 'hosted' ? (
+          <Text numberOfLines={1} selectable style={styles.detailPhase}>
+            Hosted match
+          </Text>
+        ) : null}
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.detailCenterColumn}>
+      <Text numberOfLines={1} selectable style={styles.detailClock}>
+        {getClockCardLabel(match)}
+      </Text>
+      <Text numberOfLines={1} selectable style={styles.detailPhase}>
+        {getCompactMatchPhaseLabel(match)}
+      </Text>
+    </View>
+  );
+}
+
 function MiniFlag({ bands, countryCode }: { bands: readonly string[]; countryCode?: string }) {
   return (
     <View style={[styles.miniFlag, getFlagDirection(countryCode) === 'horizontal' && styles.miniFlagHorizontal]}>
@@ -529,12 +669,29 @@ function getTeamCardLabel(match: GameCrewMatch, side: 'home' | 'away'): string {
   return side === 'home' ? match.homeTeam.shortName : match.awayTeam.shortName;
 }
 
-function getDetailScoreLabel(match: GameCrewMatch, side: 'home' | 'away'): string {
+function getDetailScoreLabel(
+  match: GameCrewMatch,
+  side: 'home' | 'away',
+): string {
   if (!match.score) {
+    if (match.status === 'upcoming' || match.status === 'hosted') return '';
     return '-';
   }
 
-  return String(side === 'home' ? match.score.home : match.score.away);
+  const score = side === 'home' ? match.score.home : match.score.away;
+  return String(score);
+}
+
+function getCompactMatchPhaseLabel(match: GameCrewMatch): string {
+  if (match.status === 'live') {
+    if (match.clock.phase === 'half_time') return 'Half time';
+    if (match.clock.phase === 'extra_time') return 'Extra time';
+    return 'In play';
+  }
+
+  if (match.status === 'finished' || match.status === 'replayable') return 'Full time';
+  if (match.status === 'hosted') return 'Hosted match';
+  return '';
 }
 
 function getPulseFeedItems(
@@ -957,97 +1114,145 @@ const styles = StyleSheet.create({
   detailScreen: {
     backgroundColor: tokens.shell.background,
     flex: 1,
+  },
+  detailStateScreen: {
     padding: tokens.spacing.lg,
-    paddingBottom: 0,
   },
   detailFixed: {
-    gap: tokens.spacing.lg,
-    paddingBottom: tokens.spacing.lg,
+    borderBottomColor: tokens.shell.divider,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: tokens.spacing.sm,
+    paddingBottom: tokens.spacing.md,
+    paddingHorizontal: tokens.spacing.lg,
+    paddingTop: tokens.spacing.sm,
+    zIndex: 10,
   },
   pulseScroll: {
     flex: 1,
+  },
+  gameViewContent: {
+    flex: 1,
+    overflow: 'hidden',
+  },
+  detailUtilityRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 30,
   },
   backButton: {
     alignSelf: 'flex-start',
     borderColor: tokens.shell.divider,
     borderRadius: tokens.radii.pill,
     borderWidth: 1,
-    paddingHorizontal: tokens.spacing.lg,
-    paddingVertical: tokens.spacing.sm,
+    minHeight: 30,
+    justifyContent: 'center',
+    paddingHorizontal: tokens.spacing.md,
   },
   backButtonText: {
     color: tokens.shell.text,
-    fontSize: tokens.typography.size.label,
+    fontSize: tokens.typography.size.caption,
     fontWeight: tokens.typography.weight.medium,
     lineHeight: tokens.typography.lineHeight.caption,
+  },
+  detailCompetition: {
+    color: tokens.shell.textDim,
+    flex: 1,
+    fontSize: 9,
+    fontWeight: tokens.typography.weight.bold,
+    letterSpacing: 0.8,
+    marginLeft: tokens.spacing.md,
+    textAlign: 'right',
+    textTransform: 'uppercase',
   },
   detailHeader: {
     alignItems: 'center',
     backgroundColor: tokens.shell.background,
     flexDirection: 'row',
-    gap: tokens.spacing.md,
+    gap: tokens.spacing.sm,
     justifyContent: 'space-between',
-    minHeight: 176,
+    minHeight: 64,
     overflow: 'hidden',
-    paddingVertical: tokens.spacing.lg,
+    paddingVertical: 2,
   },
   detailTeamColumn: {
     alignItems: 'center',
     flex: 1,
-    gap: tokens.spacing.sm,
-    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 6,
+    minWidth: 0,
+  },
+  detailTeamColumnRight: {
+    justifyContent: 'flex-end',
+  },
+  detailTeamIdentity: {
+    alignItems: 'center',
+    flexShrink: 1,
+    gap: 3,
+    minWidth: 0,
+    width: 84,
   },
   detailCenterColumn: {
     alignItems: 'center',
-    flex: 1.35,
-    gap: tokens.spacing.sm,
+    flexBasis: 112,
+    flexGrow: 0,
+    flexShrink: 0,
+    gap: 1,
     justifyContent: 'center',
+    minWidth: 112,
   },
   miniFlag: {
     borderRadius: tokens.radii.sm,
     flexDirection: 'row',
-    height: 50,
+    flexShrink: 0,
+    height: 32,
     overflow: 'hidden',
-    width: 78,
+    width: 48,
   },
   miniFlagHorizontal: {
     flexDirection: 'column',
   },
   detailTeamName: {
     color: tokens.shell.textMuted,
-    fontSize: tokens.typography.size.caption,
+    fontSize: 9,
     fontWeight: tokens.typography.weight.bold,
-    lineHeight: tokens.typography.lineHeight.caption,
+    letterSpacing: 0.7,
+    lineHeight: 11,
+    maxWidth: 84,
+    textAlign: 'center',
     textTransform: 'uppercase',
   },
   detailTeamScore: {
     color: tokens.shell.text,
-    fontSize: 48,
+    flexShrink: 0,
+    fontSize: 30,
     fontVariant: ['tabular-nums'],
     fontWeight: tokens.typography.weight.bold,
-    lineHeight: 52,
-    textAlign: 'center',
+    lineHeight: 32,
   },
   detailClock: {
     color: tokens.shell.text,
-    fontSize: tokens.typography.size.title,
+    fontSize: 24,
     fontVariant: ['tabular-nums'],
     fontWeight: tokens.typography.weight.bold,
-    lineHeight: tokens.typography.lineHeight.title,
+    letterSpacing: -0.4,
+    lineHeight: 27,
     textAlign: 'center',
   },
-  detailTitle: {
-    color: tokens.shell.text,
-    fontSize: tokens.typography.size.label,
+  detailKickoffDate: {
+    color: tokens.shell.textMuted,
+    fontSize: 9,
     fontWeight: tokens.typography.weight.bold,
-    lineHeight: tokens.typography.lineHeight.caption,
+    letterSpacing: 0.8,
+    lineHeight: 12,
     textAlign: 'center',
   },
-  detailMeta: {
+  detailPhase: {
     color: tokens.shell.textDim,
-    fontSize: tokens.typography.size.caption,
+    fontSize: 8,
     fontWeight: tokens.typography.weight.bold,
-    lineHeight: tokens.typography.lineHeight.caption,
+    letterSpacing: 0.8,
+    lineHeight: 10,
     textAlign: 'center',
     textTransform: 'uppercase',
   },
@@ -1064,6 +1269,9 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 38,
     justifyContent: 'center',
+  },
+  detailTabPressed: {
+    opacity: 0.62,
   },
   detailTabSelected: {
     backgroundColor: tokens.shell.text,
@@ -1083,6 +1291,8 @@ const styles = StyleSheet.create({
   pulseStack: {
     gap: tokens.spacing.sm,
     paddingBottom: tokens.spacing.xxl,
+    paddingHorizontal: tokens.spacing.lg,
+    paddingTop: tokens.spacing.sm,
   },
   pulseBody: {
     color: tokens.shell.textMuted,

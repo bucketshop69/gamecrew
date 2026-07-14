@@ -132,7 +132,9 @@ test('France-Morocco (18209181): 60th-minute French opener is not misclassified 
   assert.ok(!opener.scoreEvents?.includes('late_winner'), 'a goal roughly 14 minutes into the second half must never be classified late_winner');
 });
 
-test('replay pacing: ambient stretches compress toward the cap while takeovers keep their durationHint, and offsets tile without gaps', () => {
+const REPLAY_FIXED_KINDS = new Set(['goal_sequence', 'goal_retracted', 'card', 'var_review', 'phase_break']);
+
+test('replay pacing: major moments keep their durationHint, flexible scenes compress, offsets tile without gaps', () => {
   const frames = loadFrames('18179759');
   const scenes = buildGameViewTimeline(frames, { pacing: { mode: 'replay' } });
 
@@ -142,8 +144,8 @@ test('replay pacing: ambient stretches compress toward the cap while takeovers k
     assert.ok(scene.playback, `scene ${scene.id} must carry computed playback timing when pacing is requested`);
     assert.equal(scene.playback.playbackOffsetMs, runningOffset, 'scenes must tile back-to-back with no gaps or overlaps');
     assert.ok(scene.playback.playbackDurationMs > 0, 'every scene must occupy positive playback time');
-    if (scene.kind !== 'ambient') {
-      assert.equal(scene.playback.playbackDurationMs, scene.durationHint.minMs, 'takeover scenes must keep their full durationHint, never compressed');
+    if (REPLAY_FIXED_KINDS.has(scene.kind)) {
+      assert.equal(scene.playback.playbackDurationMs, scene.durationHint.minMs, 'major-moment scenes must keep their full durationHint, never compressed');
     }
     runningOffset += scene.playback.playbackDurationMs;
   }
@@ -153,6 +155,27 @@ test('replay pacing: ambient stretches compress toward the cap while takeovers k
   const cap = 2500; // DEFAULT_REPLAY_AMBIENT_CAP_MS
   for (const duration of ambientDurations) {
     assert.ok(duration <= cap, `ambient stretch duration ${duration}ms exceeded the compression cap ${cap}ms`);
+  }
+});
+
+test('replay pacing: a full match fits the default ~5 minute target while majors keep full screen time', () => {
+  const frames = loadFrames('18179759');
+  const scenes = buildGameViewTimeline(frames, { pacing: { mode: 'replay' } });
+  const last = scenes[scenes.length - 1];
+  const totalMs = last.playback.playbackOffsetMs + last.playback.playbackDurationMs;
+  // Floors on ~900 flexible scenes can push slightly past the 300s target; it
+  // must land in a watchable window, nowhere near the unscaled ~35 minutes.
+  assert.ok(totalMs <= 420_000, `replay must be watchable, got ${(totalMs / 1000).toFixed(0)}s`);
+  assert.ok(totalMs >= 120_000, `replay should not collapse below a tellable story, got ${(totalMs / 1000).toFixed(0)}s`);
+});
+
+test('replay pacing: targetDurationMs null disables scaling and every takeover keeps durationHint', () => {
+  const frames = loadFrames('18179759');
+  const scenes = buildGameViewTimeline(frames, { pacing: { mode: 'replay', targetDurationMs: null } });
+  for (const scene of scenes) {
+    if (scene.kind !== 'ambient') {
+      assert.equal(scene.playback.playbackDurationMs, scene.durationHint.minMs);
+    }
   }
 });
 

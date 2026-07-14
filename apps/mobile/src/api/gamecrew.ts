@@ -63,6 +63,21 @@ export interface EngineFramesResponse {
   hasMore: boolean;
 }
 
+/** The API serves stored rows with the semantic frame nested under `frame`. */
+interface EngineFrameRow {
+  seq: number;
+  stateRevision: number;
+  frame: SemanticFrame;
+}
+
+type EngineFramesWirePayload = Omit<EngineFramesResponse, 'frames'> & {
+  frames: readonly (EngineFrameRow | SemanticFrame)[];
+};
+
+function unwrapEngineFrame(row: EngineFrameRow | SemanticFrame): SemanticFrame {
+  return 'frame' in row && row.frame !== undefined ? row.frame : (row as SemanticFrame);
+}
+
 export interface EngineStateResponse {
   fixtureId: string;
   checkpoint: unknown;
@@ -90,7 +105,8 @@ export async function fetchEngineFrames(
     { signal },
   );
 
-  return readGameCrewResponse<EngineFramesResponse>(response);
+  const payload = await readGameCrewResponse<EngineFramesWirePayload>(response);
+  return { ...payload, frames: payload.frames.map(unwrapEngineFrame) };
 }
 
 export async function fetchEngineState(

@@ -122,6 +122,15 @@ export interface GameViewReplayPacingOptions {
    */
   ambientStretchCapMs?: number;
   /**
+   * Best-effort total replay length in milliseconds. Major moments
+   * (goal_sequence, goal_retracted, card, var_review, phase_break) always
+   * keep their full duration; ambient and minor takeovers (set_piece, shot,
+   * substitution, restart) scale down proportionally, with a small floor so
+   * motion stays legible, until the timeline fits the target. Defaults to
+   * `DEFAULT_REPLAY_TARGET_DURATION_MS`; pass `null` to disable scaling.
+   */
+  targetDurationMs?: number | null;
+  /**
    * Milliseconds of playback time per match-clock second for ambient
    * stretches before the cap is applied ("real pace" for uncapped quiet
    * play). Defaults to `DEFAULT_REPLAY_MS_PER_MATCH_SECOND`.
@@ -136,6 +145,14 @@ export interface GameViewTimelineOptions {
 
 /** Default cap on a single compressed ambient stretch in a replay timeline. */
 export const DEFAULT_REPLAY_AMBIENT_CAP_MS = 2500;
+/** Default best-effort replay length: a full match tells its story in ~5 minutes. */
+export const DEFAULT_REPLAY_TARGET_DURATION_MS = 300_000;
+/** Floor for scaled flexible scenes so compressed motion stays legible. */
+const REPLAY_SCALED_SCENE_FLOOR_MS = 200;
+/** Scene kinds that never lose screen time to replay target scaling. */
+const REPLAY_FIXED_KINDS: ReadonlySet<GameViewSceneKind> = new Set([
+  'goal_sequence', 'goal_retracted', 'card', 'var_review', 'phase_break',
+]);
 /** Default "real pace" ambient playback rate: 1 match-minute per 1.5 playback-seconds. */
 export const DEFAULT_REPLAY_MS_PER_MATCH_SECOND = 25;
 
@@ -737,7 +754,7 @@ export function buildGameViewTimeline(
   for (const frame of ordered) {
     if (frame.matchClockSeconds !== undefined) state.clockSeconds = frame.matchClockSeconds;
 
-    const relevant = frame.simulationCues.filter(isRelevantCue);
+    const relevant = (frame.simulationCues ?? []).filter(isRelevantCue);
     if (relevant.length === 0) continue;
 
     // Resolve same-frame collisions by severity; process every relevant cue
@@ -828,11 +845,12 @@ function applyReplayPacing(
 ): readonly GameViewScene[] {
   const ambientCapMs = pacing.ambientStretchCapMs ?? DEFAULT_REPLAY_AMBIENT_CAP_MS;
   const msPerMatchSecond = pacing.msPerMatchSecond ?? DEFAULT_REPLAY_MS_PER_MATCH_SECOND;
+  const targetDurationMs = pacing.targetDurationMs === undefined
+    ? DEFAULT_REPLAY_TARGET_DURATION_MS
+    : pacing.targetDurationMs;
 
-  let offsetMs = 0;
   let lastClockSeconds: number | undefined;
-  const paced: GameViewScene[] = [];
-
+  const rawDurations: number[] = [];
   for (const scene of scenes) {
     let durationMs: number;
     if (scene.kind === 'ambient') {
@@ -845,11 +863,35 @@ function applyReplayPacing(
     } else {
       durationMs = scene.durationHint.minMs;
     }
-
-    paced.push({ ...scene, playback: { playbackOffsetMs: offsetMs, playbackDurationMs: durationMs } });
-    offsetMs += durationMs;
+    rawDurations.push(durationMs);
     if (typeof scene.clockSeconds === 'number') lastClockSeconds = scene.clockSeconds;
   }
+
+  // Best-effort fit to the target: fixed kinds keep their full moment, the
+  // flexible remainder shares whatever budget is left, floored for legibility.
+  let flexScale = 1;
+  if (targetDurationMs !== null) {
+    let fixedTotal = 0;
+    let flexTotal = 0;
+    scenes.forEach((scene, index) => {
+      if (REPLAY_FIXED_KINDS.has(scene.kind)) fixedTotal += rawDurations[index];
+      else flexTotal += rawDurations[index];
+    });
+    if (flexTotal > 0 && fixedTotal + flexTotal > targetDurationMs) {
+      flexScale = Math.max(0, targetDurationMs - fixedTotal) / flexTotal;
+    }
+  }
+
+  let offsetMs = 0;
+  const paced: GameViewScene[] = [];
+  scenes.forEach((scene, index) => {
+    const raw = rawDurations[index];
+    const durationMs = REPLAY_FIXED_KINDS.has(scene.kind) || flexScale === 1
+      ? raw
+      : Math.max(REPLAY_SCALED_SCENE_FLOOR_MS, Math.round(raw * flexScale));
+    paced.push({ ...scene, playback: { playbackOffsetMs: offsetMs, playbackDurationMs: durationMs } });
+    offsetMs += durationMs;
+  });
 
   return paced;
 }

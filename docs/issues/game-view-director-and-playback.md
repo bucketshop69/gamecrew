@@ -1,6 +1,6 @@
 # Game View: director and playback
 
-**Status:** In progress. Started 2026-07-14. Phase A of `docs/prds/game_view.md`.
+**Status:** Implemented 2026-07-14. All seven work items done and verified (110 core / 33 mobile tests, live endpoint smoke, real-fixture director run). Phase A of `docs/prds/game_view.md`; Phase B (`game-view-board-and-presentation.md`) is next.
 
 ## Objective
 
@@ -26,8 +26,8 @@ Make Game View's data pipeline real: semantic frames from the backend become a d
 | 3 | Director core: frames → ambient scenes (possession, zones, pressure, flips) | Implemented |
 | 4 | Director sequences: goal choreography, VAR takeback, cards, subs, set pieces, phase breaks, severity priority | Implemented |
 | 5 | Director pacing: replay quiet-stretch compression, live buffer timing; full-fixture test against stored Mexico–Ecuador frames | Implemented |
-| 6 | Match session store on mobile: per-fixture append-only log, polling, shared by both tabs | In progress |
-| 7 | Playback engine: playhead/head separation, replay + live modes, bare debug renderer | In progress |
+| 6 | Match session store on mobile: per-fixture append-only log, polling, shared by both tabs | Implemented |
+| 7 | Playback engine: playhead/head separation, replay + live modes, bare debug renderer | Implemented |
 
 Real-data findings folded in during item 5: duplicate `goal_confirmed` cues (second revision carries the resolved player id) now merge into one goal scene; `late_winner` requires genuine closing-stages clock; only goal retractions produce `goal_retracted` scenes (throw-in/corner retractions are dropped). Trimmed real-frame fixtures live in `packages/core/tests/fixtures/`.
 

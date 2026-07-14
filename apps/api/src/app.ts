@@ -9,10 +9,27 @@ import {
 import type { ApiConfig } from './config.js';
 import { createTxlineService } from './txline-service.js';
 import type { IngestionRuntime } from './ingestion/ingestion-runtime.js';
+import { ResponseCache } from './response-cache.js';
+
+const DEFAULT_FRAMES_PAGE_LIMIT = 500;
+const MAX_FRAMES_PAGE_LIMIT = 2_000;
+const ENGINE_CACHE_TTL_MS = 5_000;
+const ENGINE_CACHE_MAX_ENTRIES = 500;
+
+type StoredFrames = Awaited<ReturnType<IngestionRuntime['listFramesAfter']>>;
+
+interface FramesPage {
+  page: StoredFrames;
+  hasMore: boolean;
+}
 
 export function createApp(config: ApiConfig, ingestion?: IngestionRuntime) {
   const app = new Hono();
   const txline = createTxlineService(config);
+  const engineCache = new ResponseCache<unknown>({
+    ttlMs: ENGINE_CACHE_TTL_MS,
+    maxEntries: ENGINE_CACHE_MAX_ENTRIES,
+  });
 
   app.use('*', cors());
 
@@ -34,9 +51,18 @@ export function createApp(config: ApiConfig, ingestion?: IngestionRuntime) {
       await ingestion.ensureFixture(fixtureId);
       checkpoint = await ingestion.getCheckpoint(fixtureId);
     }
-    return checkpoint
-      ? context.json({ fixtureId, checkpoint })
-      : context.json({ error: `No engine state for fixture ${fixtureId}.` }, 404);
+    if (!checkpoint) {
+      return context.json({ error: `No engine state for fixture ${fixtureId}.` }, 404);
+    }
+
+    const cacheKey = `state:${fixtureId}`;
+    const cacheVersion = `${checkpoint.stateRevision}:${checkpoint.projectionGeneration}`;
+    const cached = engineCache.get(cacheKey, cacheVersion);
+    if (cached) return context.json(cached);
+
+    const body = { fixtureId, checkpoint };
+    engineCache.set(cacheKey, cacheVersion, body);
+    return context.json(body);
   });
 
   app.get('/matches/:fixtureId/engine/frames', async (context) => {
@@ -44,37 +70,53 @@ export function createApp(config: ApiConfig, ingestion?: IngestionRuntime) {
     const fixtureId = normalizeFixtureId(context.req.param('fixtureId'));
     const afterRevision = Number(context.req.query('afterRevision') ?? 0);
     const requestedGeneration = Number(context.req.query('generation'));
-    let checkpoint = await ingestion.getCheckpoint(fixtureId);
-    let resyncRequired = Boolean(
-      checkpoint
-      && Number.isFinite(requestedGeneration)
-      && requestedGeneration !== checkpoint.projectionGeneration,
-    );
+    const limit = parseFramesLimit(context.req.query('limit'));
     const safeAfterRevision = Number.isFinite(afterRevision) && afterRevision >= 0 ? afterRevision : 0;
-    let frames = await ingestion.listFramesAfter(
-      fixtureId,
-      resyncRequired ? 0 : safeAfterRevision,
-    );
+
+    const loadFramesPage = async (checkpoint: Awaited<ReturnType<IngestionRuntime['getCheckpoint']>>) => {
+      const resyncRequired = Boolean(
+        checkpoint
+        && Number.isFinite(requestedGeneration)
+        && requestedGeneration !== checkpoint.projectionGeneration,
+      );
+      const effectiveAfterRevision = resyncRequired ? 0 : safeAfterRevision;
+      const cacheKey = `frames:${fixtureId}:${effectiveAfterRevision}:${limit}`;
+      const cacheVersion = checkpoint ? `${checkpoint.stateRevision}:${checkpoint.projectionGeneration}` : undefined;
+      const cached = cacheVersion ? engineCache.get(cacheKey, cacheVersion) as FramesPage | undefined : undefined;
+      if (cached) return { ...cached, resyncRequired, effectiveAfterRevision };
+
+      const fetched = await ingestion!.listFramesAfter(fixtureId, effectiveAfterRevision);
+      const hasMore = fetched.length > limit;
+      const page = hasMore ? fetched.slice(0, limit) : fetched;
+      const result: FramesPage = { page, hasMore };
+      if (cacheVersion) engineCache.set(cacheKey, cacheVersion, result);
+      return { ...result, resyncRequired, effectiveAfterRevision };
+    };
+
+    let checkpoint = await ingestion.getCheckpoint(fixtureId);
+    let { page: frames, hasMore, resyncRequired, effectiveAfterRevision } = await loadFramesPage(checkpoint);
     if (checkpoint || frames.length > 0) {
       void ingestion.ensureFixture(fixtureId).catch(() => undefined);
     } else {
       await ingestion.ensureFixture(fixtureId);
       checkpoint = await ingestion.getCheckpoint(fixtureId);
-      resyncRequired = Boolean(
-        checkpoint
-        && Number.isFinite(requestedGeneration)
-        && requestedGeneration !== checkpoint.projectionGeneration,
-      );
-      frames = await ingestion.listFramesAfter(
-        fixtureId,
-        resyncRequired ? 0 : safeAfterRevision,
-      );
+      ({ page: frames, hasMore, resyncRequired, effectiveAfterRevision } = await loadFramesPage(checkpoint));
     }
+
+    const headRevision = checkpoint?.stateRevision
+      ?? frames.reduce((max, entry) => Math.max(max, entry.stateRevision), effectiveAfterRevision);
+    const nextAfterRevision = frames.length > 0
+      ? frames[frames.length - 1]!.stateRevision
+      : effectiveAfterRevision;
+
     return context.json({
       fixtureId,
       projectionGeneration: checkpoint?.projectionGeneration ?? 0,
       resyncRequired,
       frames,
+      headRevision,
+      nextAfterRevision,
+      hasMore,
     });
   });
 
@@ -215,4 +257,11 @@ function parseLimit(value?: string): number | undefined {
 
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function parseFramesLimit(value?: string): number {
+  if (!value) return DEFAULT_FRAMES_PAGE_LIMIT;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_FRAMES_PAGE_LIMIT;
+  return Math.min(Math.floor(parsed), MAX_FRAMES_PAGE_LIMIT);
 }

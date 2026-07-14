@@ -86,6 +86,149 @@ test('returns an empty durable frame page while upstream recovery is offline', a
   assert.deepEqual((await response.json()).frames, []);
 });
 
+test('delta at head returns an empty page with head and cursor metadata', async () => {
+  const ingestion = {
+    async ensureFixture() {},
+    async getCheckpoint(fixtureId) {
+      return { fixtureId, stateRevision: 12, projectionGeneration: 1, phase: 'second_half', state: { phase: 'second_half' } };
+    },
+    async listFramesAfter() { return []; },
+    activeFixtureCount() { return 1; },
+  };
+  const response = await createApp(config, ingestion)
+    .request('/matches/99/engine/frames?afterRevision=12');
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body.frames, []);
+  assert.equal(body.hasMore, false);
+  assert.equal(body.headRevision, 12);
+  assert.equal(body.nextAfterRevision, 12);
+  assert.equal(body.resyncRequired, false);
+});
+
+test('full history fetch is bounded by a default page limit with a hasMore cursor', async () => {
+  const allFrames = Array.from({ length: 1_800 }, (_, index) => ({
+    fixtureId: '99',
+    stateRevision: index + 1,
+    frame: { id: `99:${index + 1}` },
+  }));
+  const ingestion = {
+    async ensureFixture() {},
+    async getCheckpoint(fixtureId) {
+      return { fixtureId, stateRevision: 1_800, projectionGeneration: 1, phase: 'finalised', state: { phase: 'finalised' } };
+    },
+    async listFramesAfter() { return allFrames; },
+    activeFixtureCount() { return 1; },
+  };
+  const response = await createApp(config, ingestion).request('/matches/99/engine/frames');
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.frames.length, 500);
+  assert.equal(body.hasMore, true);
+  assert.equal(body.nextAfterRevision, 500);
+  assert.equal(body.headRevision, 1_800);
+});
+
+test('an explicit limit paginates the full history in successive pages', async () => {
+  const allFrames = Array.from({ length: 250 }, (_, index) => ({
+    fixtureId: '99',
+    stateRevision: index + 1,
+    frame: { id: `99:${index + 1}` },
+  }));
+  const ingestion = {
+    async ensureFixture() {},
+    async getCheckpoint(fixtureId) {
+      return { fixtureId, stateRevision: 250, projectionGeneration: 1, phase: 'finalised', state: { phase: 'finalised' } };
+    },
+    async listFramesAfter(_fixtureId, afterRevision) {
+      return allFrames.filter((entry) => entry.stateRevision > afterRevision);
+    },
+    activeFixtureCount() { return 1; },
+  };
+  const app = createApp(config, ingestion);
+  const firstPage = await (await app.request('/matches/99/engine/frames?limit=100')).json();
+  assert.equal(firstPage.frames.length, 100);
+  assert.equal(firstPage.hasMore, true);
+  assert.equal(firstPage.nextAfterRevision, 100);
+
+  const secondPage = await (
+    await app.request(`/matches/99/engine/frames?limit=100&afterRevision=${firstPage.nextAfterRevision}`)
+  ).json();
+  assert.equal(secondPage.frames.length, 100);
+  assert.equal(secondPage.hasMore, true);
+  assert.equal(secondPage.nextAfterRevision, 200);
+
+  const thirdPage = await (
+    await app.request(`/matches/99/engine/frames?limit=100&afterRevision=${secondPage.nextAfterRevision}`)
+  ).json();
+  assert.equal(thirdPage.frames.length, 50);
+  assert.equal(thirdPage.hasMore, false);
+  assert.equal(thirdPage.nextAfterRevision, 250);
+});
+
+test('identical frame requests are served from cache without re-reading the store', async () => {
+  let reads = 0;
+  const ingestion = {
+    async ensureFixture() {},
+    async getCheckpoint(fixtureId) {
+      return { fixtureId, stateRevision: 5, projectionGeneration: 1, phase: 'first_half', state: { phase: 'first_half' } };
+    },
+    async listFramesAfter(fixtureId, revision) {
+      reads += 1;
+      return [{ fixtureId, stateRevision: revision + 1, frame: { id: `${fixtureId}:1` } }];
+    },
+    activeFixtureCount() { return 1; },
+  };
+  const app = createApp(config, ingestion);
+  const first = await (await app.request('/matches/99/engine/frames?afterRevision=0')).json();
+  const second = await (await app.request('/matches/99/engine/frames?afterRevision=0')).json();
+  assert.equal(reads, 1);
+  assert.deepEqual(first.frames, second.frames);
+});
+
+test('a state-revision bump invalidates the cached frames response', async () => {
+  let reads = 0;
+  let stateRevision = 5;
+  const ingestion = {
+    async ensureFixture() {},
+    async getCheckpoint(fixtureId) {
+      return { fixtureId, stateRevision, projectionGeneration: 1, phase: 'first_half', state: { phase: 'first_half' } };
+    },
+    async listFramesAfter(fixtureId, revision) {
+      reads += 1;
+      return [{ fixtureId, stateRevision: stateRevision, frame: { id: `${fixtureId}:${stateRevision}` } }];
+    },
+    activeFixtureCount() { return 1; },
+  };
+  const app = createApp(config, ingestion);
+  await app.request('/matches/99/engine/frames?afterRevision=0');
+  assert.equal(reads, 1);
+
+  stateRevision = 6;
+  await app.request('/matches/99/engine/frames?afterRevision=0');
+  assert.equal(reads, 2);
+});
+
+test('identical engine/state requests are served from cache without re-reading the checkpoint store', async () => {
+  let reads = 0;
+  const ingestion = {
+    async ensureFixture() {},
+    async getCheckpoint(fixtureId) {
+      reads += 1;
+      return { fixtureId, stateRevision: 4, projectionGeneration: 1, phase: 'first_half', state: { phase: 'first_half' } };
+    },
+    async listFramesAfter() { return []; },
+    activeFixtureCount() { return 1; },
+  };
+  const app = createApp(config, ingestion);
+  const first = await (await app.request('/matches/99/engine/state')).json();
+  const second = await (await app.request('/matches/99/engine/state')).json();
+  // getCheckpoint is always called once per request to determine the cache version,
+  // but the JSON body construction (and any downstream work) is skipped on the cache hit.
+  assert.equal(reads, 2);
+  assert.deepEqual(first.checkpoint, second.checkpoint);
+});
+
 test('engine routes are explicitly unavailable without the ingestion runtime', async () => {
   const app = createApp(config);
   const response = await app.request('/matches/99/engine/state');

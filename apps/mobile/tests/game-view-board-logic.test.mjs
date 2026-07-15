@@ -5,9 +5,11 @@ import {
   buildBoardAccessibilityLabel,
   directionForParticipant,
   GAME_VIEW_STATE_COPY,
+  PITCH_MARKINGS,
   pressureToIntensity,
   resolveAmbientPresence,
   resolveBoardPresence,
+  resolveCenteredBoxLayout,
   resolveGoalEndLabels,
   resolveHeldPresence,
   selectStatePanelCopy,
@@ -404,4 +406,47 @@ test('buildBoardAccessibilityLabel: describes a carried presence as last known p
   const label = buildBoardAccessibilityLabel(held);
   assert.match(label, /last known play/i);
   assert.match(label, /Mexico/);
+});
+
+// --- resolveCenteredBoxLayout / PITCH_MARKINGS (R1 pitch markings) ---
+
+test('resolveCenteredBoxLayout: centers the box so left inset + width + left inset == 100', () => {
+  const layout = resolveCenteredBoxLayout(PITCH_MARKINGS.penaltyBox);
+  assert.equal(layout.leftPct + layout.widthPct + layout.leftPct, 100);
+});
+
+test('resolveCenteredBoxLayout: penalty box resolves to the documented ~60% width', () => {
+  const layout = resolveCenteredBoxLayout(PITCH_MARKINGS.penaltyBox);
+  assert.equal(layout.widthPct, 60);
+  assert.equal(layout.leftPct, 20);
+  assert.ok(Math.abs(layout.depthPct - 17) < 0.001);
+});
+
+test('resolveCenteredBoxLayout: six-yard box resolves to the documented ~30% width', () => {
+  const layout = resolveCenteredBoxLayout(PITCH_MARKINGS.sixYardBox);
+  assert.equal(layout.widthPct, 30);
+  assert.equal(layout.leftPct, 35);
+});
+
+test('resolveCenteredBoxLayout: six-yard box is narrower and shallower than the penalty box', () => {
+  const penaltyBox = resolveCenteredBoxLayout(PITCH_MARKINGS.penaltyBox);
+  const sixYardBox = resolveCenteredBoxLayout(PITCH_MARKINGS.sixYardBox);
+  assert.ok(sixYardBox.widthPct < penaltyBox.widthPct);
+  assert.ok(sixYardBox.depthPct < penaltyBox.depthPct);
+  // Six-yard box must nest fully inside the penalty box's horizontal span.
+  assert.ok(sixYardBox.leftPct > penaltyBox.leftPct);
+});
+
+test('resolveCenteredBoxLayout: goal mouth is narrower than the six-yard box and nests inside it', () => {
+  const sixYardBox = resolveCenteredBoxLayout(PITCH_MARKINGS.sixYardBox);
+  const goalMouth = resolveCenteredBoxLayout(PITCH_MARKINGS.goalMouth);
+  assert.ok(goalMouth.widthPct < sixYardBox.widthPct);
+  assert.ok(goalMouth.leftPct > sixYardBox.leftPct);
+});
+
+test('resolveCenteredBoxLayout: an arbitrary width/depth pair centers correctly', () => {
+  const layout = resolveCenteredBoxLayout({ widthPct: 0.5, depthPct: 0.25 });
+  assert.equal(layout.widthPct, 50);
+  assert.equal(layout.leftPct, 25);
+  assert.equal(layout.depthPct, 25);
 });

@@ -409,3 +409,75 @@ export function selectStatePanelCopy(
   if (status === 'ready') return undefined;
   return GAME_VIEW_STATE_COPY[status];
 }
+
+/**
+ * Pure layout proportions for the R1 broadcast-pitch chalk markings (work
+ * item R1 of docs/issues/game-view-realism-experiment.md). Everything is
+ * expressed as a percentage of the board's own box so the renderer can
+ * derive concrete style values via flex/percentage layout and the pitch
+ * scales cleanly across phone widths and the web max-width, without any
+ * fixed pixel geometry here.
+ *
+ * Percentages follow roughly realistic pitch ratios (a standard penalty box
+ * is ~44m of a ~68m-wide, ~105m-long pitch) rounded to numbers that read
+ * cleanly on a small board:
+ *  - penalty box: ~60% of pitch width, ~17% of half-length deep
+ *  - six-yard box: ~30% of pitch width, ~6% of half-length deep
+ *  - goal mouth: narrower than the six-yard box, sitting on the goal line
+ */
+export const PITCH_MARKINGS = {
+  penaltyBox: {
+    /** Width of the penalty box as a fraction of the pitch's full width. */
+    widthPct: 0.6,
+    /** Depth of the penalty box as a fraction of the pitch's half-length. */
+    depthPct: 0.17,
+  },
+  sixYardBox: {
+    widthPct: 0.3,
+    depthPct: 0.06,
+  },
+  goalMouth: {
+    widthPct: 0.16,
+    /** How far the goal-mouth bracket extends outward past the goal line, as a fraction of pitch half-length. */
+    depthPct: 0.025,
+  },
+  penaltySpot: {
+    /** Distance of the penalty spot from the goal line, as a fraction of pitch half-length. */
+    fromGoalLinePct: 0.11,
+  },
+  penaltyArc: {
+    /** Radius of the penalty arc, as a fraction of pitch width, matching the penalty-spot-to-box-edge distance. */
+    radiusPct: 0.088,
+  },
+  cornerArc: {
+    /** Radius of the corner quarter-circle hint, as a fraction of pitch width. */
+    radiusPct: 0.035,
+  },
+} as const;
+
+export interface PitchBoxLayout {
+  /** Left inset of the box, as a percentage string for style consumption. */
+  leftPct: number;
+  /** Width of the box, as a percentage of pitch width. */
+  widthPct: number;
+  /** Depth (height) of the box, as a percentage of pitch half-length. */
+  depthPct: number;
+}
+
+/**
+ * Resolves a centered box's left inset + width + depth from a width/depth
+ * proportion pair (e.g. `PITCH_MARKINGS.penaltyBox`). Centers the box
+ * horizontally: leftPct + widthPct + leftPct == 100.
+ */
+export function resolveCenteredBoxLayout(proportions: {
+  widthPct: number;
+  depthPct: number;
+}): PitchBoxLayout {
+  const widthPct = proportions.widthPct * 100;
+  const leftPct = (100 - widthPct) / 2;
+  return {
+    leftPct,
+    widthPct,
+    depthPct: proportions.depthPct * 100,
+  };
+}

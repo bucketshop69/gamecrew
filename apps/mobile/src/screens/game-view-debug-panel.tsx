@@ -1,8 +1,9 @@
 import { gameCrewTokens, type GameViewScene } from '@gamecrew/core';
 import { useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { usePlaybackEngine } from '../state/use-playback-engine';
+import { GameViewPlayerGallery } from './game-view-players/game-view-player-gallery';
 
 /**
  * Dev-only proof surface for the Game View data pipeline (session -> director
@@ -49,7 +50,46 @@ export function GameViewDebugPanel({
       ) : (
         <Text style={styles.dim}>none</Text>
       )}
+
+      <PlayerGalleryLauncher />
     </View>
+  );
+}
+
+/**
+ * Second __DEV__ affordance mounted inside the debug panel: opens the R2
+ * player-silhouette gallery (game-view-player-gallery.tsx) as a full-screen
+ * Modal so product can review pose/color swatches without leaving the
+ * screen the debug panel is already attached to, and without altering the
+ * panel's existing session-state rows above. No-op outside __DEV__ (the
+ * gallery itself also no-ops, so this is a belt-and-braces guard).
+ */
+function PlayerGalleryLauncher() {
+  const [galleryVisible, setGalleryVisible] = useState(false);
+
+  if (!__DEV__) return null;
+
+  return (
+    <>
+      <View style={styles.controlsRow}>
+        <DebugButton label="Player gallery" onPress={() => setGalleryVisible(true)} />
+      </View>
+      <Modal
+        animationType="slide"
+        onRequestClose={() => setGalleryVisible(false)}
+        visible={galleryVisible}
+      >
+        <Pressable
+          accessibilityLabel="Close player gallery"
+          accessibilityRole="button"
+          onPress={() => setGalleryVisible(false)}
+          style={styles.galleryCloseButton}
+        >
+          <Text style={styles.galleryCloseText}>Close</Text>
+        </Pressable>
+        <GameViewPlayerGallery />
+      </Modal>
+    </>
   );
 }
 
@@ -119,6 +159,10 @@ export function GameViewDebugToggle({
         accessibilityRole="button"
         delayLongPress={400}
         onLongPress={() => setVisible((current) => !current)}
+        // Plain press also toggles on web dev builds, where long-press is
+        // awkward with a mouse; on device the long-press keeps accidental
+        // opens rare.
+        onPress={Platform.OS === 'web' ? () => setVisible((current) => !current) : undefined}
         style={styles.chip}
       >
         <Text style={styles.chipText}>{visible ? 'Hide debug' : 'Debug'}</Text>
@@ -207,5 +251,18 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 10,
     fontWeight: '600',
+  },
+  galleryCloseButton: {
+    alignSelf: 'flex-end',
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 8,
+    margin: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  galleryCloseText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
   },
 });

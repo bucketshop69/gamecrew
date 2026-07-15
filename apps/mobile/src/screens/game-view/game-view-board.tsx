@@ -1,14 +1,16 @@
 import { gameCrewTokens, type GameViewScene } from '@gamecrew/core';
 import { type ReactNode, useEffect, useMemo, useRef } from 'react';
-import { Animated, Easing, StyleSheet, Text, View } from 'react-native';
+import { Animated, Easing, StyleSheet, Text, View, type DimensionValue } from 'react-native';
 
 import {
   type BoardDirection,
   type BoardPresenceState,
   type BoardTeamInfo,
   buildBoardAccessibilityLabel,
+  PITCH_MARKINGS,
   resolveAmbientPresence,
   resolveBoardPresence,
+  resolveCenteredBoxLayout,
   resolveGoalEndLabels,
   zoneLabelForDirection,
 } from './game-view-board-logic';
@@ -17,6 +19,32 @@ const tokens = gameCrewTokens;
 
 /** Max content width for the pitch on wide screens (fix #6): phones stay full-bleed, web/tablet gets a centered pitch. */
 const PITCH_MAX_WIDTH = 480;
+
+/**
+ * R1 chalk line color: slightly brighter than `tokens.shell.divider` (the
+ * existing quiet boundary gray) so the broadcast pitch markings read as
+ * "painted lines" while staying within the black/white/gray shell palette --
+ * no green turf, per the product's "GameCrew is black and white; the match
+ * brings the color" rule.
+ */
+const CHALK_LINE_COLOR = '#3D3D3D';
+/**
+ * R1: now that real chalk lines exist, the zone-band divider lines are
+ * dimmed further so they read as quiet internal structure rather than
+ * competing with the pitch markings.
+ */
+const ZONE_LINE_COLOR = 'rgba(255, 255, 255, 0.05)';
+
+/**
+ * R1 addendum: perimeter LED-board strip thickness. Thin enough to read as
+ * stadium furniture without shrinking the playable pitch noticeably (per the
+ * "10-14px tall strips" guidance); the pitch content inset (`pitchInset`)
+ * uses this same value on all four edges so the strips sit just inside the
+ * board container but outside the chalk boundary.
+ */
+const PERIMETER_STRIP_SIZE = 12;
+/** Slightly raised luminance vs the turf so the strip reads as a panel, not a shadow. */
+const PERIMETER_PANEL_COLOR = '#111111';
 
 /**
  * The ambient zone board renderer (work item B1 of
@@ -85,14 +113,120 @@ export function GameViewBoard({
         accessibilityRole="image"
         style={styles.board}
       >
-        <GoalEndLabel edge="top" label={goalEndLabels.top} />
-        <ZonePitch direction={presence.direction} />
+        <PerimeterBoards reduceMotion={reduceMotion} />
+        <View style={styles.pitchInset}>
+          <Turf />
+          <ChalkLines />
+          <GoalEndLabel edge="top" label={goalEndLabels.top} />
+          <ZonePitch direction={presence.direction} />
 
-        <PossessionPresence presence={presence} reduceMotion={reduceMotion} />
+          <PossessionPresence presence={presence} reduceMotion={reduceMotion} />
 
-        {overlay ? <View style={styles.overlaySlot}>{overlay}</View> : null}
-        <GoalEndLabel edge="bottom" label={goalEndLabels.bottom} />
+          {overlay ? <View style={styles.overlaySlot}>{overlay}</View> : null}
+          <GoalEndLabel edge="bottom" label={goalEndLabels.bottom} />
+        </View>
       </View>
+    </View>
+  );
+}
+
+/**
+ * R1 addendum: pulls forward the perimeter-strip slot from work item C3 of
+ * docs/issues/game-view-presentation-polish.md ("Overlay slot system
+ * (perimeter strip, corner lockup, break interstitial) with placeholder
+ * content"). Renders thin stadium-LED-style boards along the pitch edges,
+ * just inside the board container but outside the chalk boundary (the
+ * `pitchInset` sibling shrinks to make room, so the playable pitch area
+ * itself doesn't get visually cramped). Ships with a placeholder-only
+ * repeating GAMECREW wordmark -- no fake sponsor content, per the slot
+ * system's "ships with placeholder content; ad logic is a separate later
+ * decision" rule. Non-interactive and hidden from accessibility: it's
+ * stadium furniture, not board content.
+ */
+function PerimeterBoards({ reduceMotion }: { reduceMotion: boolean }) {
+  return (
+    <View
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      pointerEvents="none"
+      style={StyleSheet.absoluteFill}
+    >
+      <PerimeterStrip edge="top" reduceMotion={reduceMotion} />
+      <PerimeterStrip edge="bottom" reduceMotion={reduceMotion} />
+      <PerimeterStrip edge="left" reduceMotion={reduceMotion} />
+      <PerimeterStrip edge="right" reduceMotion={reduceMotion} />
+    </View>
+  );
+}
+
+const PERIMETER_WORDMARK = 'GAMECREW';
+/** Repeats enough to fill the longest strip edge without measuring layout. */
+const PERIMETER_REPEAT = Array.from({ length: 8 }, (_, index) => index);
+const PERIMETER_DRIFT_DURATION_MS = 26000;
+const PERIMETER_DRIFT_RANGE = 24;
+
+function PerimeterStrip({
+  edge,
+  reduceMotion,
+}: {
+  edge: 'top' | 'bottom' | 'left' | 'right';
+  reduceMotion: boolean;
+}) {
+  const drift = useRef(new Animated.Value(0)).current;
+  const driftLoop = useRef<Animated.CompositeAnimation | null>(null);
+  const isVertical = edge === 'left' || edge === 'right';
+
+  useEffect(() => {
+    driftLoop.current?.stop();
+    if (reduceMotion) {
+      drift.setValue(0);
+      return;
+    }
+
+    drift.setValue(0);
+    driftLoop.current = Animated.loop(
+      Animated.sequence([
+        Animated.timing(drift, {
+          toValue: 1,
+          duration: PERIMETER_DRIFT_DURATION_MS,
+          easing: Easing.linear,
+          useNativeDriver: true,
+        }),
+        Animated.timing(drift, {
+          toValue: 0,
+          duration: 0,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    driftLoop.current.start();
+
+    return () => {
+      driftLoop.current?.stop();
+    };
+  }, [drift, reduceMotion]);
+
+  const translate = drift.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, -PERIMETER_DRIFT_RANGE],
+  });
+  // Vertical (left/right) strips reuse the same horizontal text row, then
+  // rotate the whole row 90deg so it reads top-to-bottom like a real
+  // perimeter board's side panel -- the drift still reads as "translateX"
+  // in the row's own (pre-rotation) coordinate space.
+  const transform = isVertical
+    ? [{ rotate: '90deg' }, { translateX: translate }]
+    : [{ translateX: translate }];
+
+  return (
+    <View style={[styles.perimeterStrip, styles[`perimeterStrip_${edge}`]]}>
+      <Animated.View style={[styles.perimeterContentHorizontal, { transform }]}>
+        {PERIMETER_REPEAT.map((index) => (
+          <Text key={index} numberOfLines={1} style={styles.perimeterText}>
+            {PERIMETER_WORDMARK}
+          </Text>
+        ))}
+      </Animated.View>
     </View>
   );
 }
@@ -112,6 +246,179 @@ function GoalEndLabel({ edge, label }: { edge: 'top' | 'bottom'; label: string }
     >
       <Text style={styles.goalEndLabelText}>{label}</Text>
     </View>
+  );
+}
+
+/**
+ * R1 (docs/issues/game-view-realism-experiment.md): the turf surface under
+ * everything else. Alternating near-black horizontal mowing-stripe bands so
+ * the board reads as grass under floodlights rather than a flat void.
+ * Deliberately barely-perceptible -- two adjacent shell grays, no green --
+ * per the product's "GameCrew is black and white; the match brings the
+ * color" rule. Purely decorative: hidden from accessibility, sits below the
+ * chalk lines and zone chrome.
+ */
+function Turf() {
+  return (
+    <View
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      style={StyleSheet.absoluteFill}
+    >
+      {TURF_STRIPES.map((stripe, index) => (
+        <View
+          key={index}
+          style={[
+            styles.turfStripe,
+            { backgroundColor: stripe === 0 ? tokens.shell.background : TURF_STRIPE_ALT },
+          ]}
+        />
+      ))}
+    </View>
+  );
+}
+
+/** Count of alternating turf stripes running the length of the pitch. */
+const TURF_STRIPE_COUNT = 12;
+const TURF_STRIPES = Array.from({ length: TURF_STRIPE_COUNT }, (_, index) => index % 2);
+/** Slightly lighter than shell.background -- a barely-perceptible mowing band, not a visible line. */
+const TURF_STRIPE_ALT = '#080808';
+
+/**
+ * R1: broadcast chalk line work drawn as plain bordered Views (max width
+ * intact, no SVG/images per the constraint). Full boundary and halfway line
+ * already existed (fix #6); this adds both penalty areas (box + six-yard +
+ * spot + arc), goal-mouth brackets, and corner arc hints, all sized as
+ * percentages of the board via `PITCH_MARKINGS` so they scale with the
+ * board's own flex layout at any width. Sits above the turf, below the zone
+ * chrome/presence per the layering order in the parent render.
+ */
+function ChalkLines() {
+  return (
+    <View
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      style={StyleSheet.absoluteFill}
+    >
+      <PenaltyArea edge="top" />
+      <PenaltyArea edge="bottom" />
+      <CornerArc corner="topLeft" />
+      <CornerArc corner="topRight" />
+      <CornerArc corner="bottomLeft" />
+      <CornerArc corner="bottomRight" />
+    </View>
+  );
+}
+
+const penaltyBoxLayout = resolveCenteredBoxLayout(PITCH_MARKINGS.penaltyBox);
+const sixYardBoxLayout = resolveCenteredBoxLayout(PITCH_MARKINGS.sixYardBox);
+const goalMouthLayout = resolveCenteredBoxLayout(PITCH_MARKINGS.goalMouth);
+const penaltyArcDiameterPct = PITCH_MARKINGS.penaltyArc.radiusPct * 2 * 100;
+
+/**
+ * One end's penalty area: outer box, six-yard box, penalty spot, and the D
+ * (penalty arc, approximated as a bordered circle View whose straight edge
+ * is clipped by the box's own overflow -- per the constraint, "arc can be
+ * approximated with a bordered half-circle View clipped by overflow").
+ */
+function PenaltyArea({ edge }: { edge: 'top' | 'bottom' }) {
+  const edgeStyle: { top: DimensionValue } | { bottom: DimensionValue } =
+    edge === 'top' ? { top: 0 } : { bottom: 0 };
+  const penaltySpotFromGoalLinePct: DimensionValue = `${PITCH_MARKINGS.penaltySpot.fromGoalLinePct * 100}%`;
+  const arcEdgeStyle: { top: DimensionValue } | { bottom: DimensionValue } =
+    edge === 'top' ? { top: penaltySpotFromGoalLinePct } : { bottom: penaltySpotFromGoalLinePct };
+
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      <View
+        style={[
+          styles.penaltyBox,
+          edgeStyle,
+          {
+            left: `${penaltyBoxLayout.leftPct}%`,
+            width: `${penaltyBoxLayout.widthPct}%`,
+            height: `${penaltyBoxLayout.depthPct}%`,
+          },
+        ]}
+      />
+      <View
+        style={[
+          styles.penaltyBox,
+          edgeStyle,
+          {
+            left: `${sixYardBoxLayout.leftPct}%`,
+            width: `${sixYardBoxLayout.widthPct}%`,
+            height: `${sixYardBoxLayout.depthPct}%`,
+          },
+        ]}
+      />
+      <View
+        style={[
+          styles.penaltySpot,
+          edge === 'top' ? { top: penaltySpotFromGoalLinePct } : { bottom: penaltySpotFromGoalLinePct },
+        ]}
+      />
+      {/* Penalty arc: a full circle centered on the spot, clipped to only
+          show the half that bulges out of the box via the box's own
+          overflow:hidden -- the arc's far half sits inside the (visually
+          transparent) box area and is simply covered by the box outline. */}
+      <View
+        style={[
+          styles.penaltyArcClip,
+          edgeStyle,
+          { height: `${PITCH_MARKINGS.penaltyBox.depthPct * 100 + 10}%` },
+        ]}
+      >
+        <View
+          style={[
+            styles.penaltyArc,
+            arcEdgeStyle,
+            { width: `${penaltyArcDiameterPct}%`, height: `${penaltyArcDiameterPct}%` },
+          ]}
+        />
+      </View>
+      <GoalMouth edge={edge} />
+    </View>
+  );
+}
+
+/** Small bracket rectangle just outside the goal line, hinting at the goal frame. */
+function GoalMouth({ edge }: { edge: 'top' | 'bottom' }) {
+  return (
+    <View
+      style={[
+        styles.goalMouth,
+        edge === 'top'
+          ? { top: -(PITCH_MARKINGS.goalMouth.depthPct * 100) }
+          : { bottom: -(PITCH_MARKINGS.goalMouth.depthPct * 100) },
+        {
+          left: `${goalMouthLayout.leftPct}%`,
+          width: `${goalMouthLayout.widthPct}%`,
+          height: `${PITCH_MARKINGS.goalMouth.depthPct * 100}%`,
+        },
+      ]}
+    />
+  );
+}
+
+const CORNER_STYLE_KEY = {
+  topLeft: 'cornerArcTopLeft',
+  topRight: 'cornerArcTopRight',
+  bottomLeft: 'cornerArcBottomLeft',
+  bottomRight: 'cornerArcBottomRight',
+} as const;
+
+/** Tiny quarter-circle hint at a pitch corner via the border-radius trick. */
+function CornerArc({ corner }: { corner: keyof typeof CORNER_STYLE_KEY }) {
+  const sizePct = PITCH_MARKINGS.cornerArc.radiusPct * 100;
+  return (
+    <View
+      style={[
+        styles.cornerArc,
+        styles[CORNER_STYLE_KEY[corner]],
+        { width: `${sizePct}%`, height: `${sizePct}%` },
+      ]}
+    />
   );
 }
 
@@ -362,6 +669,17 @@ const styles = StyleSheet.create({
     position: 'relative',
     width: '100%',
   },
+  // R1 addendum: insets all pitch content (turf, chalk lines, zone chrome,
+  // presence, overlay, goal-end labels) by PERIMETER_STRIP_SIZE on every
+  // edge so the perimeter LED-board strips have room to sit just inside the
+  // board container without visually cramping the playable pitch.
+  pitchInset: {
+    bottom: PERIMETER_STRIP_SIZE,
+    left: PERIMETER_STRIP_SIZE,
+    position: 'absolute',
+    right: PERIMETER_STRIP_SIZE,
+    top: PERIMETER_STRIP_SIZE,
+  },
   pitchSurface: {
     flex: 1,
     flexDirection: 'column',
@@ -372,7 +690,7 @@ const styles = StyleSheet.create({
     paddingTop: tokens.spacing.xs,
   },
   zoneBandLine: {
-    backgroundColor: tokens.shell.divider,
+    backgroundColor: ZONE_LINE_COLOR,
     height: StyleSheet.hairlineWidth,
     left: 0,
     position: 'absolute',
@@ -386,11 +704,12 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     textTransform: 'uppercase',
   },
-  // Fix #6: a visible pitch boundary (side lines + goal lines) so the board
-  // reads as a pitch rather than an unbounded gradient. Quiet/thin per the
-  // PRD's "zones are subtle structure, not loud chrome".
+  // Fix #6, upgraded for R1: a visible pitch boundary (side lines + goal
+  // lines) so the board reads as a pitch rather than an unbounded gradient.
+  // Uses CHALK_LINE_COLOR (brighter than the plain shell divider) now that
+  // it's drawn alongside full broadcast markings.
   pitchBoundary: {
-    borderColor: tokens.shell.divider,
+    borderColor: CHALK_LINE_COLOR,
     borderWidth: StyleSheet.hairlineWidth,
     bottom: 0,
     left: 0,
@@ -399,7 +718,7 @@ const styles = StyleSheet.create({
     top: 0,
   },
   centerLine: {
-    backgroundColor: tokens.shell.divider,
+    backgroundColor: CHALK_LINE_COLOR,
     height: StyleSheet.hairlineWidth,
     left: 0,
     position: 'absolute',
@@ -409,7 +728,7 @@ const styles = StyleSheet.create({
   // Fix #6: a center-circle hint (kept small/subtle) plus the center spot,
   // completing the "pitch" read without becoming a broadcast-style diagram.
   centerCircle: {
-    borderColor: tokens.shell.divider,
+    borderColor: CHALK_LINE_COLOR,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
     height: 72,
@@ -421,7 +740,7 @@ const styles = StyleSheet.create({
     width: 72,
   },
   centerDot: {
-    backgroundColor: tokens.shell.divider,
+    backgroundColor: CHALK_LINE_COLOR,
     borderRadius: 2,
     height: 4,
     left: '50%',
@@ -430,6 +749,87 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: '50%',
     width: 4,
+  },
+  // R1: turf surface stripe -- see `Turf`. Each stripe is an equal-height
+  // flex row; the alternating backgroundColor prop is applied per-instance.
+  turfStripe: {
+    flex: 1,
+  },
+  // R1: shared style for both the outer penalty box and the six-yard box --
+  // only position/left/width/height differ per instance.
+  penaltyBox: {
+    borderColor: CHALK_LINE_COLOR,
+    borderWidth: StyleSheet.hairlineWidth,
+    position: 'absolute',
+  },
+  penaltySpot: {
+    backgroundColor: CHALK_LINE_COLOR,
+    borderRadius: 2,
+    height: 3,
+    left: '50%',
+    marginLeft: -1.5,
+    marginTop: -1.5,
+    position: 'absolute',
+    width: 3,
+  },
+  // R1: clips the penalty arc to only the sliver that bulges past the box
+  // edge, per the constraint's "clipped by overflow" approximation. Spans
+  // slightly past the box depth so the arc's curve is visible outside it.
+  penaltyArcClip: {
+    left: '10%',
+    overflow: 'hidden',
+    position: 'absolute',
+    right: '10%',
+  },
+  penaltyArc: {
+    borderColor: CHALK_LINE_COLOR,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    left: '50%',
+    position: 'absolute',
+    transform: [{ translateX: '-50%' }, { translateY: '-50%' }],
+  },
+  // R1: small bracket rectangle just outside the goal line hinting at the
+  // goal frame -- open-bottomed toward the pitch (no border on the edge
+  // facing the field) so it reads as a goal mouth, not a closed box.
+  goalMouth: {
+    borderColor: CHALK_LINE_COLOR,
+    borderWidth: StyleSheet.hairlineWidth,
+    position: 'absolute',
+  },
+  // R1: corner quarter-circle hints via the border-radius trick -- a small
+  // square with only the pitch-facing corner rounded and bordered.
+  cornerArc: {
+    borderColor: CHALK_LINE_COLOR,
+    position: 'absolute',
+  },
+  cornerArcTopLeft: {
+    borderBottomRightRadius: 999,
+    borderRightWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    left: 0,
+    top: 0,
+  },
+  cornerArcTopRight: {
+    borderBottomLeftRadius: 999,
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    right: 0,
+    top: 0,
+  },
+  cornerArcBottomLeft: {
+    borderTopRightRadius: 999,
+    borderRightWidth: StyleSheet.hairlineWidth,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    left: 0,
+    bottom: 0,
+  },
+  cornerArcBottomRight: {
+    borderTopLeftRadius: 999,
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    right: 0,
+    bottom: 0,
   },
   // Fix #1: quiet goal-end labels so zone bands read relative to a real
   // goal at either end of the pitch.
@@ -493,5 +893,53 @@ const styles = StyleSheet.create({
   overlaySlot: {
     ...StyleSheet.absoluteFill,
     zIndex: 10,
+  },
+  // R1 addendum (C3 perimeter slot pulled forward): base panel style shared
+  // by all four strip edges -- a slightly raised-luminance dark panel,
+  // clipped so the drifting wordmark content never spills past its strip.
+  perimeterStrip: {
+    alignItems: 'center',
+    backgroundColor: PERIMETER_PANEL_COLOR,
+    justifyContent: 'center',
+    overflow: 'hidden',
+    position: 'absolute',
+  },
+  perimeterStrip_top: {
+    height: PERIMETER_STRIP_SIZE,
+    left: 0,
+    right: 0,
+    top: 0,
+  },
+  perimeterStrip_bottom: {
+    bottom: 0,
+    height: PERIMETER_STRIP_SIZE,
+    left: 0,
+    right: 0,
+  },
+  perimeterStrip_left: {
+    bottom: 0,
+    left: 0,
+    top: 0,
+    width: PERIMETER_STRIP_SIZE,
+  },
+  perimeterStrip_right: {
+    bottom: 0,
+    right: 0,
+    top: 0,
+    width: PERIMETER_STRIP_SIZE,
+  },
+  perimeterContentHorizontal: {
+    alignItems: 'center',
+    flexDirection: 'row',
+  },
+  perimeterText: {
+    color: tokens.shell.textDim,
+    fontSize: 8,
+    fontWeight: tokens.typography.weight.bold,
+    letterSpacing: 2,
+    marginHorizontal: tokens.spacing.lg,
+    marginVertical: tokens.spacing.lg,
+    opacity: 0.5,
+    textTransform: 'uppercase',
   },
 });

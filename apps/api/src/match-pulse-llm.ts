@@ -80,8 +80,100 @@ interface MatchPulseCommentaryLlmJson {
 }
 
 type CommentaryImportance = 'routine' | 'developing' | 'major';
-export const COMMENTARY_PROMPT_VERSION = 'engine-commentary-v1';
-export const COMMENTARY_REFLECTION_PROMPT_VERSION = 'engine-commentary-v2-reflection';
+export const COMMENTARY_PROMPT_VERSION = 'engine-commentary-v3-immediate';
+export const COMMENTARY_REFLECTION_PROMPT_VERSION = 'engine-commentary-v3-reflection';
+
+/**
+ * Deterministic description of how a beat relates to the immediately
+ * preceding beat in timeline order. Computed from grounded facts and team
+ * identity only — the model never invents continuity, it is told the
+ * relation and asked to phrase it naturally.
+ */
+export type CommentaryRelationToPrevious =
+  | 'starts_spell'
+  | 'continues_pressure'
+  | 'new_attempt'
+  | 'possession_flip'
+  | 'restart_resets_spell'
+  | 'break_in_play'
+  | 'major_moment';
+
+export function classifyRelationToPrevious(
+  entry: MatchPulseCommentaryEntry,
+  previous: MatchPulseCommentaryEntry | undefined,
+): CommentaryRelationToPrevious {
+  const actions = groundedActionKinds(entry);
+  if (actions.has('restart') || actions.has('phase_change') || actions.has('additional_time')) {
+    return 'restart_resets_spell';
+  }
+  if (
+    entry.kind === 'goal' || entry.kind === 'penalty' || entry.kind === 'var' || entry.kind === 'card'
+    || actions.has('goal') || actions.has('penalty') || actions.has('var')
+    || actions.has('red_card') || actions.has('yellow_card')
+  ) {
+    return 'major_moment';
+  }
+  if (entry.kind === 'substitution' || entry.kind === 'injury'
+    || actions.has('substitution') || actions.has('injury')) {
+    return 'break_in_play';
+  }
+  if (actions.has('possession_change')) return 'possession_flip';
+  if (['shot', 'corner', 'free_kick', 'throw_in', 'goal_kick', 'set_piece'].some((action) => actions.has(action))) {
+    return 'new_attempt';
+  }
+  if (!previous) return 'starts_spell';
+  const previousResets = classifyPreviousResetsSpell(previous);
+  if (previousResets) return 'starts_spell';
+  if (entry.team?.id !== undefined && entry.team.id === previous.team?.id) return 'continues_pressure';
+  return 'starts_spell';
+}
+
+function classifyPreviousResetsSpell(previous: MatchPulseCommentaryEntry): boolean {
+  const actions = groundedActionKinds(previous);
+  return actions.has('restart') || actions.has('phase_change') || actions.has('additional_time');
+}
+
+function groundedActionKinds(entry: MatchPulseCommentaryEntry): Set<string> {
+  return new Set([
+    ...entry.sourceEvents.map((source) => normalizeAction(source.action)),
+    ...(entry.groundedFacts ?? []).flatMap((fact) => [
+      normalizeAction(fact.action),
+      normalizeCueKind(fact.kind),
+    ]),
+  ].filter(Boolean));
+}
+
+/**
+ * Splits pending entries (already in timeline order) into minute batches: a
+ * batch never crosses a (period, minute) boundary, and unusually busy minutes
+ * are split into near-equal chunks no larger than `cap`.
+ */
+export function groupEntriesIntoMinuteBatches(
+  entries: readonly MatchPulseCommentaryEntry[],
+  cap = 16,
+): MatchPulseCommentaryEntry[][] {
+  const minuteGroups: MatchPulseCommentaryEntry[][] = [];
+  let currentKey: string | undefined;
+  for (const entry of entries) {
+    const key = `${entry.period}:${entry.clock.minute ?? entry.clock.label}`;
+    if (key !== currentKey || minuteGroups.length === 0) {
+      minuteGroups.push([]);
+      currentKey = key;
+    }
+    minuteGroups.at(-1)!.push(entry);
+  }
+  const capped = Math.max(1, cap);
+  return minuteGroups.flatMap((group) => {
+    if (group.length <= capped) return [group];
+    const chunkCount = Math.ceil(group.length / capped);
+    const chunkSize = Math.ceil(group.length / chunkCount);
+    const chunks: MatchPulseCommentaryEntry[][] = [];
+    for (let index = 0; index < group.length; index += chunkSize) {
+      chunks.push(group.slice(index, index + chunkSize));
+    }
+    return chunks;
+  });
+}
 
 class CommentaryValidationError extends Error {
   override name = 'CommentaryValidationError';
@@ -163,68 +255,105 @@ class OpenAiCompatibleMatchPulseEnrichmentService implements MatchPulseEnrichmen
   ): Promise<MatchPulseCommentaryEnrichmentResult> {
     const enrichedEntries: MatchPulseCommentaryEntry[] = [];
     const traces: MatchPulseCommentaryEnrichmentTrace[] = [];
-    const previousContext = [...previousEntries];
+    // Timeline order for relation/continuity grounding (any status); accepted
+    // lines only for the spoken broadcast memory the model continues from.
+    const timeline = [...previousEntries];
+    const accepted = previousEntries.filter((entry) =>
+      entry.enrichmentStatus === 'complete' && entry.commentary.trim().length > 0);
     let failed = 0;
 
-    for (const entry of pendingEntries) {
-      const stages: MatchPulseCommentaryEnrichmentStageTrace[] = [];
-      let failureReason: string | undefined;
+    for (const batch of groupEntriesIntoMinuteBatches(pendingEntries)) {
+      const prompt = buildCommentaryMinuteBatchPrompt(context, batch, timeline.at(-1), accepted);
+      const completion = await this.createChatCompletionResult(prompt, batchMaxTokens(batch.length));
+      let results: MatchPulseCommentaryLlmJson[];
       try {
-        const prompt = buildCommentaryEnrichmentPrompt(context, entry, previousContext);
-        const draftCompletion = await this.createChatCompletionResult(prompt);
-        const content = draftCompletion.content;
-        stages.push(toStageTrace('draft', draftCompletion));
-        let draft: MatchPulseCommentaryEntry | undefined;
-        let draftFailure: Error | undefined;
-        try {
-          draft = applyCommentaryLlmJson(
-            context,
-            entry,
-            parseCommentaryLlmJson(content),
-            previousContext,
-          );
-        } catch (error) {
-          draftFailure = error instanceof Error ? error : new Error(String(error));
-        }
-
-        let enriched = draft;
-        if (shouldReflectCommentary(entry)) {
-          const reflectionPrompt = buildCommentaryReflectionPrompt(
-            prompt,
-            content,
-            draftFailure?.message,
-            classifyMomentClass(entry.kind, entry.narrative),
-          );
-          const reflectionCompletion = await this.createChatCompletionResult(reflectionPrompt);
-          const reflectedContent = reflectionCompletion.content;
-          stages.push(toStageTrace('reflection', reflectionCompletion));
-          enriched = applyCommentaryLlmJson(
-            context,
-            entry,
-            parseCommentaryLlmJson(reflectedContent),
-            previousContext,
-            COMMENTARY_REFLECTION_PROMPT_VERSION,
-          );
-        } else if (!enriched) {
-          throw draftFailure ?? new CommentaryValidationError('Commentary draft could not be validated.');
-        }
-        enrichedEntries.push(enriched);
-        previousContext.push(enriched);
+        results = parseCommentaryBatchLlmJson(completion.content);
       } catch (error) {
-        if (error instanceof CommentaryProviderError) throw error;
-        failed += 1;
-        failureReason = error instanceof Error ? error.message : 'Unknown enrichment error';
-        console.warn(JSON.stringify({
-          event: 'match_pulse_commentary_enrichment_failed',
-          entryId: entry.id,
-          reason: failureReason,
-        }));
-        enrichedEntries.push({
-          ...entry,
-          enrichmentStatus: 'failed',
-        });
-      } finally {
-        traces.push({ entryId: entry.id, stages, ...(failureReason ? { failureReason } : {}) });
+        // A response with no readable results array is a provider fault
+        // (truncation, malformed output): reject the whole call so the
+        // durable worker retries the claim instead of failing every entry.
+        throw new CommentaryProviderError(
+          error instanceof Error ? error.message : 'Unreadable batch commentary response.',
+          { cause: error },
+        );
+      }
+      const resultsById = new Map(results
+        .filter((result) => typeof result.entryId === 'string')
+        .map((result) => [result.entryId!, result]));
+
+      for (const [index, entry] of batch.entries()) {
+        const stages: MatchPulseCommentaryEnrichmentStageTrace[] = [];
+        // The single batch request is accounted once, on the batch's first
+        // entry, so provider-call and token accounting stay truthful.
+        if (index === 0) {
+          stages.push({
+            stage: 'draft',
+            durationMs: completion.durationMs,
+            ...(completion.usage ? { usage: completion.usage } : {}),
+          });
+        }
+        let failureReason: string | undefined;
+        try {
+          const result = resultsById.get(entry.id);
+          let draft: MatchPulseCommentaryEntry | undefined;
+          let draftFailure: Error | undefined;
+          try {
+            if (!result) {
+              throw new CommentaryValidationError('Batch response did not include a result for this entry.');
+            }
+            draft = applyCommentaryLlmJson(context, entry, result, timeline);
+          } catch (error) {
+            draftFailure = error instanceof Error ? error : new Error(String(error));
+          }
+
+          let enriched = draft;
+          if (shouldReflectCommentary(entry)) {
+            const singlePrompt = buildCommentaryEnrichmentPrompt(context, entry, timeline);
+            const reflectionPrompt = buildCommentaryReflectionPrompt(
+              singlePrompt,
+              result ? JSON.stringify(result) : 'The batch response did not include a result for this entry.',
+              draftFailure?.message,
+              classifyMomentClass(entry.kind, entry.narrative),
+            );
+            const reflectionCompletion = await this.createChatCompletionResult(reflectionPrompt);
+            stages.push(toStageTrace('reflection', reflectionCompletion));
+            try {
+              enriched = applyCommentaryLlmJson(
+                context,
+                entry,
+                parseCommentaryLlmJson(reflectionCompletion.content),
+                timeline,
+                COMMENTARY_REFLECTION_PROMPT_VERSION,
+              );
+            } catch (reflectionError) {
+              // Keep a valid batch draft when the reflection pass regresses.
+              if (!draft) throw reflectionError;
+              enriched = draft;
+            }
+          } else if (!enriched) {
+            throw draftFailure ?? new CommentaryValidationError('Commentary draft could not be validated.');
+          }
+          enrichedEntries.push(enriched!);
+          timeline.push(enriched!);
+          accepted.push(enriched!);
+        } catch (error) {
+          if (error instanceof CommentaryProviderError) throw error;
+          failed += 1;
+          failureReason = error instanceof Error ? error.message : 'Unknown enrichment error';
+          console.warn(JSON.stringify({
+            event: 'match_pulse_commentary_enrichment_failed',
+            entryId: entry.id,
+            reason: failureReason,
+          }));
+          const failedEntry: MatchPulseCommentaryEntry = {
+            ...entry,
+            enrichmentStatus: 'failed',
+          };
+          enrichedEntries.push(failedEntry);
+          timeline.push(failedEntry);
+        } finally {
+          traces.push({ entryId: entry.id, stages, ...(failureReason ? { failureReason } : {}) });
+        }
       }
     }
 
@@ -259,6 +388,7 @@ class OpenAiCompatibleMatchPulseEnrichmentService implements MatchPulseEnrichmen
 
   private async createChatCompletionResult(
     messages: readonly { role: 'system' | 'user'; content: string }[],
+    maxTokens = 220,
   ): Promise<ChatCompletionResult> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.llmTimeoutMs);
@@ -275,8 +405,8 @@ class OpenAiCompatibleMatchPulseEnrichmentService implements MatchPulseEnrichmen
           messages,
           temperature: 0.4,
           ...getProviderRequestOptions(this.config.llmModel),
-          max_tokens: 220,
-          max_completion_tokens: 220,
+          max_tokens: maxTokens,
+          max_completion_tokens: maxTokens,
           response_format: { type: 'json_object' },
         }),
         signal: controller.signal,
@@ -338,13 +468,9 @@ function toStageTrace(
   };
 }
 
-export function buildCommentaryEnrichmentPrompt(
-  context: MatchPulseCommentaryGroundingContext,
-  entry: MatchPulseCommentaryEntry,
-  previousEntries: readonly MatchPulseCommentaryEntry[],
-): readonly { role: 'system' | 'user'; content: string }[] {
+function buildMustCoverFacts(entry: MatchPulseCommentaryEntry) {
   const orderedSources = [...entry.sourceEvents].sort(compareSourceEventsBySeq);
-  const mustCoverFacts = entry.groundedFacts?.length
+  return entry.groundedFacts?.length
     ? entry.groundedFacts.map((fact) => fact.playerName
       ? { ...fact, playerName: displayPlayerName(fact.playerName) }
       : fact)
@@ -358,17 +484,13 @@ export function buildCommentaryEnrichmentPrompt(
         value: {},
         sourceSeqs: source.seq === undefined ? [] : [source.seq],
       }));
-  const importance = getCommentaryImportance(entry);
-  const recentSpoken = previousEntries
-    .filter((previous) => previous.commentary.trim().length > 0)
-    .slice(-4);
-  const immediatelyPrevious = recentSpoken.at(-1);
-  const momentClass = classifyMomentClass(entry.kind, entry.narrative);
-  const modelInput = {
-    match: {
-      home: context.homeTeam.name,
-      away: context.awayTeam.name,
-    },
+}
+
+function buildBeatPayload(
+  entry: MatchPulseCommentaryEntry,
+  previousTimelineEntry: MatchPulseCommentaryEntry | undefined,
+) {
+  return {
     contract: {
       entryId: entry.id,
       batchId: entry.batchId,
@@ -382,18 +504,87 @@ export function buildCommentaryEnrichmentPrompt(
     },
     currentBeat: {
       kind: entry.kind,
-      importance,
+      importance: getCommentaryImportance(entry),
       intensity: entry.intensity,
       phase: entry.period,
       clock: entry.clock.label,
       score: entry.scoreAtMoment ? `${entry.scoreAtMoment.home}-${entry.scoreAtMoment.away}` : undefined,
       team: entry.team?.name,
       opponent: entry.opponent?.name,
-      development: classifyBeatDevelopment(entry, immediatelyPrevious),
-      momentClass,
-      mustCoverFacts,
+      development: classifyBeatDevelopment(entry, previousTimelineEntry),
+      relationToPrevious: classifyRelationToPrevious(entry, previousTimelineEntry),
+      momentClass: classifyMomentClass(entry.kind, entry.narrative),
+      mustCoverFacts: buildMustCoverFacts(entry),
       ...(entry.narrative ? { narrative: serializeNarrativeForPrompt(entry.narrative) } : {}),
     },
+  };
+}
+
+const COMMENTARY_SHARED_SYSTEM_PROMPT: readonly string[] = [
+  'You are GameCrew Match Pulse, a football commentator writing one immediate caption per event for a rolling live feed.',
+  'Sound like a human commentator speaking to supporters who are following live, not like an event log, notification template, or data analyst.',
+  '',
+  'SELF-CONTAINMENT — the most important rule:',
+  'Each line is displayed on its own and can become the first visible line on screen, with everything before it gone.',
+  'Every line must make complete sense read alone: always name the team involved, and never lean on an earlier line through unresolved references.',
+  'Never write "that spell", "another one", "it" as the subject of the action, or "they" without naming the team in the same line.',
+  'A line may acknowledge the run of play, but only through the teams — "Spain are still working the ball", "France finally win it back". Never name a specific event type (corner, throw-in, free kick, restart, substitution, goal, card) unless that event is in the line\'s own mustCoverFacts, with one exception: a line may look back at an event from the shown previous lines using "after", "following", or "since" ("after the substitution, France settle again", "since the goal, Spain have controlled it") — never at a penalty or a VAR decision.',
+  'Use "another" or "again" with an event noun only when your own entry\'s facts repeat that action; otherwise phrase continuation through the team instead.',
+  '',
+  'SEQUENCE AND CONTINUITY:',
+  'Entries are in true match order. Treat previously accepted lines as words you have already spoken during the same broadcast.',
+  'Each line answers: what is happening now? Use relationToPrevious to shape how the line connects while staying self-contained:',
+  'starts_spell: the named team begins a fresh period on the ball — a clean, fresh opening.',
+  'continues_pressure: the same team remains on top — vary the phrasing, acknowledge the continuing spell, and still name the team.',
+  'possession_flip: the ball changes hands — make the handover from one named team to the other clear.',
+  'new_attempt: a discrete event (set piece, shot, corner, free kick, throw-in) inside the current flow — report it plainly.',
+  'restart_resets_spell: play restarts (kickoff, second half, after a goal) — the previous rhythm is over; open cleanly.',
+  'break_in_play: a pause such as a substitution or injury — a calm interruption note.',
+  'major_moment: the biggest register — follow the momentClass instruction.',
+  'A line may only reference events that came earlier. Never mention, hint at, or set up any event that appears later, even when you can see it in the same request.',
+  'The interface already shows the minute. Omit it from routine commentary unless timing itself makes the moment significant.',
+  'Do not keep repeating the score, competition, matchup, or both full team names when listeners already have that context.',
+  '',
+  'VOICE:',
+  'Use natural spoken football English with varied sentence openings and rhythm. Consecutive lines must not open the same way.',
+  'Match the importance: routine needs one concise sentence; developing may use one or two connected sentences; major may breathe for two or three short sentences.',
+  'Do not manufacture drama; never invent facts to justify excitement.',
+  'Avoid event-log phrasing, stat-list phrasing, and stock lines such as looking to, setting the tempo, building pressure, knocking on the door, early doors, warning signs, or asking questions.',
+  'For kickoff, prefer one direct line such as "And we are underway" or "[Team] get us underway". Do not say kickoff and the game begins in the same line.',
+  '',
+  'STYLE EXAMPLES — copy the movement, never the facts or bracketed placeholders:',
+  '"[Team] get us underway."',
+  '"[Team] work the ball forward again, still dictating this stretch of play."',
+  '"A corner now for [Team], won at the end of a patient move."',
+  '"[Opponent] finally take the ball back off [Team]."',
+  '"Free kick to [Team], a moment to reset after [Opponent] had settled on the ball."',
+  '',
+  'GROUNDING:',
+  'Each entry and its mustCoverFacts are the only authority for what happened in that entry. Earlier lines are continuity context, not evidence for a new current fact.',
+  'Cover every mustCoverFact in its supplied seq order. coveredFrameIds is an auditable claim of which supplied facts the line covers, not permission to add facts.',
+  'Sparse event data is not full play-by-play. Do not invent causal links, player names, formations, injuries, exact locations, possession, chance quality, or event outcomes.',
+  'Do not invent crowd, stadium, celebration, referee-action, score-state, or atmosphere details. Do not describe what can be heard or say that the place lifts or erupts. Mention a lead or score only when the entry score supplies it.',
+  'Do not mention the box, goalkeeper, save, miss, block, clearance, delivery, cross, header, goal, card, penalty, VAR, or score change unless that fact is explicitly supplied for the current entry.',
+  'In particular, when current events contain only shots, corners, free kicks, or throw-ins, do not use goal, goalward, goalmouth, net, scorer, opener, breakthrough, or scoring language.',
+  'Do not name pitch zones or locations — location data is never supplied. Forbidden location words include: third, thirds, flank, wing, byline, box, area, post, centre circle, own half, opposition half, "high up the pitch". Say "push forward", "move into a dangerous position", or "drop deeper" instead.',
+  'Never expose confidence, verification, source, validation, action-label, or schema terminology to the supporter.',
+];
+
+export function buildCommentaryEnrichmentPrompt(
+  context: MatchPulseCommentaryGroundingContext,
+  entry: MatchPulseCommentaryEntry,
+  previousEntries: readonly MatchPulseCommentaryEntry[],
+): readonly { role: 'system' | 'user'; content: string }[] {
+  const recentSpoken = previousEntries
+    .filter((previous) => previous.commentary.trim().length > 0)
+    .slice(-4);
+  const momentClass = classifyMomentClass(entry.kind, entry.narrative);
+  const modelInput = {
+    match: {
+      home: context.homeTeam.name,
+      away: context.awayTeam.name,
+    },
+    ...buildBeatPayload(entry, previousEntries.at(-1)),
     broadcastMemory: {
       lastMajorIncident: [...previousEntries]
         .reverse()
@@ -419,44 +610,71 @@ export function buildCommentaryEnrichmentPrompt(
     {
       role: 'system',
       content: [
-        'You are GameCrew Match Pulse, a football commentator following the match moment by moment.',
-        'Sound like a human commentator speaking to supporters who are following live, not like an event log, notification template, or data analyst.',
-        '',
-        'CONTINUITY:',
-        'Write only the current update, but treat recent commentary as words you have already spoken during the same live broadcast.',
-        'Make the new line answer: what changed since the previous line?',
-        'If recent actions show a repeated event, acknowledge it naturally with another, again, still, or the pressure continues.',
-        'Never say another or again unless the supplied records establish the earlier action.',
-        'The interface already shows the minute. Omit it from routine commentary unless timing itself makes the moment significant.',
-        'Do not keep repeating the score, competition, matchup, or both full team names when listeners already have that context.',
-        '',
-        'VOICE:',
-        'Use natural spoken football English with varied sentence openings and rhythm.',
-        'Match the currentBeat importance: routine needs one concise connected sentence; developing may use one or two connected sentences; major may breathe for two or three short sentences.',
+        ...COMMENTARY_SHARED_SYSTEM_PROMPT,
         getMomentClassRegisterInstruction(momentClass),
-        'Do not manufacture drama beyond the register instruction above; never invent facts to justify excitement.',
-        'Avoid event-log phrasing, stat-list phrasing, and stock lines such as looking to, setting the tempo, building pressure, knocking on the door, early doors, warning signs, or asking questions.',
-        'For kickoff, prefer one direct line such as "And we are underway" or "[Team] get us underway". Do not say kickoff and the game begins in the same line.',
-        '',
-        'STYLE EXAMPLE — copy the conversational movement, never its facts or bracketed placeholders:',
-        '"[Team] get us underway."',
-        '"[Team] take an early throw-in before winning a free kick moments later."',
-        '"Another one for [Team] moments later. [Opponent] have barely managed to get out."',
-        '"That spell now brings a shot from [Team]."',
-        '"That early pressure continues: a corner for [Team], followed by two efforts."',
-        '',
-        'GROUNDING:',
-        'The currentBeat and its mustCoverFacts are the only authority for what happened now. Broadcast memory is continuity context, not evidence for a new current fact.',
-        'Cover every mustCoverFact in its supplied seq order. coveredFrameIds is an auditable claim of which supplied facts the line covers, not permission to add facts.',
-        'Sparse event data is not full play-by-play. Do not invent causal links, player names, formations, injuries, exact locations, possession, chance quality, or event outcomes.',
-        'Do not invent crowd, stadium, celebration, referee-action, score-state, or atmosphere details. Do not describe what can be heard or say that the place lifts or erupts. Mention a lead or score only when currentBeat.score supplies it.',
-        'Do not mention the box, goalkeeper, save, miss, block, clearance, delivery, cross, header, goal, card, penalty, VAR, or score change unless that fact is explicitly supplied for the current entry.',
-        'In particular, when current events contain only shots, corners, free kicks, or throw-ins, do not use goal, goalward, goalmouth, net, scorer, opener, breakthrough, or scoring language.',
-        'Never expose confidence, verification, source, validation, action-label, or schema terminology to the supporter.',
         '',
         'OUTPUT:',
         'Return only valid JSON.',
         'Use exactly this shape: {"entryId":"echo contract.entryId","batchId":"echo contract.batchId","projectionGeneration":0,"commentary":"...","voiceLine":"optional shorter spoken alternative","coveredFrameIds":["every requiredCoveredFrameId"]}. Echo contract.projectionGeneration as the number when supplied; otherwise omit it.',
+        'Omit voiceLine when it would merely repeat commentary.',
+      ].join(' '),
+    },
+    {
+      role: 'user',
+      content: JSON.stringify(modelInput),
+    },
+  ];
+}
+
+export function buildCommentaryMinuteBatchPrompt(
+  context: MatchPulseCommentaryGroundingContext,
+  batch: readonly MatchPulseCommentaryEntry[],
+  previousTimelineEntry: MatchPulseCommentaryEntry | undefined,
+  previousAcceptedEntries: readonly MatchPulseCommentaryEntry[],
+): readonly { role: 'system' | 'user'; content: string }[] {
+  const firstEntry = batch[0]!;
+  const previousAccepted = previousAcceptedEntries
+    .filter((previous) => previous.commentary.trim().length > 0)
+    .slice(-3);
+  const modelInput = {
+    match: {
+      home: context.homeTeam.name,
+      away: context.awayTeam.name,
+    },
+    batch: {
+      minute: firstEntry.clock.label,
+      period: firstEntry.period,
+      promptVersion: COMMENTARY_PROMPT_VERSION,
+      entryCount: batch.length,
+    },
+    previousAcceptedLines: previousAccepted.map((previous) => ({
+      clock: previous.clock.label,
+      team: previous.team?.name,
+      commentary: previous.commentary,
+    })),
+    entries: batch.map((entry, index) => ({
+      order: index + 1,
+      ...buildBeatPayload(entry, index === 0 ? previousTimelineEntry : batch[index - 1]),
+    })),
+  };
+
+  return [
+    {
+      role: 'system',
+      content: [
+        ...COMMENTARY_SHARED_SYSTEM_PROMPT,
+        '',
+        'BATCH CONTRACT:',
+        'The request supplies every entry for one match minute, in true order.',
+        'Return exactly one result for every entry, in the same order — never a combined summary, never a skipped entry, never an extra result.',
+        'Write each line so that the batch reads as consecutive moments of one broadcast, while every individual line still stands alone.',
+        'Each result covers only its own entry and its own mustCoverFacts. Never let a neighbouring entry\'s event leak into a line: the restart, throw-in, corner, substitution, or goal that appears elsewhere in this batch is narrated only by its own entry, and no other line may mention it, foreshadow it, or react to it by name.',
+        '',
+        'OUTPUT:',
+        'Return only valid JSON.',
+        'Use exactly this shape: {"results":[{"entryId":"echo the entry contract.entryId","commentary":"...","voiceLine":"optional shorter spoken alternative","coveredFrameIds":["every requiredCoveredFrameId of that entry"]}]}.',
+        'The results array must contain one object per supplied entry, in the supplied order.',
+        'Follow each entry momentClass register: standard stays calm and measured; notable carries weight without shouting; elevated is high energy; maximum is the biggest register with real excitement.',
         'Omit voiceLine when it would merely repeat commentary.',
       ].join(' '),
     },
@@ -500,9 +718,18 @@ export function buildCommentaryReflectionPrompt(
   ];
 }
 
+/**
+ * Only major beats (goals, cards, VAR, phase changes) earn a second polishing
+ * request. Routine and developing beats are written once inside their minute
+ * batch — the batch itself is the continuity mechanism.
+ */
 function shouldReflectCommentary(entry: MatchPulseCommentaryEntry): boolean {
-  const importance = getCommentaryImportance(entry);
-  return importance === 'major' || importance === 'developing';
+  return getCommentaryImportance(entry) === 'major';
+}
+
+/** Completion budget for a minute batch: enough for every line plus JSON overhead. */
+function batchMaxTokens(entryCount: number): number {
+  return Math.min(4_000, 300 + 130 * entryCount);
 }
 
 function compareSourceEventsBySeq(
@@ -677,13 +904,45 @@ export function parseCommentaryLlmJson(content: string): MatchPulseCommentaryLlm
     throw new Error('Commentary LLM response must include commentary.');
   }
 
+  return toCommentaryLlmJson(candidate, candidate.commentary);
+}
+
+/**
+ * Parses a minute-batch response into one candidate per returned entry.
+ * Individually malformed items survive as empty-commentary candidates so a
+ * single bad row fails only its own entry during validation — but a response
+ * with no readable results array at all throws, which the caller treats as a
+ * retryable provider fault.
+ */
+export function parseCommentaryBatchLlmJson(content: string): MatchPulseCommentaryLlmJson[] {
+  const parsed = JSON.parse(extractJsonValue(content)) as unknown;
+  const items = Array.isArray(parsed)
+    ? parsed
+    : (parsed && typeof parsed === 'object' && Array.isArray((parsed as { results?: unknown }).results))
+      ? (parsed as { results: unknown[] }).results
+      : undefined;
+  if (!items) {
+    throw new Error('Batch commentary response did not include a results array.');
+  }
+  return items
+    .filter((item): item is Partial<MatchPulseCommentaryLlmJson> => Boolean(item) && typeof item === 'object')
+    .map((item) => toCommentaryLlmJson(
+      item,
+      typeof item.commentary === 'string' ? item.commentary : '',
+    ));
+}
+
+function toCommentaryLlmJson(
+  candidate: Partial<MatchPulseCommentaryLlmJson>,
+  commentary: string,
+): MatchPulseCommentaryLlmJson {
   return {
     entryId: typeof candidate.entryId === 'string' ? candidate.entryId : undefined,
     batchId: typeof candidate.batchId === 'string' ? candidate.batchId : undefined,
     projectionGeneration: typeof candidate.projectionGeneration === 'number'
       ? candidate.projectionGeneration
       : undefined,
-    commentary: candidate.commentary,
+    commentary,
     voiceLine: typeof candidate.voiceLine === 'string' ? candidate.voiceLine : undefined,
     coveredFrameIds: Array.isArray(candidate.coveredFrameIds)
       ? candidate.coveredFrameIds.filter((value): value is string => typeof value === 'string')
@@ -725,11 +984,15 @@ export function validateCommentaryLlmJson(
     throw new CommentaryValidationError('Commentary must be non-empty.');
   }
 
-  if (llmJson.entryId !== entry.id || llmJson.batchId !== entry.batchId) {
+  // entryId is the matching key and must always echo correctly; batchId and
+  // projectionGeneration are redundant echoes that only need to be consistent
+  // when the model chooses to repeat them.
+  if (llmJson.entryId !== entry.id || (llmJson.batchId !== undefined && llmJson.batchId !== entry.batchId)) {
     throw new CommentaryValidationError('Commentary contract metadata does not match the current entry generation.');
   }
   if (
     entry.projectionGeneration !== undefined
+    && llmJson.projectionGeneration !== undefined
     && llmJson.projectionGeneration !== entry.projectionGeneration
   ) {
     throw new CommentaryValidationError('Commentary projection generation does not match the current engine generation.');
@@ -764,6 +1027,12 @@ export function validateCommentaryLlmJson(
     throw new CommentaryValidationError('Commentary cannot expose validation or confidence metadata.');
   }
 
+  // Every line can become the first visible line of the overlay, so it must
+  // never lean on a previous line through an unresolved reference.
+  if (/\bthat spell\b|\banother one\b/i.test(combined)) {
+    throw new CommentaryValidationError('Commentary must be self-contained: avoid unresolved references like "that spell" or "another one".');
+  }
+
   const sourceActions = new Set([
     ...entry.sourceEvents.map((source) => normalizeAction(source.action)),
     ...(entry.groundedFacts ?? []).flatMap((fact) => [
@@ -774,7 +1043,10 @@ export function validateCommentaryLlmJson(
   assertNoUnsupportedClaim(
     combined,
     'goal',
-    entry.kind === 'goal' || sourceActions.has('goal') || getRestartContext(entry) === 'after_goal',
+    entry.kind === 'goal'
+      || sourceActions.has('goal')
+      || getRestartContext(entry) === 'after_goal'
+      || isAllowedBackwardActionReference(combined, 'goal', /\bgoal(?:s|ed|ing)?(?![ -]?kick)\b/gi, previousEntries),
   );
   assertNoUnsupportedClaim(combined, 'penalty', entry.kind === 'penalty' || sourceActions.has('penalty'));
   assertNoUnsupportedClaim(combined, 'var', entry.kind === 'var' || sourceActions.has('var'));
@@ -848,7 +1120,7 @@ export function validateCommentaryLlmJson(
   }
   assertNoFutureSpeculation(combined, entry);
 
-  assertClosedWorldMaterialActions(combined, sourceActions, entry);
+  assertClosedWorldMaterialActions(combined, sourceActions, entry, previousEntries);
   assertMaterialActionCoverage(commentary, sourceActions, entry);
   assertGroundedTeamAttribution(combined, context, entry);
   assertGroundedMultiplicity(commentary, entry);
@@ -956,11 +1228,53 @@ const MATERIAL_ACTIONS: readonly {
   { actions: ['restart'], pattern: /\b(?:kick[ -]?off|underway|restarts?|restarted)\b/i, label: 'restart' },
 ];
 
+/**
+ * Actions a line may look back at ("after the substitution, France settle",
+ * "since the goal, Spain have kept the ball") when the action is grounded in
+ * the recent timeline AND every mention sits in an explicit backward
+ * construction (after/following/since) — so it can never read as a new
+ * current event. Penalty and VAR stay excluded: their lifecycle is too
+ * sensitive to reference loosely.
+ */
+const BACKWARD_REFERENCEABLE_ACTIONS: ReadonlySet<string> = new Set([
+  'restart', 'substitution', 'injury', 'corner', 'free_kick', 'throw_in',
+  'goal_kick', 'shot', 'additional_time', 'offside', 'goal',
+  'yellow_card', 'red_card',
+]);
+
+function recentGroundedActions(
+  previousEntries: readonly MatchPulseCommentaryEntry[],
+): Set<string> {
+  return new Set(previousEntries.slice(-4).flatMap((previous) =>
+    (previous.groundedFacts ?? [])
+      .filter((fact) => normalizeCueKind(fact.kind) !== 'incident_retracted')
+      .flatMap((fact) => [normalizeAction(fact.action), normalizeCueKind(fact.kind)])
+      .filter(Boolean)));
+}
+
+/**
+ * True when `action` is backward-referenceable, grounded in the recent
+ * timeline, and every occurrence of `pattern` in `text` is an explicit
+ * backward construction.
+ */
+function isAllowedBackwardActionReference(
+  text: string,
+  action: string,
+  pattern: RegExp,
+  previousEntries: readonly MatchPulseCommentaryEntry[],
+): boolean {
+  return BACKWARD_REFERENCEABLE_ACTIONS.has(action)
+    && recentGroundedActions(previousEntries).has(action)
+    && isBackwardReferenceOnly(text, pattern);
+}
+
 function assertClosedWorldMaterialActions(
   text: string,
   sourceActions: ReadonlySet<string>,
   entry: MatchPulseCommentaryEntry,
+  previousEntries: readonly MatchPulseCommentaryEntry[] = [],
 ): void {
+  const previousActions = recentGroundedActions(previousEntries);
   for (const claim of MATERIAL_ACTIONS) {
     const claimText = claim.label === 'shot' && sourceActions.has('goal')
       ? text.replace(/\bstrikes? first\b/gi, '')
@@ -973,9 +1287,27 @@ function assertClosedWorldMaterialActions(
       && !contextualAddedTime
       && !claim.actions.some((action) => sourceActions.has(action))
     ) {
-      throw new CommentaryValidationError(`Commentary made unsupported ${claim.label} claim.`);
+      const groundedEarlier = claim.actions.some((action) =>
+        BACKWARD_REFERENCEABLE_ACTIONS.has(action) && previousActions.has(action));
+      if (!groundedEarlier || !isBackwardReferenceOnly(claimText, claim.pattern)) {
+        throw new CommentaryValidationError(`Commentary made unsupported ${claim.label} claim.`);
+      }
     }
   }
+}
+
+/**
+ * True when every occurrence of `pattern` in `text` sits inside an explicitly
+ * backward-looking construction ("after the restart", "following that France
+ * substitution") within the same sentence.
+ */
+function isBackwardReferenceOnly(text: string, pattern: RegExp): boolean {
+  const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`;
+  for (const match of text.matchAll(new RegExp(pattern.source, flags))) {
+    const preceding = text.slice(Math.max(0, (match.index ?? 0) - 48), match.index);
+    if (!/\b(?:after|following|since)\b[^.!?]*$/i.test(preceding)) return false;
+  }
+  return true;
 }
 
 function assertMaterialActionCoverage(
@@ -1175,6 +1507,31 @@ function hasGroundedPlayerReference(
   return !sharedByOtherPlayer;
 }
 
+/**
+ * Adjective forms of national team names. A line like "the French pressure
+ * continues" grounds "French" in the team name France — it is attribution,
+ * not an invented person. Extend as new fixtures need it; unknown team names
+ * simply get no adjective allowance (fail-closed, as before).
+ */
+const TEAM_NAME_DEMONYMS: Readonly<Record<string, readonly string[]>> = {
+  argentina: ['argentine', 'argentinian'],
+  belgium: ['belgian'],
+  brazil: ['brazilian'],
+  croatia: ['croatian'],
+  ecuador: ['ecuadorian', 'ecuadorean'],
+  england: ['english'],
+  france: ['french'],
+  germany: ['german'],
+  italy: ['italian'],
+  japan: ['japanese'],
+  mexico: ['mexican'],
+  morocco: ['moroccan'],
+  netherlands: ['dutch'],
+  portugal: ['portuguese'],
+  spain: ['spanish'],
+  uruguay: ['uruguayan'],
+};
+
 function assertNoInventedPlayerName(
   text: string,
   context: MatchPulseCommentaryGroundingContext,
@@ -1188,7 +1545,11 @@ function assertNoInventedPlayerName(
     entry.opponent?.name,
     ...(entry.groundedFacts ?? []).map((fact) => fact.playerName),
   ]) {
-    for (const token of String(value ?? '').match(/\p{L}+/gu) ?? []) allowed.add(normalizeForComparison(token));
+    for (const token of String(value ?? '').match(/\p{L}+/gu) ?? []) {
+      const normalized = normalizeForComparison(token);
+      allowed.add(normalized);
+      for (const demonym of TEAM_NAME_DEMONYMS[normalized] ?? []) allowed.add(demonym);
+    }
   }
   const common = new Set([
     'a', 'additional', 'after', 'an', 'and', 'another', 'away', 'corner', 'deep', 'first', 'free',
@@ -1444,4 +1805,17 @@ function extractJsonObject(content: string): string {
   }
 
   throw new Error('LLM response did not contain a JSON object.');
+}
+
+/** Like extractJsonObject but also accepts a bare top-level JSON array. */
+function extractJsonValue(content: string): string {
+  const trimmed = content.trim();
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) return trimmed;
+  const start = trimmed.indexOf('[');
+  const objectStart = trimmed.indexOf('{');
+  if (start !== -1 && (objectStart === -1 || start < objectStart)) {
+    const end = trimmed.lastIndexOf(']');
+    if (end > start) return trimmed.slice(start, end + 1);
+  }
+  return extractJsonObject(content);
 }

@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   buildCommentaryEnrichmentPrompt,
+  buildCommentaryMinuteBatchPrompt,
   classifyMomentClass,
+  classifyRelationToPrevious,
   createMatchPulseEnrichmentService,
   displayPlayerName,
+  groupEntriesIntoMinuteBatches,
   validateCommentaryLlmJson,
 } from '../src/match-pulse-llm.ts';
 
@@ -201,14 +204,16 @@ test('commentary validator rejects invented players, exact locations, and unsupp
     () => validateCommentaryLlmJson(workerContext, current, candidate('ronaldo takes the corner before Home have an effort.')),
     /ungrounded player as the actor/,
   );
-  assert.doesNotThrow(
+  assert.throws(
     () => validateCommentaryLlmJson(workerContext, current, candidate('That spell now brings a corner and an effort for Home.')),
+    /self-contained/,
+  );
+  assert.throws(
+    () => validateCommentaryLlmJson(workerContext, current, candidate('Another one for Home: a corner before an effort.')),
+    /self-contained/,
   );
   assert.doesNotThrow(
     () => validateCommentaryLlmJson(workerContext, current, candidate('Deep into the half, Home take a corner before an effort.')),
-  );
-  assert.doesNotThrow(
-    () => validateCommentaryLlmJson(workerContext, current, candidate('After that spell, Home take a corner before an effort.')),
   );
   assert.doesNotThrow(
     () => validateCommentaryLlmJson(workerContext, current, {
@@ -504,7 +509,38 @@ test('commentary validator requires lifecycle meaning for every narrated cue fam
   }
 });
 
-test('major beats reflect once and revise an invalid draft', async () => {
+function serviceConfig() {
+  return {
+    host: '127.0.0.1',
+    llmBaseUrl: 'https://llm.invalid',
+    llmEnabled: true,
+    llmBatchSize: 16,
+    llmModel: 'test-model',
+    llmTimeoutMs: 1_000,
+    matchPulseStoreDriver: 'sqlite',
+    matchPulseStorePath: 'unused',
+    matchPulseSqlitePath: 'unused',
+    port: 8787,
+    txlineApiToken: 'unused',
+    txlineBaseUrl: 'https://txline.invalid',
+    txlineFinalisationCorrectionMs: 0,
+  };
+}
+
+function mockFetchResponses(responses, requests) {
+  return async (_url, init) => {
+    requests.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(responses.shift()) } }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+}
+
+test('major beats reflect once and revise an invalid batch draft', async () => {
   const major = entry({
     kind: 'goal',
     intensity: 'major',
@@ -516,38 +552,15 @@ test('major beats reflect once and revise an invalid draft', async () => {
     fallbackCommentary: 'Goal for Home.',
   });
   const responses = [
-    { entryId: major.id, batchId: major.batchId, projectionGeneration: 4, commentary: 'Goal for Home, and the goalkeeper makes the save.', coveredFrameIds: ['semantic-frame-20'] },
+    { results: [{ entryId: major.id, commentary: 'Goal for Home, and the goalkeeper makes the save.', coveredFrameIds: ['semantic-frame-20'] }] },
     { entryId: major.id, batchId: major.batchId, projectionGeneration: 4, commentary: 'Goal for Home! They have the breakthrough.', coveredFrameIds: ['semantic-frame-20'] },
   ];
   const requests = [];
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (_url, init) => {
-    requests.push(JSON.parse(init.body));
-    return new Response(JSON.stringify({
-      choices: [{ message: { content: JSON.stringify(responses.shift()) } }],
-      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-    }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    });
-  };
+  globalThis.fetch = mockFetchResponses(responses, requests);
 
   try {
-    const service = createMatchPulseEnrichmentService({
-      host: '127.0.0.1',
-      llmBaseUrl: 'https://llm.invalid',
-      llmEnabled: true,
-      llmBatchSize: 4,
-      llmModel: 'test-model',
-      llmTimeoutMs: 1_000,
-      matchPulseStoreDriver: 'sqlite',
-      matchPulseStorePath: 'unused',
-      matchPulseSqlitePath: 'unused',
-      port: 8787,
-      txlineApiToken: 'unused',
-      txlineBaseUrl: 'https://txline.invalid',
-      txlineFinalisationCorrectionMs: 0,
-    });
+    const service = createMatchPulseEnrichmentService(serviceConfig());
     const result = await service.enrichCommentaryEntries(context, [major], []);
 
     assert.equal(requests.length, 2);
@@ -557,55 +570,64 @@ test('major beats reflect once and revise an invalid draft', async () => {
     assert.equal(result.failed, 0);
     assert.equal(result.entries[0].commentary, 'Goal for Home! They have the breakthrough.');
     assert.deepEqual(result.entries[0].coveredFrameIds, ['semantic-frame-20']);
-    assert.equal(result.entries[0].enrichmentPromptVersion, 'engine-commentary-v2-reflection');
+    assert.equal(result.entries[0].enrichmentPromptVersion, 'engine-commentary-v3-reflection');
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test('pressure beats reflect a valid draft once before saving the improved line', async () => {
-  const current = entry();
+test('major beats keep a valid batch draft when the reflection pass regresses', async () => {
+  const major = entry({
+    kind: 'goal',
+    intensity: 'major',
+    scoreAtMoment: undefined,
+    sourceEvents: [{ kind: 'txline_history', id: 'frame-20', seq: 20, action: 'goal', teamName: 'Home' }],
+    commentaryBeatKind: 'major',
+    sourceFrameIds: ['semantic-frame-20'],
+    groundedFacts: [{ id: 'goal', kind: 'goal_confirmed', action: 'goal', lifecycle: 'confirmed', basis: 'direct', teamId: 'home', value: { action: 'goal' }, sourceSeqs: [20] }],
+    fallbackCommentary: 'Goal for Home.',
+  });
   const responses = [
-    {
-      entryId: current.id, batchId: current.batchId, projectionGeneration: 4,
-      commentary: 'Home have a corner and an effort.',
-      coveredFrameIds: current.sourceFrameIds,
-    },
-    {
-      entryId: current.id, batchId: current.batchId, projectionGeneration: 4,
-      commentary: 'That spell now brings a corner and an effort for Home.',
-      coveredFrameIds: current.sourceFrameIds,
-    },
+    { results: [{ entryId: major.id, commentary: 'Goal for Home! They have the breakthrough.', coveredFrameIds: ['semantic-frame-20'] }] },
+    { entryId: major.id, batchId: major.batchId, projectionGeneration: 4, commentary: 'Goal for Home, and the goalkeeper makes the save.', coveredFrameIds: ['semantic-frame-20'] },
   ];
   const requests = [];
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (_url, init) => {
-    requests.push(JSON.parse(init.body));
-    return new Response(JSON.stringify({
-      choices: [{ message: { content: JSON.stringify(responses.shift()) } }],
-      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
-    }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    });
-  };
+  globalThis.fetch = mockFetchResponses(responses, requests);
+
   try {
-    const service = createMatchPulseEnrichmentService({
-      host: '127.0.0.1', llmBaseUrl: 'https://llm.invalid', llmEnabled: true, llmBatchSize: 4,
-      llmModel: 'test-model', llmTimeoutMs: 1_000, matchPulseStoreDriver: 'sqlite',
-      matchPulseStorePath: 'unused', matchPulseSqlitePath: 'unused', port: 8787,
-      txlineApiToken: 'unused', txlineBaseUrl: 'https://txline.invalid', txlineFinalisationCorrectionMs: 0,
-    });
-    const result = await service.enrichCommentaryEntries(workerContext, [current], []);
+    const service = createMatchPulseEnrichmentService(serviceConfig());
+    const result = await service.enrichCommentaryEntries(context, [major], []);
     assert.equal(requests.length, 2);
-    const reflection = JSON.parse(requests[1].messages.at(-1).content);
-    assert.equal(reflection.reflection, true);
-    assert.equal(reflection.validationFailure, undefined);
-    assert.equal(result.entries[0].commentary, 'That spell now brings a corner and an effort for Home.');
-    assert.equal(result.entries[0].enrichmentPromptVersion, 'engine-commentary-v2-reflection');
-    assert.deepEqual(result.traces?.[0].stages.map((stage) => [stage.stage, stage.commentary, stage.usage?.totalTokens]), [
-      ['draft', 'Home have a corner and an effort.', 15],
-      ['reflection', 'That spell now brings a corner and an effort for Home.', 15],
+    assert.equal(result.completed, 1);
+    assert.equal(result.entries[0].commentary, 'Goal for Home! They have the breakthrough.');
+    assert.equal(result.entries[0].enrichmentPromptVersion, 'engine-commentary-v3-immediate');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('pressure beats are written once inside the minute batch without a reflection request', async () => {
+  const current = entry();
+  const responses = [
+    { results: [{
+      entryId: current.id,
+      commentary: 'Home keep the pressure on with a corner, then follow it with an effort.',
+      coveredFrameIds: current.sourceFrameIds,
+    }] },
+  ];
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchResponses(responses, requests);
+  try {
+    const service = createMatchPulseEnrichmentService(serviceConfig());
+    const result = await service.enrichCommentaryEntries(workerContext, [current], []);
+    assert.equal(requests.length, 1);
+    assert.equal(result.completed, 1);
+    assert.equal(result.entries[0].commentary, 'Home keep the pressure on with a corner, then follow it with an effort.');
+    assert.equal(result.entries[0].enrichmentPromptVersion, 'engine-commentary-v3-immediate');
+    assert.deepEqual(result.traces?.[0].stages.map((stage) => [stage.stage, stage.usage?.totalTokens]), [
+      ['draft', 15],
     ]);
   } finally {
     globalThis.fetch = originalFetch;
@@ -622,26 +644,92 @@ test('routine beats fail without spending a repair request', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => {
     requests += 1;
-    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ results: [{
       entryId: current.id,
-      batchId: current.batchId,
-      projectionGeneration: 4,
       commentary: 'A save follows the corner.',
       coveredFrameIds: ['semantic-frame-20'],
-    }) } }] }), { status: 200 });
+    }] }) } }] }), { status: 200 });
   };
   try {
-    const service = createMatchPulseEnrichmentService({
-      host: '127.0.0.1', llmBaseUrl: 'https://llm.invalid', llmEnabled: true, llmBatchSize: 4,
-      llmModel: 'test-model', llmTimeoutMs: 1_000, matchPulseStoreDriver: 'sqlite',
-      matchPulseStorePath: 'unused', matchPulseSqlitePath: 'unused', port: 8787,
-      txlineApiToken: 'unused', txlineBaseUrl: 'https://txline.invalid', txlineFinalisationCorrectionMs: 0,
-    });
+    const service = createMatchPulseEnrichmentService(serviceConfig());
     const result = await service.enrichCommentaryEntries(context, [current], []);
     assert.equal(requests, 1);
     assert.equal(result.failed, 1);
     assert.equal(result.entries[0].enrichmentStatus, 'failed');
     assert.equal(result.entries[0].commentary, current.commentary);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('one invalid batch result fails only its own entry; the rest of the minute survives', async () => {
+  const first = entry({
+    id: 'entry-a', batchId: 'engine:entry-a',
+    clock: { minute: 61, seconds: 3_620, label: "61'" },
+    sourceFrameIds: ['semantic-frame-20'],
+    sourceEvents: [{ kind: 'system', id: 'semantic-frame-20', seq: 20, action: 'corner', teamName: 'Home' }],
+    groundedFacts: [{ id: 'cue-20', kind: 'set_piece', action: 'corner', lifecycle: 'confirmed', basis: 'direct', teamId: 'home', value: { action: 'corner' }, sourceSeqs: [20] }],
+  });
+  const second = entry({
+    id: 'entry-b', batchId: 'engine:entry-b',
+    clock: { minute: 61, seconds: 3_640, label: "61'" },
+    sourceFrameIds: ['semantic-frame-21'],
+    sourceEvents: [{ kind: 'system', id: 'semantic-frame-21', seq: 21, action: 'shot', teamName: 'Home' }],
+    groundedFacts: [{ id: 'cue-21', kind: 'shot_outcome', action: 'shot', lifecycle: 'confirmed', basis: 'direct', teamId: 'home', value: { action: 'shot' }, sourceSeqs: [21] }],
+  });
+  const third = entry({
+    id: 'entry-c', batchId: 'engine:entry-c',
+    clock: { minute: 61, seconds: 3_650, label: "61'" },
+    sourceFrameIds: ['semantic-frame-22'],
+    sourceEvents: [{ kind: 'system', id: 'semantic-frame-22', seq: 22, action: 'throw_in', teamName: 'Away' }],
+    team: { id: 'away', name: 'Away', side: 'away' },
+    groundedFacts: [{ id: 'cue-22', kind: 'set_piece', action: 'throw_in', lifecycle: 'confirmed', basis: 'direct', teamId: 'away', value: { action: 'throw_in' }, sourceSeqs: [22] }],
+  });
+  const responses = [
+    { results: [
+      { entryId: first.id, commentary: 'Home win a corner at the end of a patient move.', coveredFrameIds: ['semantic-frame-20'] },
+      { entryId: second.id, commentary: 'The goalkeeper saves the Home effort.', coveredFrameIds: ['semantic-frame-21'] },
+      // entry-c intentionally missing from the response.
+    ] },
+  ];
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetchResponses(responses, requests);
+  try {
+    const service = createMatchPulseEnrichmentService(serviceConfig());
+    const result = await service.enrichCommentaryEntries(
+      { ...workerContext, allowedSourceFrameIds: ['semantic-frame-20', 'semantic-frame-21', 'semantic-frame-22'] },
+      [first, second, third],
+      [],
+    );
+    assert.equal(requests.length, 1);
+    assert.deepEqual(
+      result.entries.map((resultEntry) => [resultEntry.id, resultEntry.enrichmentStatus]),
+      [['entry-a', 'complete'], ['entry-b', 'failed'], ['entry-c', 'failed']],
+    );
+    assert.equal(result.completed, 1);
+    assert.equal(result.failed, 2);
+    assert.match(result.traces?.[1].failureReason ?? '', /unsupported save claim/);
+    assert.match(result.traces?.[2].failureReason ?? '', /did not include a result/);
+    // The single batch request is accounted once, on the first entry.
+    assert.equal(result.traces?.[0].stages.length, 1);
+    assert.equal(result.traces?.[1].stages.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('an unreadable batch response rejects the whole call so the durable worker retries', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    choices: [{ message: { content: 'not json at all' } }],
+  }), { status: 200 });
+  try {
+    const service = createMatchPulseEnrichmentService(serviceConfig());
+    await assert.rejects(
+      service.enrichCommentaryEntries(context, [entry()], []),
+      (error) => error?.name === 'CommentaryProviderError',
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1181,4 +1269,217 @@ test('validator does not reject register-appropriate exclamation marks', () => {
   assert.doesNotThrow(() => validateCommentaryLlmJson(
     workerContext, goal, goalCandidateFor(goal, 'Ana Silva scores a dramatic late winner for Home! It is 2-1!'),
   ));
+});
+
+// --- relationToPrevious ------------------------------------------------------
+
+test('classifyRelationToPrevious derives the deterministic relation from grounded facts and team identity', () => {
+  const pressureFor = (teamId) => entry({
+    kind: 'danger',
+    team: { id: teamId, name: teamId === 'home' ? 'Home' : 'Away' },
+    sourceEvents: [{ kind: 'system', id: 'semantic-frame-20', seq: 20, action: undefined }],
+    groundedFacts: [{ id: 'cue', kind: 'possession_pressure', lifecycle: 'observed', basis: 'inferred', teamId, value: {}, sourceSeqs: [20] }],
+  });
+  const restart = entry({
+    kind: 'commentary',
+    sourceEvents: [{ kind: 'system', id: 'semantic-frame-20', seq: 20, action: 'restart' }],
+    groundedFacts: [{ id: 'cue', kind: 'restart', action: 'restart', lifecycle: 'confirmed', basis: 'direct', teamId: 'home', value: { kind: 'kickoff' }, sourceSeqs: [20] }],
+  });
+  const flip = entry({
+    kind: 'commentary',
+    sourceEvents: [{ kind: 'system', id: 'semantic-frame-20', seq: 20, action: undefined }],
+    groundedFacts: [{ id: 'cue', kind: 'possession_change', lifecycle: 'observed', basis: 'inferred', teamId: 'away', value: {}, sourceSeqs: [20] }],
+  });
+  const substitution = entry({
+    kind: 'substitution',
+    sourceEvents: [{ kind: 'system', id: 'semantic-frame-20', seq: 20, action: 'substitution' }],
+    groundedFacts: [{ id: 'cue', kind: 'substitution', action: 'substitution', lifecycle: 'confirmed', basis: 'direct', teamId: 'home', value: { action: 'substitution' }, sourceSeqs: [20] }],
+  });
+  const goal = entry({
+    kind: 'goal',
+    sourceEvents: [{ kind: 'system', id: 'semantic-frame-20', seq: 20, action: 'goal' }],
+    groundedFacts: [{ id: 'cue', kind: 'goal_confirmed', action: 'goal', lifecycle: 'confirmed', basis: 'direct', teamId: 'home', value: { action: 'goal' }, sourceSeqs: [20] }],
+  });
+
+  assert.equal(classifyRelationToPrevious(restart, undefined), 'restart_resets_spell');
+  assert.equal(classifyRelationToPrevious(flip, pressureFor('home')), 'possession_flip');
+  assert.equal(classifyRelationToPrevious(entry(), pressureFor('home')), 'new_attempt');
+  assert.equal(classifyRelationToPrevious(substitution, pressureFor('home')), 'break_in_play');
+  assert.equal(classifyRelationToPrevious(goal, pressureFor('home')), 'major_moment');
+  assert.equal(classifyRelationToPrevious(pressureFor('home'), pressureFor('home')), 'continues_pressure');
+  assert.equal(classifyRelationToPrevious(pressureFor('home'), pressureFor('away')), 'starts_spell');
+  assert.equal(classifyRelationToPrevious(pressureFor('home'), undefined), 'starts_spell');
+  assert.equal(classifyRelationToPrevious(pressureFor('home'), restart), 'starts_spell');
+});
+
+// --- minute batching ---------------------------------------------------------
+
+test('groupEntriesIntoMinuteBatches groups by period and minute, and splits busy minutes', () => {
+  const at = (id, period, minute) => entry({
+    id, period, clock: { minute, seconds: (minute - 1) * 60, label: `${minute}'` },
+  });
+  const batches = groupEntriesIntoMinuteBatches([
+    at('a', 'first_half', 46),
+    at('b', 'first_half', 46),
+    at('c', 'second_half', 46),
+    at('d', 'second_half', 47),
+  ]);
+  assert.deepEqual(batches.map((batch) => batch.map((item) => item.id)), [
+    ['a', 'b'],
+    ['c'],
+    ['d'],
+  ]);
+
+  const busy = Array.from({ length: 19 }, (_, index) => at(`busy-${index}`, 'first_half', 10));
+  const split = groupEntriesIntoMinuteBatches(busy, 16);
+  assert.deepEqual(split.map((batch) => batch.length), [10, 9]);
+  assert.deepEqual(split.flat().map((item) => item.id), busy.map((item) => item.id));
+});
+
+// --- minute-batch prompt -----------------------------------------------------
+
+test('the minute-batch prompt carries ordered entries, relations, and the previous three accepted lines', () => {
+  const acceptedLine = (id, commentary) => entry({
+    id, commentary, generation: 'llm', enrichmentStatus: 'complete',
+  });
+  const first = entry({ id: 'batch-1', clock: { minute: 61, seconds: 3_610, label: "61'" } });
+  const second = entry({
+    id: 'batch-2',
+    clock: { minute: 61, seconds: 3_640, label: "61'" },
+    kind: 'danger',
+    sourceEvents: [{ kind: 'system', id: 'semantic-frame-21', seq: 21, action: undefined }],
+    sourceFrameIds: ['semantic-frame-21'],
+    groundedFacts: [{ id: 'cue', kind: 'possession_pressure', lifecycle: 'observed', basis: 'inferred', teamId: 'home', value: {}, sourceSeqs: [21] }],
+  });
+  const messages = buildCommentaryMinuteBatchPrompt(
+    workerContext,
+    [first, second],
+    undefined,
+    [
+      acceptedLine('old-1', 'Line one.'),
+      acceptedLine('old-2', 'Line two.'),
+      acceptedLine('old-3', 'Line three.'),
+      acceptedLine('old-4', 'Line four.'),
+    ],
+  );
+  const input = JSON.parse(messages[1].content);
+  assert.equal(input.batch.entryCount, 2);
+  assert.deepEqual(input.previousAcceptedLines.map((line) => line.commentary), [
+    'Line two.', 'Line three.', 'Line four.',
+  ]);
+  assert.deepEqual(input.entries.map((item) => item.order), [1, 2]);
+  assert.equal(input.entries[0].contract.entryId, 'batch-1');
+  assert.equal(input.entries[0].currentBeat.relationToPrevious, 'new_attempt');
+  assert.equal(input.entries[1].currentBeat.relationToPrevious, 'continues_pressure');
+  assert.match(messages[0].content, /exactly one result for every entry/);
+  assert.match(messages[0].content, /Never mention, hint at, or set up any event that appears later/);
+  assert.doesNotMatch(messages[0].content, /That spell now brings/);
+});
+
+// --- loosened validators -----------------------------------------------------
+
+test('the validator accepts grounded team demonyms as attribution, not invented names', () => {
+  const franceContext = {
+    homeTeam: { id: 'fr', name: 'France' },
+    awayTeam: { id: 'es', name: 'Spain' },
+  };
+  const current = entry({
+    team: { id: 'fr', name: 'France', side: 'home' },
+    opponent: { id: 'es', name: 'Spain', side: 'away' },
+    groundedFacts: entry().groundedFacts.map((fact) => ({ ...fact, teamId: 'fr' })),
+  });
+  const candidate = (commentary) => ({
+    entryId: current.id,
+    commentary,
+    coveredFrameIds: ['semantic-frame-20', 'semantic-frame-21'],
+  });
+  assert.doesNotThrow(() => validateCommentaryLlmJson(
+    franceContext, current, candidate('France win a corner, and the French effort follows soon after.'),
+  ));
+  assert.throws(
+    () => validateCommentaryLlmJson(franceContext, current, candidate('France win a corner before the Brazilian effort.')),
+    /ungrounded proper name/,
+  );
+});
+
+test('the validator only requires batchId and projectionGeneration echoes when the model repeats them', () => {
+  const current = entry();
+  const minimal = {
+    entryId: current.id,
+    commentary: 'Home sustain the pressure with a corner, then follow it with an effort.',
+    coveredFrameIds: ['semantic-frame-20', 'semantic-frame-21'],
+  };
+  assert.doesNotThrow(() => validateCommentaryLlmJson(workerContext, current, minimal));
+  assert.throws(
+    () => validateCommentaryLlmJson(workerContext, current, { ...minimal, batchId: 'wrong-batch' }),
+    /metadata does not match/,
+  );
+  assert.throws(
+    () => validateCommentaryLlmJson(workerContext, current, { ...minimal, projectionGeneration: 3 }),
+    /projection generation does not match/,
+  );
+  assert.throws(
+    () => validateCommentaryLlmJson(workerContext, current, { ...minimal, entryId: 'someone-else' }),
+    /metadata does not match/,
+  );
+});
+
+test('a line may look back at a recent grounded event with after/following, but never claim it as current', () => {
+  const possession = entry({
+    kind: 'danger',
+    sourceFrameIds: ['semantic-frame-21'],
+    sourceEvents: [{ kind: 'system', id: 'semantic-frame-21', seq: 21, action: undefined }],
+    groundedFacts: [{ id: 'cue-21', kind: 'possession_pressure', lifecycle: 'observed', basis: 'inferred', teamId: 'home', value: {}, sourceSeqs: [21] }],
+  });
+  const previousSubstitution = entry({
+    id: 'previous-sub',
+    sourceEvents: [{ kind: 'system', id: 'semantic-frame-20', seq: 20, action: 'substitution', teamName: 'Home' }],
+    groundedFacts: [{ id: 'cue-20', kind: 'substitution', action: 'substitution', lifecycle: 'confirmed', basis: 'direct', teamId: 'home', value: { action: 'substitution' }, sourceSeqs: [20] }],
+    commentary: 'Home make a change.',
+  });
+  const candidate = (commentary) => ({
+    entryId: possession.id,
+    commentary,
+    coveredFrameIds: ['semantic-frame-21'],
+  });
+  const scopedContext = { ...workerContext, allowedSourceFrameIds: ['semantic-frame-20', 'semantic-frame-21'] };
+  assert.doesNotThrow(() => validateCommentaryLlmJson(
+    scopedContext, possession, candidate('After the substitution, Home settle back into possession.'), [previousSubstitution],
+  ));
+  // The same event claimed as current (no backward marker) still fails.
+  assert.throws(
+    () => validateCommentaryLlmJson(scopedContext, possession, candidate('Home make a substitution and keep the ball.'), [previousSubstitution]),
+    /unsupported substitution claim/,
+  );
+  // A backward reference with no grounded earlier event still fails.
+  assert.throws(
+    () => validateCommentaryLlmJson(scopedContext, possession, candidate('After the substitution, Home settle back into possession.'), []),
+    /unsupported substitution claim/,
+  );
+  // A recent grounded goal may be looked back at with an explicit marker...
+  const previousGoal = entry({
+    id: 'previous-goal',
+    sourceEvents: [{ kind: 'system', id: 'semantic-frame-19', seq: 19, action: 'goal', teamName: 'Home' }],
+    groundedFacts: [{ id: 'cue-19', kind: 'goal_confirmed', action: 'goal', lifecycle: 'confirmed', basis: 'direct', teamId: 'home', value: { action: 'goal' }, sourceSeqs: [19] }],
+    commentary: 'Goal for Home.',
+  });
+  assert.doesNotThrow(() => validateCommentaryLlmJson(
+    scopedContext, possession, candidate('After the goal, Home keep the ball moving.'), [previousGoal],
+  ));
+  // ...but never claimed as a new current goal.
+  assert.throws(
+    () => validateCommentaryLlmJson(scopedContext, possession, candidate('Home score and keep the ball moving.'), [previousGoal]),
+    /unsupported goal claim/,
+  );
+  // Penalties are never backward-referenceable.
+  const previousPenalty = entry({
+    id: 'previous-penalty',
+    sourceEvents: [{ kind: 'system', id: 'semantic-frame-18', seq: 18, action: 'penalty', teamName: 'Home' }],
+    groundedFacts: [{ id: 'cue-18', kind: 'penalty', action: 'penalty', lifecycle: 'confirmed', basis: 'direct', teamId: 'home', value: { action: 'penalty' }, sourceSeqs: [18] }],
+    commentary: 'Penalty to Home.',
+  });
+  assert.throws(
+    () => validateCommentaryLlmJson(scopedContext, possession, candidate('After the penalty, Home keep the ball moving.'), [previousPenalty]),
+    /unsupported penalty claim/,
+  );
 });

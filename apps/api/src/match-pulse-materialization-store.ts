@@ -105,6 +105,7 @@ export class MatchPulseMaterializationStore {
       DatabaseSync: new (databasePath: string) => SqliteDatabase;
     };
     this.db = new DatabaseSync(path);
+    this.db.exec('PRAGMA busy_timeout = 5000;');
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS match_pulse_materializations (

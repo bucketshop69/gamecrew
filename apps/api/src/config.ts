@@ -31,7 +31,7 @@ export function loadConfig(): ApiConfig {
     llmApiKey: process.env.MATCH_PULSE_LLM_API_KEY ?? env.MATCH_PULSE_LLM_API_KEY,
     llmBaseUrl: normalizeOptionalUrl(process.env.MATCH_PULSE_LLM_BASE_URL ?? env.MATCH_PULSE_LLM_BASE_URL),
     llmEnabled: parseBoolean(process.env.MATCH_PULSE_LLM_ENABLED ?? env.MATCH_PULSE_LLM_ENABLED),
-    llmBatchSize: Number(process.env.MATCH_PULSE_LLM_BATCH_SIZE ?? env.MATCH_PULSE_LLM_BATCH_SIZE ?? 4),
+    llmBatchSize: Number(process.env.MATCH_PULSE_LLM_BATCH_SIZE ?? env.MATCH_PULSE_LLM_BATCH_SIZE ?? 16),
     llmModel: process.env.MATCH_PULSE_LLM_MODEL ?? env.MATCH_PULSE_LLM_MODEL ?? 'gemma-4-12b-it',
     llmTimeoutMs: Number(process.env.MATCH_PULSE_LLM_TIMEOUT_MS ?? env.MATCH_PULSE_LLM_TIMEOUT_MS ?? 20_000),
     matchPulseStoreDriver: parseMatchPulseStoreDriver(

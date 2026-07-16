@@ -11,35 +11,52 @@ import { TxlineFeedSource } from './ingestion/txline-feed-source.js';
 
 const fixtureId = process.argv.find((value) => /^\d+$/.test(value)) ?? '18179759';
 const config = loadConfig();
+const databasePath = resolve(process.cwd(), `.data/match-ingestion-${fixtureId}.sqlite`);
+const store = new SqliteIngestionStore(databasePath);
 const client = new TxlineApiClient({ baseUrl: config.txlineBaseUrl, apiToken: config.txlineApiToken });
 const auth = new TxlineAuthSession(client);
 const feed = new TxlineFeedSource(client, auth);
-const history = await feed.fetchHistorical(fixtureId);
-const startTime = history.find((score) => typeof score.StartTime === 'number')?.StartTime;
-const fixtures = await feed.fetchFixtures({
-  ...(typeof startTime === 'number' ? { startEpochDay: Math.floor(startTime / 86_400_000) } : {}),
-});
-const fixture = fixtures.find((candidate) => String(candidate.FixtureId) === fixtureId) ?? buildFixture(history);
-if (!fixture) throw new Error(`Fixture ${fixtureId} could not be reconstructed.`);
-
-const context = buildMatchEngineContext(fixture, history);
-const databasePath = resolve(process.cwd(), `.data/match-ingestion-${fixtureId}.sqlite`);
-const store = new SqliteIngestionStore(databasePath);
-const hub = new SemanticFrameHub(store);
-const projector = new MatchEngineProjector(store, { publisher: hub });
-const session = new FixtureIngestionSession({ fixtureId, context, feed, store, projector });
+let session: FixtureIngestionSession | undefined;
 
 try {
-  await store.saveFixtureContext({
-    fixtureId,
-    participants: context.participants,
-    updatedAt: new Date().toISOString(),
-  });
-  await session.start();
+  let history: readonly TxlineScore[] = [];
+  let fixture: TxlineFixture | undefined;
+  let upstreamFailure: string | undefined;
+  try {
+    history = await feed.fetchHistorical(fixtureId);
+    const startTime = history.find((score) => typeof score.StartTime === 'number')?.StartTime;
+    const fixtures = await feed.fetchFixtures({
+      ...(typeof startTime === 'number' ? { startEpochDay: Math.floor(startTime / 86_400_000) } : {}),
+    });
+    fixture = fixtures.find((candidate) => String(candidate.FixtureId) === fixtureId) ?? buildFixture(history);
+  } catch (error) {
+    upstreamFailure = error instanceof Error ? error.message : String(error);
+  }
+
+  let source: 'txline' | 'durable' = 'durable';
+  if (fixture) {
+    const context = buildMatchEngineContext(fixture, history);
+    const hub = new SemanticFrameHub(store);
+    const projector = new MatchEngineProjector(store, { publisher: hub });
+    session = new FixtureIngestionSession({ fixtureId, context, feed, store, projector });
+    await store.saveFixtureContext({
+      fixtureId,
+      participants: context.participants,
+      updatedAt: new Date().toISOString(),
+    });
+    await session.start();
+    source = 'txline';
+  }
+
   const checkpoint = await store.getCheckpoint(fixtureId);
   const cursor = await store.getCursor(fixtureId);
   const raw = await store.listRawCandidates(fixtureId);
-  if (!checkpoint) throw new Error('No engine checkpoint was created.');
+  if (!checkpoint) {
+    const reason = upstreamFailure
+      ? ` TxLINE failed with: ${upstreamFailure}`
+      : '';
+    throw new Error(`Fixture ${fixtureId} could not be reconstructed and has no durable checkpoint.${reason}`);
+  }
   if (fixtureId === '18179759') {
     const failures = [
       raw.length === 886 ? undefined : `expected 886 raw candidates, received ${raw.length}`,
@@ -62,6 +79,10 @@ try {
   console.log(JSON.stringify({
     fixtureId,
     databasePath,
+    source,
+    ...(source === 'durable'
+      ? { upstreamStatus: upstreamFailure ? `unavailable: ${upstreamFailure}` : 'historical fixture unavailable' }
+      : {}),
     rawCandidates: raw.length,
     lastContiguousSeq: cursor?.lastSeenSeq,
     lastEventId: cursor?.lastEventId,
@@ -72,7 +93,7 @@ try {
     integrityWarnings: checkpoint.state.integrityWarnings,
   }, null, 2));
 } finally {
-  await session.stop();
+  await session?.stop();
   store.close();
 }
 

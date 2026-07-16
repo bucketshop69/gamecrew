@@ -249,7 +249,7 @@ export class FileMatchPulseCommentaryStore implements MatchPulseCommentaryStore 
     return this.withMutation(async () => {
       const cursor = this.projectionCursors.get(fixtureId);
       if (!cursor) return undefined;
-      const eligible = [...this.entriesById.values()]
+      const eligible = trimToLeadingMinute([...this.entriesById.values()]
         .filter((entry) => entry.fixtureId === fixtureId && entry.enrichmentStatus === 'pending')
         .sort(compareEntriesOldestFirst)
         .filter((entry) => {
@@ -257,7 +257,7 @@ export class FileMatchPulseCommentaryStore implements MatchPulseCommentaryStore 
           return !job || (job.status === 'pending' && job.nextAttemptAt <= now)
             || (job.status === 'in_progress' && (job.leaseUntil ?? 0) <= now);
         })
-        .slice(0, Math.max(1, limit));
+        .slice(0, Math.max(1, limit)));
       if (eligible.length === 0) return undefined;
       let attempt = 0;
       for (const entry of eligible) {
@@ -431,6 +431,7 @@ export class SqliteMatchPulseCommentaryStore implements MatchPulseCommentaryStor
       DatabaseSync: new (path: string) => SqliteDatabase;
     };
     this.db = new DatabaseSync(path);
+    this.db.exec('PRAGMA busy_timeout = 5000;');
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec('PRAGMA foreign_keys = ON;');
     this.db.exec(`
@@ -614,8 +615,11 @@ export class SqliteMatchPulseCommentaryStore implements MatchPulseCommentaryStor
         ORDER BY e.sort_seq, e.sort_timestamp, e.clock_seconds, e.id
         LIMIT ?
       `).all(fixtureId, now, now, Math.max(1, limit)) as CommentaryEntryRow[];
-      const entries = rows.map((row) => parseEntryJson(row.entry_json));
-      const attempt = rows.reduce((highest, row) => Math.max(highest, (row.attempts ?? 0) + 1), 1);
+      const parsedRows = rows.map((row) => ({ row, entry: parseEntryJson(row.entry_json) }));
+      const claimedCount = trimToLeadingMinute(parsedRows.map(({ entry }) => entry)).length;
+      const claimedRows = parsedRows.slice(0, claimedCount);
+      const entries = claimedRows.map(({ entry }) => entry);
+      const attempt = claimedRows.reduce((highest, { row }) => Math.max(highest, (row.attempts ?? 0) + 1), 1);
       const claim = this.db.prepare(`
         UPDATE match_pulse_commentary_enrichment_jobs
         SET status = 'in_progress', owner = ?, lease_until = ?, attempts = attempts + 1
@@ -955,7 +959,11 @@ function mergeEntry(
   existing: MatchPulseCommentaryEntry,
   incoming: MatchPulseCommentaryEntry,
 ): MatchPulseCommentaryEntry {
-  if (incoming.generation !== 'llm' && existing.enrichmentStatus !== 'pending') {
+  if (
+    incoming.generation !== 'llm'
+    && existing.enrichmentStatus !== 'pending'
+    && hasIdenticalGrounding(existing, incoming)
+  ) {
     return {
       ...incoming,
       commentary: existing.commentary,
@@ -970,6 +978,26 @@ function mergeEntry(
   }
 
   return incoming;
+}
+
+function hasIdenticalGrounding(
+  existing: MatchPulseCommentaryEntry,
+  incoming: MatchPulseCommentaryEntry,
+): boolean {
+  return groundingFingerprint(existing) === groundingFingerprint(incoming);
+}
+
+function groundingFingerprint(entry: MatchPulseCommentaryEntry): string {
+  const {
+    commentary: _commentary,
+    voiceLine: _voiceLine,
+    generation: _generation,
+    enrichmentStatus: _enrichmentStatus,
+    coveredFrameIds: _coveredFrameIds,
+    enrichmentPromptVersion: _enrichmentPromptVersion,
+    ...grounding
+  } = entry;
+  return JSON.stringify(grounding);
 }
 
 function entryToSqliteRow(entry: MatchPulseCommentaryEntry) {
@@ -994,6 +1022,24 @@ function entryToSqliteRow(entry: MatchPulseCommentaryEntry) {
 
 function parseEntryJson(json: string): MatchPulseCommentaryEntry {
   return JSON.parse(json) as MatchPulseCommentaryEntry;
+}
+
+/**
+ * Keeps the leading run of entries sharing the first entry's (period, minute)
+ * so one enrichment claim is one coherent match-minute batch. The caller's
+ * `limit` already caps a busy minute: whatever the limit cuts off is claimed
+ * by the next round, which naturally splits oversized minutes.
+ */
+function trimToLeadingMinute(
+  entries: readonly MatchPulseCommentaryEntry[],
+): readonly MatchPulseCommentaryEntry[] {
+  const first = entries[0];
+  if (!first) return entries;
+  const minuteKey = (entry: MatchPulseCommentaryEntry): string =>
+    `${entry.period}:${entry.clock.minute ?? entry.clock.label}`;
+  const key = minuteKey(first);
+  const end = entries.findIndex((entry) => minuteKey(entry) !== key);
+  return end === -1 ? entries : entries.slice(0, end);
 }
 
 function compareEntriesNewestFirst(left: MatchPulseCommentaryEntry, right: MatchPulseCommentaryEntry): number {

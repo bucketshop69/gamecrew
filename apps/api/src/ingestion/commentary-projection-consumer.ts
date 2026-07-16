@@ -1,4 +1,5 @@
 import {
+  COMMENTARY_PLAN_VERSION,
   computeBeatNarrative,
   planCommentaryBeats,
   type CanonicalMatchState,
@@ -88,7 +89,11 @@ export class CommentaryProjectionConsumer {
       rebuildScheduled: false,
     };
     this.fixtures.set(key, state);
-    const cursor = await this.commentary.getProjectionCursor(key);
+    const projection = await this.commentary.getProjectionSnapshot(key);
+    const cursor = projection.cursor;
+    const currentPlanIsStored = projection.entries.length > 0
+      && projection.entries.every((entry) =>
+        entry.commentaryPlanVersion === COMMENTARY_PLAN_VERSION);
     try {
       state.unsubscribe = await this.hub.subscribe(
         key,
@@ -106,7 +111,7 @@ export class CommentaryProjectionConsumer {
 
       // A fixture can already have a complete durable projection but no prior
       // commentary cursor (for example after deploying Phase 6).
-      if (!cursor) await this.queueRebuild(key);
+      if (!cursor || !currentPlanIsStored) await this.queueRebuild(key);
       this.scheduleEnrichment(key, state);
     } catch (error) {
       this.fixtures.delete(key);
@@ -389,7 +394,7 @@ export function commentaryEntryFromBeat(
   return {
     id: beat.id,
     fixtureId: String(beat.fixtureId),
-    batchId: `engine:${beat.projectionGeneration}:${beat.fromSeq}-${beat.toSeq}`,
+    batchId: `engine:${beat.id}`,
     fromSeq: beat.fromSeq,
     toSeq: beat.toSeq,
     period: toProductPhase(phase, clockSeconds),
@@ -440,6 +445,7 @@ export function commentaryEntryFromBeat(
     fallbackCommentary: beat.fallbackCommentary,
     enrichmentStatus: 'pending',
     projectionGeneration: beat.projectionGeneration,
+    commentaryPlanVersion: beat.plannerVersion,
     commentaryBeatKind: beat.kind,
     mustCover: beat.mustCover,
     sourceFrameIds: beat.sourceFrameIds,

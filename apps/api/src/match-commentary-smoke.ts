@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import {
+  COMMENTARY_PLAN_VERSION,
   type MatchEngineTeam,
   type TxlineMatchEngineRecord,
 } from '@gamecrew/core';
@@ -75,7 +76,11 @@ function assertFixture18179759(
   state: import('@gamecrew/core').CanonicalMatchState,
 ): void {
   assert.equal(semanticFrameCount, 886, 'commentary acceptance requires 886 semantic frames');
-  assert.equal(entries.length, 139, 'commentary acceptance requires 139 durable beats');
+  assert.equal(entries.length, 708, 'commentary acceptance requires 708 immediate durable beats');
+  assert.ok(entries.every((entry) => entry.commentaryPlanVersion === COMMENTARY_PLAN_VERSION),
+    `every commentary beat must use planner v${COMMENTARY_PLAN_VERSION}`);
+  assert.equal(entries.filter((entry) => entry.commentaryBeatKind === 'pressure').length, 0,
+    'immediate commentary must not reintroduce delayed pressure summaries');
   assert.equal(state.phase, 'finalised');
   assert.deepEqual(state.finalScore, { participant1: 2, participant2: 0 });
   assert.deepEqual(state.integrityWarnings, []);

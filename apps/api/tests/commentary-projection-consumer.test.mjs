@@ -159,6 +159,135 @@ test('reconciliation preserves an enriched entry when its deterministic beat id 
   }
 });
 
+test('reconciliation resets stale enrichment when a reused id has different grounding', async () => {
+  const store = new SqliteMatchPulseCommentaryStore(':memory:');
+  const entry = {
+    id: 'beat-grounding', fixtureId, batchId: 'engine:0:1-1', fromSeq: 1, toSeq: 1,
+    period: 'first_half', clock: { label: "1'" }, kind: 'corner', sourceEvents: [],
+    commentary: 'Fallback.', intensity: 'building', momentumSide: 'home',
+    confidence: 'source_backed', generation: 'rule_based', fallbackCommentary: 'Fallback.',
+    enrichmentStatus: 'pending', projectionGeneration: 0, commentaryPlanVersion: 3,
+    sourceFrameIds: ['frame-1'], cueIds: ['corner-1'], factIds: ['fact-1'],
+  };
+  try {
+    await store.commitEngineProjection(fixtureId, 0, 1, [entry], { replace: true });
+    await store.upsertEntries([{
+      ...entry,
+      commentary: 'An enriched but now stale line.',
+      generation: 'llm',
+      enrichmentStatus: 'complete',
+      coveredFrameIds: ['frame-1'],
+    }]);
+
+    await store.commitEngineProjection(fixtureId, 0, 2, [{
+      ...entry,
+      sourceFrameIds: ['frame-2'],
+      cueIds: ['corner-2'],
+      factIds: ['fact-2'],
+      commentary: 'Fresh fallback.',
+      fallbackCommentary: 'Fresh fallback.',
+    }], { replace: true });
+
+    const [persisted] = await store.listEntries(fixtureId);
+    assert.equal(persisted.commentary, 'Fresh fallback.');
+    assert.equal(persisted.generation, 'rule_based');
+    assert.equal(persisted.enrichmentStatus, 'pending');
+    assert.deepEqual(persisted.sourceFrameIds, ['frame-2']);
+  } finally {
+    store.close();
+  }
+});
+
+test('reconciliation resets stale enrichment when semantic grounding changes behind stable ids', async () => {
+  const store = new SqliteMatchPulseCommentaryStore(':memory:');
+  const entry = {
+    id: 'beat-stable-ids', fixtureId, batchId: 'engine:beat-stable-ids', fromSeq: 1, toSeq: 1,
+    period: 'first_half', clock: { label: "1'" }, kind: 'card', sourceEvents: [{
+      kind: 'system', id: 'frame-1', fixtureId, seq: 1, action: 'card', label: 'discipline',
+      participant: 1, teamId: '10', confirmed: true,
+    }],
+    commentary: 'Player One is shown a yellow card.', intensity: 'major', momentumSide: 'home',
+    confidence: 'source_backed', generation: 'rule_based',
+    fallbackCommentary: 'Player One is shown a yellow card.',
+    enrichmentStatus: 'pending', projectionGeneration: 0, commentaryPlanVersion: 3,
+    sourceFrameIds: ['frame-1'], cueIds: ['card-1'], factIds: ['fact-1'],
+    groundedFacts: [{
+      id: 'card-1', kind: 'card', action: 'yellow_card', lifecycle: 'confirmed', basis: 'direct',
+      participant: 1, teamId: '10', playerName: 'Player One',
+      value: { action: 'yellow_card' }, sourceSeqs: [1],
+    }],
+  };
+  try {
+    await store.commitEngineProjection(fixtureId, 0, 1, [entry], { replace: true });
+    await store.upsertEntries([{
+      ...entry,
+      commentary: 'Player One goes into the book.',
+      generation: 'llm',
+      enrichmentStatus: 'complete',
+      coveredFrameIds: ['frame-1'],
+    }]);
+
+    const corrected = {
+      ...entry,
+      commentary: 'Player Two is shown a red card.',
+      fallbackCommentary: 'Player Two is shown a red card.',
+      groundedFacts: [{
+        ...entry.groundedFacts[0],
+        playerName: 'Player Two',
+        value: { action: 'red_card' },
+      }],
+    };
+    await store.commitEngineProjection(fixtureId, 0, 2, [corrected], { replace: true });
+
+    const [persisted] = await store.listEntries(fixtureId);
+    assert.equal(persisted.commentary, 'Player Two is shown a red card.');
+    assert.equal(persisted.generation, 'rule_based');
+    assert.equal(persisted.enrichmentStatus, 'pending');
+    assert.equal(persisted.groundedFacts[0].playerName, 'Player Two');
+    assert.deepEqual(persisted.groundedFacts[0].value, { action: 'red_card' });
+  } finally {
+    store.close();
+  }
+});
+
+test('ensureFixture rebuilds a stored projection produced by an older commentary plan', async () => {
+  const frames = [cornerFrame(1)];
+  const frameStore = {
+    async getCheckpoint() {
+      return { phase: 'first_half', projectionGeneration: 0, stateRevision: 1 };
+    },
+    async listFramesAfter(_fixtureId, afterRevision) {
+      return frames.filter((frame) => frame.stateRevision > afterRevision);
+    },
+  };
+  const hub = new SemanticFrameHub(frameStore);
+  const store = new SqliteMatchPulseCommentaryStore(':memory:');
+  const oldEntry = {
+    id: 'old-plan-entry', fixtureId, batchId: 'engine:0:1-1', fromSeq: 1, toSeq: 1,
+    period: 'first_half', clock: { label: "1'" }, kind: 'pressure', sourceEvents: [],
+    commentary: 'Old grouped line.', intensity: 'danger', momentumSide: 'home',
+    confidence: 'inferred', generation: 'rule_based', fallbackCommentary: 'Old grouped line.',
+    enrichmentStatus: 'failed', projectionGeneration: 0, commentaryBeatKind: 'pressure',
+  };
+  await store.commitEngineProjection(fixtureId, 0, 1, [oldEntry], { replace: true });
+
+  const consumer = new CommentaryProjectionConsumer(frameStore, hub, store);
+  try {
+    await consumer.ensureFixture(fixtureId, teams);
+    await flush();
+    await flush();
+
+    const entries = await store.listEntries(fixtureId);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].commentaryPlanVersion, 3);
+    assert.equal(entries[0].commentaryBeatKind, 'routine');
+    assert.equal(entries[0].fallbackCommentary, 'Home FC win a corner.');
+  } finally {
+    await consumer.close();
+    store.close();
+  }
+});
+
 test('enriches pending fallback commentary in the background after durable projection', async () => {
   const frames = [cornerFrame(1)];
   const frameStore = {
@@ -948,5 +1077,101 @@ test('a narrative-bearing entry round-trips whole through the commentary store',
     assert.deepEqual(persisted.narrative, entry.narrative);
   } finally {
     store.close();
+  }
+});
+
+test('a SQLite enrichment claim never crosses a period-and-minute boundary', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'gamecrew-commentary-minute-claim-'));
+  const path = join(directory, 'commentary.sqlite');
+  const store = new SqliteMatchPulseCommentaryStore(path);
+  const entryAt = (id, sortSeq, period, minute) => ({
+    id, fixtureId, batchId: `engine:${id}`, fromSeq: sortSeq, toSeq: sortSeq, sortSeq,
+    period, clock: { minute, seconds: (minute - 1) * 60, label: `${minute}'` },
+    kind: 'corner', sourceEvents: [],
+    commentary: 'Fallback.', intensity: 'building', momentumSide: 'home',
+    confidence: 'source_backed', generation: 'rule_based', fallbackCommentary: 'Fallback.',
+    enrichmentStatus: 'pending', projectionGeneration: 0,
+  });
+  const entries = [
+    entryAt('m46-a', 1, 'first_half', 46),
+    entryAt('m46-b', 2, 'first_half', 46),
+    entryAt('m46-second-half', 3, 'second_half', 46),
+    entryAt('m47', 4, 'second_half', 47),
+  ];
+  try {
+    await store.commitEngineProjection(fixtureId, 0, 4, entries, { replace: true });
+    const first = await store.claimEnrichmentBatch(fixtureId, 'worker-a', 16, 30_000, 100);
+    assert.deepEqual(first?.entries.map((item) => item.id), ['m46-a', 'm46-b']);
+    await store.releaseEnrichmentClaim(first, 'complete');
+    // The claimed entries stay pending in this test (no commit), so requeue
+    // them as done by marking them complete through a projection commit.
+    await store.commitEngineProjection(fixtureId, 0, 4, first.entries.map((item) => ({
+      ...item, generation: 'llm', enrichmentStatus: 'complete',
+    })), { expectedCursor: { projectionGeneration: 0, lastStateRevision: 4 } });
+    const second = await store.claimEnrichmentBatch(fixtureId, 'worker-a', 16, 30_000, 200);
+    assert.deepEqual(second?.entries.map((item) => item.id), ['m46-second-half']);
+  } finally {
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('the requeue tool flips failed entries back to claimable pending work and clears the materialization', async () => {
+  const { requeueFixtureCommentary } = await import('../src/requeue-match-pulse-commentary.ts');
+  const { MatchPulseMaterializationStore } = await import('../src/match-pulse-materialization-store.ts');
+  const directory = await mkdtemp(join(tmpdir(), 'gamecrew-commentary-requeue-'));
+  const path = join(directory, 'commentary.sqlite');
+  const store = new SqliteMatchPulseCommentaryStore(path);
+  const materializations = new MatchPulseMaterializationStore(path);
+  const baseEntry = (id, sortSeq, overrides = {}) => ({
+    id, fixtureId, batchId: `engine:${id}`, fromSeq: sortSeq, toSeq: sortSeq, sortSeq,
+    period: 'first_half', clock: { minute: 1, seconds: 0, label: "1'" },
+    kind: 'corner', sourceEvents: [],
+    commentary: 'Fallback line.', intensity: 'building', momentumSide: 'home',
+    confidence: 'source_backed', generation: 'rule_based', fallbackCommentary: 'Fallback line.',
+    enrichmentStatus: 'pending', projectionGeneration: 0,
+    ...overrides,
+  });
+  try {
+    await store.commitEngineProjection(fixtureId, 0, 2, [
+      baseEntry('requeue-failed', 1, {
+        enrichmentStatus: 'failed',
+      }),
+      baseEntry('requeue-complete', 2, {
+        commentary: 'Old enriched line.', generation: 'llm', enrichmentStatus: 'complete',
+        coveredFrameIds: ['frame-1'], enrichmentPromptVersion: 'engine-commentary-v1',
+      }),
+    ], { replace: true });
+
+    const db = new DatabaseSync(path);
+    try {
+      const failedOnly = requeueFixtureCommentary(db, fixtureId, ['failed'], false);
+      assert.equal(failedOnly.entriesRequeued, 1);
+
+      const both = requeueFixtureCommentary(db, fixtureId, ['failed', 'complete', 'pending'], true);
+      assert.equal(both.after.pending, 2);
+      assert.equal(both.materializationCleared, false); // no materialization row existed yet
+    } finally {
+      db.close();
+    }
+
+    const entries = await store.listEntries(fixtureId);
+    assert.deepEqual(
+      entries.map((item) => [item.enrichmentStatus, item.generation, item.commentary]).sort(),
+      [
+        ['pending', 'rule_based', 'Fallback line.'],
+        ['pending', 'rule_based', 'Fallback line.'],
+      ],
+    );
+    assert.ok(entries.every((item) => item.coveredFrameIds === undefined
+      && item.enrichmentPromptVersion === undefined));
+
+    const claim = await store.claimEnrichmentBatch(fixtureId, 'worker-a', 16, 30_000, 100);
+    assert.equal(claim?.entries.length, 2);
+    assert.equal(claim?.attempt, 1);
+  } finally {
+    materializations.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });

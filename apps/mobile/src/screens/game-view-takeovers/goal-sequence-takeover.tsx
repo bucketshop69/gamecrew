@@ -1,6 +1,6 @@
 import type { GameViewScene } from '@gamecrew/core';
 import { useEffect, useRef, useState } from 'react';
-import { Animated, Easing, Platform, StyleSheet } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import {
   escalationLabel,
@@ -136,7 +136,6 @@ function AnimatedGoalSequence({
   scene: GameViewScene;
 }) {
   const [activeIndex, setActiveIndex] = useState(0);
-  const entrance = useRef(new Animated.Value(0)).current;
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   useEffect(() => {
@@ -169,33 +168,104 @@ function AnimatedGoalSequence({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene.id]);
 
-  useEffect(() => {
-    entrance.stopAnimation();
-    entrance.setValue(0);
-    Animated.timing(entrance, {
-      duration: 260,
-      easing: Easing.out(Easing.cubic),
-      isInteraction: false,
-      toValue: 1,
-      useNativeDriver: Platform.OS !== 'web',
-    }).start();
-  }, [activeIndex, entrance]);
-
   const activeEntry = plan[activeIndex] ?? plan[0]!;
-  const translateY = entrance.interpolate({ inputRange: [0, 1], outputRange: [12, 0] });
 
+  // R4 (docs/issues/game-view-realism-experiment.md, "Goal choreography"):
+  // during the tension beat the players are already celebrating ON the board
+  // (the action cluster's corner run), so the checking treatment is a
+  // compact banner over the visible pitch, not a full-screen card. The full
+  // team-color takeover is reserved for confirmation -- which also keeps
+  // provisional and confirmed visually distinct, per the PRD.
   return (
-    <Animated.View style={[StyleSheet.absoluteFill, { opacity: entrance, transform: [{ translateY }] }]}>
-      <BeatCard
-        awayTeam={awayTeam}
-        backgroundColor={backgroundColor}
-        beat={activeEntry.beat}
-        homeTeam={homeTeam}
-        scene={scene}
-      />
-    </Animated.View>
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      {activeEntry.beat.kind === 'tension' ? (
+        <TensionBanner awayTeam={awayTeam} homeTeam={homeTeam} scene={scene} />
+      ) : (
+        <BeatCard
+          awayTeam={awayTeam}
+          backgroundColor={backgroundColor}
+          beat={activeEntry.beat}
+          homeTeam={homeTeam}
+          scene={scene}
+        />
+      )}
+    </View>
   );
 }
+
+/**
+ * The checking treatment as a lower-key overlay: a dark pill pinned to the
+ * top edge ("GOAL? CHECKING", team-colored dot) that leaves the board -- and
+ * the premature celebration playing on it -- fully visible. Announces the
+ * same information the old full-screen tension card did.
+ */
+function TensionBanner({
+  awayTeam,
+  homeTeam,
+  scene,
+}: {
+  awayTeam: TakeoverBaseProps['awayTeam'];
+  homeTeam: TakeoverBaseProps['homeTeam'];
+  scene: GameViewScene;
+}) {
+  const team = teamForParticipant(scene.participant, homeTeam, awayTeam);
+  const announcement = `${team?.name ?? 'Goal'} check under way. Goal pending confirmation.`;
+  useTakeoverAnnouncement(announcement);
+
+  return (
+    <View style={tensionBannerStyles.wrap}>
+      <View
+        accessibilityLabel={announcement}
+        accessibilityLiveRegion="polite"
+        accessible
+        importantForAccessibility="yes"
+        style={tensionBannerStyles.pill}
+      >
+        <View style={[tensionBannerStyles.dot, { backgroundColor: team?.color ?? tokens.shell.textMuted }]} />
+        <Text numberOfLines={1} style={tensionBannerStyles.headline}>GOAL?</Text>
+        <Text numberOfLines={1} style={tensionBannerStyles.checking}>CHECKING</Text>
+      </View>
+    </View>
+  );
+}
+
+const tensionBannerStyles = StyleSheet.create({
+  wrap: {
+    alignItems: 'center',
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: tokens.spacing.lg,
+  },
+  pill: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(5, 5, 5, 0.86)',
+    borderColor: tokens.shell.divider,
+    borderRadius: tokens.radii.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: tokens.spacing.sm,
+    paddingHorizontal: tokens.spacing.md,
+    paddingVertical: tokens.spacing.sm,
+  },
+  dot: {
+    borderRadius: 4,
+    height: 8,
+    width: 8,
+  },
+  headline: {
+    color: tokens.shell.text,
+    fontSize: tokens.typography.size.body,
+    fontWeight: tokens.typography.weight.bold,
+    letterSpacing: 1.5,
+  },
+  checking: {
+    color: tokens.shell.textMuted,
+    fontSize: tokens.typography.size.label,
+    fontWeight: tokens.typography.weight.bold,
+    letterSpacing: 2,
+  },
+});
 
 function BeatCard({
   awayTeam,

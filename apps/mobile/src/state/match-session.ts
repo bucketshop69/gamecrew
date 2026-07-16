@@ -40,6 +40,8 @@ export interface MatchSessionHandle {
   subscribe(listener: MatchSessionListener): () => void;
   /** Current snapshot, readable without subscribing. */
   getSnapshot(): MatchSessionSnapshot;
+  /** Re-evaluate `isLive` after the fixture changes phase without replacing this shared session. */
+  syncLiveStatus(): void;
   /** Release this consumer's hold on the session. Disposes once refcount hits 0. */
   release(): void;
 }
@@ -48,7 +50,7 @@ export interface MatchSessionHandle {
 export interface MatchSessionDeps {
   fetchFrames: (
     fixtureId: string,
-    options: { afterRevision?: number; signal?: AbortSignal },
+    options: { afterRevision?: number; projectionGeneration?: number; signal?: AbortSignal },
   ) => Promise<EngineFramesResponse>;
   /** Returns whether the fixture should keep polling (live) or backfill once (finished). */
   isLive: () => boolean;
@@ -80,6 +82,7 @@ class MatchSession {
   private frameIds = new Set<string>();
   private headRevision = 0;
   private projectionGeneration = 0;
+  private hasProjectionGeneration = false;
   private status: MatchSessionStatus = 'loading';
   private errorMessage: string | undefined;
   private lastUpdatedAtMs: number | undefined;
@@ -104,6 +107,7 @@ class MatchSession {
     return {
       subscribe: (listener) => this.subscribe(listener),
       getSnapshot: () => this.getSnapshot(),
+      syncLiveStatus: () => this.syncLiveStatus(),
       release: () => {
         if (released) return;
         released = true;
@@ -152,6 +156,35 @@ class MatchSession {
   private start() {
     this.disposed = false;
     this.poll(0);
+  }
+
+  /**
+   * The match list can move a fixture from upcoming to live while this
+   * refcounted session remains mounted. A completed one-shot backfill has no
+   * timer left to notice that change, so the React adapter explicitly nudges
+   * the session through this seam when `isLive` changes.
+   */
+  private syncLiveStatus() {
+    if (this.disposed) return;
+
+    if (!this.deps.isLive()) {
+      if (this.timerHandle !== null) {
+        this.deps.clearTimer(this.timerHandle);
+        this.timerHandle = null;
+      }
+      if (this.staleTimerHandle !== null) {
+        this.deps.clearTimer(this.staleTimerHandle);
+        this.staleTimerHandle = null;
+      }
+      if (this.status === 'live' || this.status === 'stale') {
+        this.status = 'complete';
+        this.emit();
+      }
+      return;
+    }
+
+    if (this.inFlight !== null || this.timerHandle !== null) return;
+    void this.poll(this.headRevision);
   }
 
   private dispose() {
@@ -215,6 +248,9 @@ class MatchSession {
     try {
       const response = await this.deps.fetchFrames(this.fixtureId, {
         afterRevision,
+        ...(this.hasProjectionGeneration
+          ? { projectionGeneration: this.projectionGeneration }
+          : {}),
         signal: controller.signal,
       });
 
@@ -222,6 +258,11 @@ class MatchSession {
 
       if (response.resyncRequired) {
         this.resetLog();
+        this.projectionGeneration = response.projectionGeneration;
+        this.hasProjectionGeneration = true;
+        this.status = 'loading';
+        this.errorMessage = undefined;
+        this.emit();
         this.inFlight = null;
         void this.poll(0);
         return;
@@ -230,6 +271,7 @@ class MatchSession {
       this.appendFrames(response.frames);
       this.headRevision = Math.max(this.headRevision, response.headRevision);
       this.projectionGeneration = response.projectionGeneration;
+      this.hasProjectionGeneration = true;
       this.lastUpdatedAtMs = this.deps.now();
       this.errorMessage = undefined;
 

@@ -9,10 +9,11 @@ import type {
   SimulationCue,
 } from './types';
 
-const DEFAULT_PRESSURE_WINDOW_SECONDS = 90;
+export const COMMENTARY_PLAN_VERSION = 3;
 
 const routineKinds = new Set<SimulationCue['kind']>([
   'set_piece',
+  'possession_change',
   'possession_pressure',
   'shot_attempt',
   'shot_outcome',
@@ -24,6 +25,12 @@ const routineKinds = new Set<SimulationCue['kind']>([
   'restart',
 ]);
 
+interface IncidentRevisionPlan {
+  anchorFrameId: string;
+  cue: SimulationCue;
+  evidenceFrames: SemanticFrame[];
+}
+
 interface PlannedFrame {
   frame: SemanticFrame;
   evidenceFrames: SemanticFrame[];
@@ -31,15 +38,16 @@ interface PlannedFrame {
   kind: CommentaryBeatKind;
   participant?: MatchEngineParticipant;
   teamId?: number | string;
-  pressureEligible: boolean;
   phase?: MatchEnginePhase;
   restartContext?: CommentaryRestartContext;
 }
 
 /**
  * Plans narration from a complete, ordered projection generation. Frames with
- * no supporter-facing meaning are omitted; confirmed incident revisions are
- * collapsed so enrichment cannot create a duplicate beat.
+ * no supporter-facing meaning are omitted; incident lifecycle revisions are
+ * collapsed so enrichment cannot create a duplicate beat. Every returned
+ * beat is immediate; retrospective pressure summaries are deliberately left
+ * to a separate presentation layer so they cannot delay or double-count play.
  */
 export function planCommentaryBeats(
   inputFrames: readonly SemanticFrame[],
@@ -50,122 +58,114 @@ export function planCommentaryBeats(
   }
 
   const frames = [...inputFrames].sort(compareFrames);
-  const planned = addNarrativeContext(selectPlannedFrames(frames));
-  const beats: CommentaryBeat[] = [];
-  let pressureCluster: PlannedFrame[] = [];
-
-  const flushPressure = () => {
-    if (pressureCluster.length === 0) return;
-    beats.push(buildBeat(
-      pressureCluster,
-      pressureCluster.length > 1 ? 'pressure' : pressureCluster[0]!.kind,
-      options,
-    ));
-    pressureCluster = [];
-  };
-
-  for (const candidate of planned) {
-    if (candidate.kind === 'major') {
-      flushPressure();
-      beats.push(buildBeat([candidate], 'major', options));
-      continue;
-    }
-
-    if (!candidate.pressureEligible) {
-      flushPressure();
-      beats.push(buildBeat([candidate], candidate.kind, options));
-      continue;
-    }
-
-    const anchor = pressureCluster[0];
-    if (anchor && !canJoinPressure(anchor, candidate, options.pressureWindowSeconds)) {
-      flushPressure();
-    }
-    pressureCluster.push(candidate);
-  }
-
-  flushPressure();
-  return beats;
+  const planned = collapseRepeatedPossessionPressure(addNarrativeContext(selectPlannedFrames(frames)));
+  return planned.map((candidate) => buildBeat([candidate], candidate.kind, options));
 }
 
 function selectPlannedFrames(frames: readonly SemanticFrame[]): PlannedFrame[] {
-  const earliestConfirmedIncidentFrame = new Map<string, string>();
-  const latestConfirmedIncidentCue = new Map<string, SimulationCue>();
-  const confirmedIncidentFrames = new Map<string, SemanticFrame[]>();
+  const incidentPlans = planIncidentRevisions(frames);
+
+  return frames.flatMap((frame) => {
+    const cues = uniqueById(frame.simulationCues.flatMap((cue) => {
+      if (cue.kind === 'score_commit') return [];
+      if (isGoalRetraction(cue)) return [cue];
+      if (cue.updateMode !== 'incident_upsert') return isCommentaryCue(cue) ? [cue] : [];
+      const plan = incidentPlans.get(cue.id);
+      return plan?.anchorFrameId === frame.id ? [plan.cue] : [];
+    }));
+    if (cues.length === 0) return [];
+
+    const scoreCues = cues.some((cue) => cue.kind === 'goal_confirmed')
+      ? frame.simulationCues.filter((cue) => cue.kind === 'score_commit' && isCommentaryCue(cue))
+      : [];
+    const phaseValue = frame.facts.find((fact) => fact.kind === 'phase')?.value.phase
+      ?? frame.simulationCues.find((cue) => cue.kind === 'phase_change')?.value.phase;
+
+    return cues.map((cue) => {
+      const selectedCues = cue.kind === 'goal_confirmed'
+        ? [cue, ...scoreCues]
+        : [cue];
+      const evidenceFrames = cue.kind === 'goal_confirmed'
+        ? uniqueFrames([frame, ...(incidentPlans.get(cue.id)?.evidenceFrames ?? [])])
+        : [frame];
+      const isMajor = cue.kind === 'goal_confirmed'
+        || isGoalRetraction(cue)
+        || (cue.kind === 'card' && cue.value.action === 'red_card')
+        || isMajorPhaseCue(cue);
+
+      return {
+        frame,
+        evidenceFrames,
+        cues: selectedCues,
+        kind: isMajor ? 'major' : 'routine',
+        participant: cue.participant,
+        teamId: cue.teamId,
+        ...(isMatchEnginePhase(phaseValue) ? { phase: phaseValue } : {}),
+      };
+    });
+  });
+}
+
+function collapseRepeatedPossessionPressure(planned: readonly PlannedFrame[]): PlannedFrame[] {
+  const result: PlannedFrame[] = [];
+  let previousKey: string | undefined;
+
+  for (const candidate of planned) {
+    const isPressureOnly = candidate.cues.length === 1
+      && candidate.cues[0]?.kind === 'possession_pressure';
+    if (!isPressureOnly) {
+      previousKey = undefined;
+      result.push(candidate);
+      continue;
+    }
+
+    const cue = candidate.cues[0]!;
+    const owner = cue.teamId ?? cue.participant;
+    const zone = cue.probableZone ?? cue.pressure;
+    const key = owner === undefined ? undefined : `${String(owner)}:${zone ?? 'neutral'}`;
+    if (key !== undefined && key === previousKey) continue;
+    previousKey = key;
+    result.push(candidate);
+  }
+  return result;
+}
+
+function planIncidentRevisions(frames: readonly SemanticFrame[]): Map<string, IncidentRevisionPlan> {
+  const revisions = new Map<string, Array<{ frame: SemanticFrame; cue: SimulationCue }>>();
 
   for (const frame of frames) {
     for (const cue of frame.simulationCues) {
-      if (cue.updateMode !== 'incident_upsert' || cue.lifecycle !== 'confirmed') continue;
-      if (!earliestConfirmedIncidentFrame.has(cue.id)) earliestConfirmedIncidentFrame.set(cue.id, frame.id);
-      latestConfirmedIncidentCue.set(cue.id, cue);
-      const evidence = confirmedIncidentFrames.get(cue.id) ?? [];
-      evidence.push(frame);
-      confirmedIncidentFrames.set(cue.id, evidence);
+      if (cue.updateMode !== 'incident_upsert' || cue.kind === 'incident_retracted') continue;
+      const entries = revisions.get(cue.id) ?? [];
+      entries.push({ frame, cue });
+      revisions.set(cue.id, entries);
     }
   }
 
-  return frames.flatMap((frame) => {
-    const cues = frame.simulationCues
-      .filter(isCommentaryCue)
-      .filter((cue) => cue.updateMode !== 'incident_upsert'
-        || cue.lifecycle !== 'confirmed'
-        || earliestConfirmedIncidentFrame.get(cue.id) === frame.id)
-      .map((cue) => latestConfirmedIncidentCue.get(cue.id) ?? cue);
-    const goal = cues.find((cue) => cue.kind === 'goal_confirmed');
-    const phase = cues.find(isMajorPhaseCue);
-    const redCard = cues.find((cue) => cue.kind === 'card' && cue.value.action === 'red_card');
-    const majorCue = goal ?? redCard ?? phase;
-    const selectedCues = majorCue
-      ? cues.filter((cue) => cue === majorCue || cue.kind === 'score_commit')
-      : cues;
-    if (selectedCues.length === 0) return [];
-
-    const anchor = majorCue ?? selectedCues[0]!;
-    const evidenceFrames = uniqueFrames([
-      frame,
-      ...selectedCues.flatMap((cue) => confirmedIncidentFrames.get(cue.id) ?? []),
-    ]);
-    const phaseValue = frame.facts.find((fact) => fact.kind === 'phase')?.value.phase
-      ?? frame.simulationCues.find((cue) => cue.kind === 'phase_change')?.value.phase;
-    return [{
-      frame,
-      evidenceFrames,
-      cues: selectedCues,
-      kind: majorCue ? 'major' : 'routine',
-      participant: anchor.participant,
-      teamId: anchor.teamId,
-      pressureEligible: !majorCue && selectedCues.some(isPressureCue),
-      ...(isMatchEnginePhase(phaseValue) ? { phase: phaseValue } : {}),
-    }];
-  });
+  const plans = new Map<string, IncidentRevisionPlan>();
+  for (const [cueId, entries] of revisions) {
+    const admitted = entries.filter(({ cue }) => isCommentaryCue(cue));
+    const confirmed = admitted.filter(({ cue }) => cue.lifecycle === 'confirmed');
+    const observed = admitted.filter(({ cue }) => cue.lifecycle === 'observed');
+    const selectedLifecycle = confirmed.length > 0 ? confirmed : observed;
+    const anchor = selectedLifecycle[0];
+    const latest = selectedLifecycle.at(-1);
+    if (!anchor || !latest) continue;
+    plans.set(cueId, {
+      anchorFrameId: anchor.frame.id,
+      cue: latest.cue,
+      evidenceFrames: entries.map(({ frame }) => frame),
+    });
+  }
+  return plans;
 }
 
 function addNarrativeContext(planned: readonly PlannedFrame[]): PlannedFrame[] {
   const result: PlannedFrame[] = [];
   let matchStarted = false;
   let goalAwaitingRestart = false;
-  let latestGoalOccurrence = Number.NEGATIVE_INFINITY;
 
   for (const candidate of planned) {
-    if (
-      candidate.phase === 'half_time'
-      || candidate.phase === 'second_half_ready'
-      || candidate.phase === 'second_half'
-    ) latestGoalOccurrence = Number.NEGATIVE_INFINITY;
-    const occurrence = Math.min(...candidate.cues.map((cue) => cue.occurrenceSeconds)
-      .filter((value): value is number => typeof value === 'number'));
-    const effectiveOccurrence = Number.isFinite(occurrence)
-      ? occurrence
-      : candidate.frame.matchClockSeconds;
-    // A late confirmation may enrich an old incident after a goal/restart has
-    // already been narrated. It remains in engine truth, but not the live feed.
-    if (
-      candidate.kind === 'routine'
-      && candidate.cues.some((cue) => cue.updateMode === 'incident_upsert')
-      && typeof effectiveOccurrence === 'number'
-      && effectiveOccurrence < latestGoalOccurrence
-    ) continue;
-
     const hasRestart = candidate.cues.some((cue) => cue.kind === 'restart');
     let restartContext: CommentaryRestartContext | undefined;
     if (hasRestart) {
@@ -181,9 +181,6 @@ function addNarrativeContext(planned: readonly PlannedFrame[]): PlannedFrame[] {
     }
     if (candidate.cues.some((cue) => cue.kind === 'goal_confirmed')) {
       goalAwaitingRestart = true;
-      if (typeof effectiveOccurrence === 'number') {
-        latestGoalOccurrence = Math.max(latestGoalOccurrence, effectiveOccurrence);
-      }
     }
     result.push({ ...candidate, ...(restartContext ? { restartContext } : {}) });
   }
@@ -200,48 +197,25 @@ function isMatchEnginePhase(value: unknown): value is MatchEnginePhase {
 function isCommentaryCue(cue: SimulationCue): boolean {
   if (cue.kind === 'goal_confirmed') return cue.lifecycle === 'confirmed';
   if (cue.kind === 'score_commit') return cue.lifecycle === 'confirmed';
-  if (cue.kind === 'phase_change') return isMajorPhaseCue(cue);
+  if (isGoalRetraction(cue)) return true;
+  if (cue.kind === 'phase_change') {
+    return isMajorPhaseCue(cue)
+      && (cue.lifecycle === 'confirmed' || cue.lifecycle === 'observed');
+  }
   if (!routineKinds.has(cue.kind)) return false;
-  if (cue.kind === 'possession_pressure') {
-    return cue.pressure === 'attack' || cue.pressure === 'danger' || cue.pressure === 'high_danger';
+  if (cue.updateMode === 'incident_upsert') {
+    return cue.lifecycle === 'confirmed' || cue.lifecycle === 'observed';
   }
-  if (cue.kind === 'set_piece' && (cue.value.action === 'throw_in' || cue.value.action === 'goal_kick')) {
-    return false;
-  }
-  if (cue.updateMode === 'incident_upsert') return cue.lifecycle === 'confirmed';
   return cue.lifecycle === 'confirmed' || cue.lifecycle === 'observed';
+}
+
+function isGoalRetraction(cue: SimulationCue): boolean {
+  return cue.kind === 'incident_retracted' && cue.value.action === 'goal';
 }
 
 function isMajorPhaseCue(cue: SimulationCue): boolean {
   return cue.kind === 'phase_change'
     && (cue.value.phase === 'half_time' || cue.value.phase === 'finalised');
-}
-
-function isPressureCue(cue: SimulationCue): boolean {
-  if (cue.kind === 'possession_pressure' || cue.kind === 'shot_attempt' || cue.kind === 'shot_outcome') return true;
-  return cue.kind === 'set_piece' && (cue.value.action === 'corner' || cue.value.action === 'free_kick');
-}
-
-function canJoinPressure(
-  anchor: PlannedFrame,
-  candidate: PlannedFrame,
-  configuredWindow = DEFAULT_PRESSURE_WINDOW_SECONDS,
-): boolean {
-  const previousOwner = anchor.teamId ?? anchor.participant;
-  const candidateOwner = candidate.teamId ?? candidate.participant;
-  if (
-    previousOwner === undefined
-    || candidateOwner === undefined
-    || String(previousOwner) !== String(candidateOwner)
-  ) {
-    return false;
-  }
-  const previousClock = anchor.frame.matchClockSeconds;
-  const candidateClock = candidate.frame.matchClockSeconds;
-  if (typeof previousClock === 'number' && typeof candidateClock === 'number') {
-    return candidateClock >= previousClock && candidateClock - previousClock <= configuredWindow;
-  }
-  return candidate.frame.seq - anchor.frame.seq <= 3;
 }
 
 function buildBeat(
@@ -278,8 +252,17 @@ function buildBeat(
       || (participant !== undefined && team.participant === participant))?.name;
 
   return {
-    id: [first.frame.fixtureId, 'commentary', options.projectionGeneration, first.frame.seq, last.frame.seq].join(':'),
+    id: [
+      first.frame.fixtureId,
+      'commentary',
+      options.projectionGeneration,
+      kind,
+      first.frame.seq,
+      last.frame.seq,
+      commentaryCueKey(cues),
+    ].join(':'),
     fixtureId: first.frame.fixtureId,
+    plannerVersion: COMMENTARY_PLAN_VERSION,
     projectionGeneration: options.projectionGeneration,
     kind,
     mustCover: kind === 'major',
@@ -297,6 +280,14 @@ function buildBeat(
     simulationCues: cues,
     fallbackCommentary: fallbackFor(kind, cues, teamName, first.restartContext),
   };
+}
+
+function commentaryCueKey(cues: readonly SimulationCue[]): string {
+  return [...cues]
+    .map((cue) => cue.id)
+    .sort()
+    .map((cueId) => encodeURIComponent(cueId))
+    .join('+');
 }
 
 function fallbackFor(
@@ -318,6 +309,7 @@ function fallbackFor(
       ? `${scorer} scores for ${subject}.${scoreText}`
       : `Goal for ${subject}.${scoreText}`;
   }
+  if (cues.some(isGoalRetraction)) return 'The goal is ruled out.';
 
   const phase = cues.find((cue) => cue.kind === 'phase_change')?.value.phase;
   if (phase === 'half_time') return 'The first half comes to an end.';
@@ -360,8 +352,19 @@ function fallbackFor(
   const setPiece = cues.find((cue) => cue.kind === 'set_piece');
   if (setPiece?.value.action === 'corner') return `${subject} win a corner.`;
   if (setPiece?.value.action === 'free_kick') return `${subject} win a free kick.`;
-  if (cues.some((cue) => cue.kind === 'shot_attempt' || cue.kind === 'shot_outcome')) return `${subject} have an effort.`;
-  if (cues.some((cue) => cue.kind === 'possession_pressure')) return `${subject} move onto the attack.`;
+  if (setPiece?.value.action === 'penalty') return `${subject} are awarded a penalty.`;
+  if (setPiece?.value.action === 'throw_in') return `Throw-in to ${subject}.`;
+  if (setPiece?.value.action === 'goal_kick') return `${subject} take the goal kick.`;
+  if (cues.some((cue) => cue.kind === 'shot_attempt')) return `${subject} have a shot.`;
+  if (cues.some((cue) => cue.kind === 'shot_outcome')) return `${subject} have an effort.`;
+  if (cues.some((cue) => cue.kind === 'possession_change')) return `${subject} take possession.`;
+
+  const possession = cues.find((cue) => cue.kind === 'possession_pressure');
+  if (possession?.pressure === 'safe') return `${subject} keep the ball in a safe area.`;
+  if (possession?.pressure === 'neutral') return `${subject} retain possession.`;
+  if (possession?.pressure === 'danger') return `${subject} advance into a dangerous area.`;
+  if (possession?.pressure === 'high_danger') return `${subject} threaten the goal.`;
+  if (possession) return `${subject} move onto the attack.`;
   return 'A meaningful passage of play develops.';
 }
 

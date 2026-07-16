@@ -60,6 +60,37 @@ function player(overrides) {
   };
 }
 
+function withoutPlayback(scene) {
+  const { playback: _playback, ...truth } = scene;
+  return truth;
+}
+
+function replayContractFrames() {
+  const goalCueId = `cue:${FIXTURE_ID}:goal:replay-contract`;
+  return [
+    frame({ matchClockSeconds: 0, cues: [cue({ kind: 'phase_change', value: { phase: 'first_half' } })] }),
+    frame({ matchClockSeconds: 10, cues: [cue({ kind: 'possession_change', participant: 1, teamId: 'team-a', pressure: 'safe', probableZone: 'safe' })] }),
+    frame({ matchClockSeconds: 30, cues: [cue({ kind: 'possession_change', participant: 2, teamId: 'team-b', pressure: 'attack', probableZone: 'attack' })] }),
+    frame({ matchClockSeconds: 119, cues: [cue({ kind: 'possession_pressure', participant: 1, teamId: 'team-a', pressure: 'danger', probableZone: 'danger' })] }),
+    frame({ matchClockSeconds: 121, cues: [cue({ kind: 'possession_pressure', participant: 1, teamId: 'team-a', pressure: 'high_danger', probableZone: 'high_danger' })] }),
+    frame({ matchClockSeconds: 130, cues: [cue({ kind: 'set_piece', participant: 1, teamId: 'team-a', probableZone: 'safe', value: { action: 'throw_in' } })] }),
+    frame({ matchClockSeconds: 140, cues: [cue({ kind: 'set_piece', participant: 2, teamId: 'team-b', probableZone: 'attack', value: { action: 'throw_in' } })] }),
+    frame({ matchClockSeconds: 150, cues: [cue({ kind: 'shot_attempt', participant: 1, teamId: 'team-a' })] }),
+    frame({ matchClockSeconds: 160, cues: [
+      cue({ id: goalCueId, kind: 'goal_confirmed', lifecycle: 'confirmed', participant: 1, teamId: 'team-a' }),
+      cue({ kind: 'score_commit', lifecycle: 'confirmed', value: { participant1: 1, participant2: 0 } }),
+    ] }),
+    frame({ matchClockSeconds: 170, cues: [cue({ id: goalCueId, kind: 'incident_retracted', lifecycle: 'retracted', participant: 1, teamId: 'team-a', value: { action: 'goal' } })] }),
+    frame({ matchClockSeconds: 180, cues: [cue({ kind: 'card', participant: 2, teamId: 'team-b', value: { action: 'yellow_card' } })] }),
+    frame({ matchClockSeconds: 190, cues: [cue({ kind: 'substitution', participant: 2, teamId: 'team-b' })] }),
+    frame({ matchClockSeconds: 200, cues: [cue({ kind: 'var', participant: 2, teamId: 'team-b' })] }),
+    frame({ matchClockSeconds: 210, cues: [cue({ kind: 'restart', participant: 1, teamId: 'team-a' })] }),
+    frame({ matchClockSeconds: 2700, cues: [cue({ kind: 'phase_change', value: { phase: 'second_half' } })] }),
+    frame({ matchClockSeconds: 2710, cues: [cue({ kind: 'set_piece', participant: 1, teamId: 'team-a', probableZone: 'safe', value: { action: 'throw_in' } })] }),
+    frame({ matchClockSeconds: 2720, cues: [cue({ kind: 'set_piece', participant: 2, teamId: 'team-b', probableZone: 'safe', value: { action: 'throw_in' } })] }),
+  ];
+}
+
 test.beforeEach(() => {
   seqCounter = 0;
   revisionCounter = 0;
@@ -123,12 +154,41 @@ test('runs the full goal choreography: provisional tension never celebrates, con
   assert.equal(goal.beats.length, 2, 'exactly tension then celebration, no third beat for score_commit');
   assert.equal(goal.beats[0].kind, 'tension');
   assert.equal(goal.beats[0].lifecycle, 'provisional');
-  assert.equal(goal.beats[0].scoreAtMoment, undefined, 'a provisional/tension beat must never carry a settled score');
+  assert.deepEqual(goal.beats[0].scoreAtMoment, { participant1: 0, participant2: 0 }, 'tension carries the source-grounded pre-goal score, never the settled score');
   assert.equal(goal.beats[1].kind, 'celebration');
   assert.equal(goal.beats[1].lifecycle, 'confirmed');
   assert.deepEqual(goal.beats[1].scoreAtMoment, { participant1: 1, participant2: 0 });
 
   assert.ok(goal.scoreEvents.includes('opener'), 'first goal of the match from 0-0 should be classified as opener');
+});
+
+test('a later goal tension beat preserves the pre-goal score before and after confirmation', () => {
+  const firstGoalFrame = frame({
+    cues: [
+      cue({ id: `cue:${FIXTURE_ID}:goal:601`, kind: 'goal_confirmed', lifecycle: 'confirmed', participant: 1, teamId: 'team-a' }),
+      cue({ kind: 'score_commit', lifecycle: 'confirmed', value: { participant1: 1, participant2: 0 } }),
+    ],
+  });
+  const secondGoalCueId = `cue:${FIXTURE_ID}:goal:602`;
+  const secondPendingFrame = frame({
+    cues: [cue({ id: secondGoalCueId, kind: 'goal_pending', lifecycle: 'provisional', participant: 1, teamId: 'team-a' })],
+  });
+  const secondConfirmFrame = frame({
+    cues: [
+      cue({ id: secondGoalCueId, kind: 'goal_confirmed', lifecycle: 'confirmed', participant: 1, teamId: 'team-a' }),
+      cue({ kind: 'score_commit', lifecycle: 'confirmed', value: { participant1: 2, participant2: 0 } }),
+    ],
+  });
+
+  const pendingScenes = buildGameViewTimeline([firstGoalFrame, secondPendingFrame]);
+  const pendingGoal = pendingScenes.find((scene) => scene.sourceFrameIds.includes(secondPendingFrame.id));
+  assert.deepEqual(pendingGoal.beats[0].scoreAtMoment, { participant1: 1, participant2: 0 });
+
+  const confirmedScenes = buildGameViewTimeline([firstGoalFrame, secondPendingFrame, secondConfirmFrame]);
+  const confirmedGoal = confirmedScenes.find((scene) => scene.sourceFrameIds.includes(secondPendingFrame.id));
+  assert.deepEqual(confirmedGoal.scoreAtMoment, { participant1: 2, participant2: 0 });
+  assert.deepEqual(confirmedGoal.beats[0].scoreAtMoment, { participant1: 1, participant2: 0 });
+  assert.deepEqual(confirmedGoal.beats[1].scoreAtMoment, { participant1: 2, participant2: 0 });
 });
 
 test('a goal confirmed with no prior goal_pending still produces a takeover with only a celebration beat', () => {
@@ -188,6 +248,92 @@ test('retracts a confirmed goal after the fact, restoring the score to its value
   assert.deepEqual(retractedScene.scoreAtMoment, { participant1: 1, participant2: 0 }, 'restores to the score immediately before the retracted goal, i.e. after the first goal');
 });
 
+test('set_piece scenes carry the cue zone, falling back to the last known possession zone', () => {
+  // A throw-in cue with its own zone keeps it.
+  const zonedThrowIn = frame({ cues: [cue({ kind: 'set_piece', participant: 1, teamId: 'team-a', probableZone: 'danger', value: { action: 'throw_in' } })] });
+  const [zonedScene] = buildGameViewTimeline([zonedThrowIn]).filter((scene) => scene.kind === 'set_piece');
+  assert.equal(zonedScene.zone, 'danger');
+
+  // Real feeds routinely omit the zone on throw-ins: the scene inherits the
+  // last zone possession placed the play in, so the renderer can stage the
+  // dead ball where play actually was.
+  const possession = frame({ cues: [cue({ kind: 'possession_pressure', participant: 1, teamId: 'team-a', probableZone: 'attack', pressure: 'attack' })] });
+  const zonelessThrowIn = frame({ cues: [cue({ kind: 'set_piece', participant: 2, teamId: 'team-b', value: { action: 'throw_in' } })] });
+  const scenes = buildGameViewTimeline([possession, zonelessThrowIn]);
+  const setPiece = scenes.find((scene) => scene.kind === 'set_piece');
+  assert.equal(setPiece.zone, 'attack');
+});
+
+test('ordinary provisional and confirmed incident revisions upgrade one scene in place', () => {
+  const incidentId = `cue:${FIXTURE_ID}:corner:one-real-event`;
+  const provisional = frame({
+    matchClockSeconds: 120,
+    cues: [cue({
+      id: incidentId,
+      kind: 'set_piece',
+      lifecycle: 'provisional',
+      participant: 2,
+      teamId: 'team-b',
+      probableZone: 'danger',
+      value: { action: 'corner' },
+    })],
+  });
+  const confirmed = frame({
+    matchClockSeconds: 120,
+    cues: [cue({
+      id: incidentId,
+      kind: 'set_piece',
+      lifecycle: 'confirmed',
+      participant: 2,
+      teamId: 'team-b',
+      probableZone: 'high_danger',
+      value: { action: 'corner' },
+    })],
+  });
+
+  const corners = buildGameViewTimeline([provisional, confirmed])
+    .filter((scene) => scene.kind === 'set_piece' && scene.sourceAction === 'corner');
+
+  assert.equal(corners.length, 1, 'one source incident must never play as two corners');
+  assert.equal(corners[0].lifecycle, 'confirmed');
+  assert.equal(corners[0].zone, 'high_danger');
+  assert.deepEqual(corners[0].sourceFrameIds, [provisional.id, confirmed.id]);
+});
+
+test('a retracted minor incident is omitted from the finalized scene timeline', () => {
+  const incidentId = `cue:${FIXTURE_ID}:corner:retracted`;
+  const provisional = frame({
+    matchClockSeconds: 240,
+    cues: [cue({
+      id: incidentId,
+      kind: 'set_piece',
+      lifecycle: 'provisional',
+      participant: 1,
+      teamId: 'team-a',
+      value: { action: 'corner' },
+    })],
+  });
+  const retracted = frame({
+    matchClockSeconds: 241,
+    cues: [cue({
+      id: incidentId,
+      kind: 'incident_retracted',
+      lifecycle: 'retracted',
+      participant: 1,
+      teamId: 'team-a',
+      value: { action: 'corner' },
+    })],
+  });
+
+  const scenes = buildGameViewTimeline([provisional, retracted]);
+
+  assert.equal(
+    scenes.some((scene) => scene.kind === 'set_piece' && scene.sourceAction === 'corner'),
+    false,
+  );
+  assert.equal(scenes.some((scene) => scene.kind === 'goal_retracted'), false);
+});
+
 test('within one frame, a red card outranks a simultaneous set piece and both are still emitted in priority order', () => {
   const cardCue = cue({ kind: 'card', participant: 1, teamId: 'team-a', value: { action: 'red_card' } });
   const setPieceCue = cue({ kind: 'set_piece', participant: 2, teamId: 'team-b' });
@@ -198,6 +344,8 @@ test('within one frame, a red card outranks a simultaneous set piece and both ar
   assert.equal(scenes.length, 2);
   assert.equal(scenes[0].kind, 'card', 'red card is processed first (higher takeover priority)');
   assert.equal(scenes[1].kind, 'set_piece');
+  assert.deepEqual(scenes[0].sourceCueIds, [cardCue.id]);
+  assert.deepEqual(scenes[1].sourceCueIds, [setPieceCue.id]);
 });
 
 test('a yellow card still outranks a set piece, but ranks below a red card tier', () => {
@@ -210,6 +358,32 @@ test('a yellow card still outranks a set piece, but ranks below a red card tier'
   assert.equal(scenes.length, 2);
   assert.equal(scenes[0].kind, 'card');
   assert.equal(scenes[1].kind, 'set_piece');
+});
+
+test('same-kind scenes from one frame have distinct cue-grounded ids', () => {
+  const firstCard = cue({
+    id: `cue:${FIXTURE_ID}:card:first`,
+    kind: 'card',
+    participant: 1,
+    teamId: 'team-a',
+    value: { action: 'yellow_card' },
+  });
+  const secondCard = cue({
+    id: `cue:${FIXTURE_ID}:card:second`,
+    kind: 'card',
+    participant: 2,
+    teamId: 'team-b',
+    value: { action: 'yellow_card' },
+  });
+
+  const scenes = buildGameViewTimeline([frame({ cues: [firstCard, secondCard] })]);
+
+  assert.equal(scenes.length, 2);
+  assert.notEqual(scenes[0].id, scenes[1].id);
+  assert.deepEqual(scenes.map((scene) => scene.sourceCueIds), [
+    [firstCard.id],
+    [secondCard.id],
+  ]);
 });
 
 test('phase_change cues close ambient and produce a phase_break scene, tracking the new phase for later scenes', () => {
@@ -241,6 +415,158 @@ test('produces the same scene sequence regardless of input frame order (sorted d
 
   assert.deepEqual(shuffled, inOrder);
   assert.deepEqual(inOrder.map((scene) => scene.kind), ['ambient', 'set_piece', 'shot', 'card']);
+});
+
+test('replay summary keeps the last real ambient scene in each 120-second match-clock bucket', () => {
+  const first = frame({ matchClockSeconds: 10, cues: [cue({ kind: 'possession_change', participant: 1, teamId: 'team-a', pressure: 'safe', probableZone: 'safe' })] });
+  const second = frame({ matchClockSeconds: 30, cues: [cue({ kind: 'possession_change', participant: 2, teamId: 'team-b', pressure: 'attack', probableZone: 'attack' })] });
+  const bucketZeroLast = frame({ matchClockSeconds: 119, cues: [cue({ kind: 'possession_pressure', participant: 1, teamId: 'team-a', pressure: 'danger', probableZone: 'danger' })] });
+  const bucketOneLast = frame({ matchClockSeconds: 121, cues: [cue({ kind: 'possession_pressure', participant: 1, teamId: 'team-a', pressure: 'high_danger', probableZone: 'high_danger' })] });
+
+  const complete = buildGameViewTimeline([first, second, bucketZeroLast, bucketOneLast]);
+  const summary = buildGameViewTimeline(
+    [first, second, bucketZeroLast, bucketOneLast],
+    { pacing: { mode: 'replay' } },
+  );
+
+  assert.equal(complete.filter((scene) => scene.kind === 'ambient').length, 4, 'unpaced/live remains complete');
+  assert.deepEqual(
+    summary.filter((scene) => scene.kind === 'ambient').map((scene) => scene.sourceFrameIds),
+    [[bucketZeroLast.id], [bucketOneLast.id]],
+  );
+});
+
+test('replay summary samples routine set pieces once per source action per half and retains every attacking set piece', () => {
+  const frames = [];
+  const addPhase = (phase, clock) => frames.push(frame({ matchClockSeconds: clock, cues: [cue({ kind: 'phase_change', value: { phase } })] }));
+  const addSetPiece = (action, zone, clock) => frames.push(frame({
+    matchClockSeconds: clock,
+    cues: [cue({ kind: 'set_piece', participant: 1, teamId: 'team-a', probableZone: zone, value: { action } })],
+  }));
+
+  addPhase('first_half', 0);
+  addSetPiece('throw_in', 'safe', 10);
+  addSetPiece('throw_in', 'attack', 20);
+  addSetPiece('goal_kick', 'safe', 30);
+  addSetPiece('goal_kick', 'safe', 40);
+  addSetPiece('free_kick', 'safe', 50);
+  addSetPiece('free_kick', 'attack', 60);
+  addSetPiece('free_kick', 'danger', 70);
+  addSetPiece('free_kick', 'danger', 80);
+  addSetPiece('corner', 'danger', 90);
+  addSetPiece('corner', 'high_danger', 100);
+  addSetPiece('penalty', 'high_danger', 110);
+  addPhase('second_half', 2700);
+  addSetPiece('throw_in', 'safe', 2710);
+  addSetPiece('throw_in', 'attack', 2720);
+  addSetPiece('goal_kick', 'safe', 2730);
+  addSetPiece('goal_kick', 'safe', 2740);
+  addSetPiece('free_kick', 'safe', 2750);
+  addSetPiece('free_kick', 'attack', 2760);
+  addSetPiece('free_kick', 'high_danger', 2770);
+  addSetPiece('free_kick', 'high_danger', 2780);
+  addSetPiece('corner', 'danger', 2790);
+  addSetPiece('corner', 'high_danger', 2800);
+  addSetPiece('penalty', 'high_danger', 2810);
+
+  const summarySetPieces = buildGameViewTimeline(frames, { pacing: { mode: 'replay' } })
+    .filter((scene) => scene.kind === 'set_piece');
+  const count = (action, zone) => summarySetPieces.filter((scene) => (
+    scene.sourceAction === action && (zone === undefined || scene.zone === zone)
+  )).length;
+
+  assert.equal(count('throw_in'), 2, 'one routine throw-in per half');
+  assert.equal(count('goal_kick'), 2, 'one routine goal kick per half');
+  assert.equal(count('free_kick', 'safe') + count('free_kick', 'attack'), 2, 'one routine free kick per half');
+  assert.equal(count('free_kick', 'danger'), 2, 'every danger free kick survives');
+  assert.equal(count('free_kick', 'high_danger'), 2, 'every high-danger free kick survives');
+  assert.equal(count('corner'), 4, 'every corner survives');
+  assert.equal(count('penalty'), 2, 'every penalty survives');
+});
+
+test('replay selection is a deterministic truth-preserving subsequence and complete mode retains every scene', () => {
+  const frames = replayContractFrames();
+  const complete = buildGameViewTimeline(frames);
+  const completeReplay = buildGameViewTimeline(frames, {
+    pacing: { mode: 'replay', sceneSelection: 'complete', targetDurationMs: 1 },
+  });
+  const summary = buildGameViewTimeline(frames, { pacing: { mode: 'replay', targetDurationMs: 1 } });
+  const shuffledSummary = buildGameViewTimeline([...frames].reverse(), {
+    pacing: { mode: 'replay', targetDurationMs: 1 },
+  });
+
+  assert.deepEqual(completeReplay.map((scene) => scene.id), complete.map((scene) => scene.id));
+  completeReplay.forEach((scene, index) => {
+    assert.deepEqual(withoutPlayback(scene), complete[index], 'complete replay only adds pacing metadata');
+  });
+
+  let previousIndex = -1;
+  for (const scene of summary) {
+    const completeIndex = complete.findIndex((candidate) => candidate.id === scene.id);
+    assert.ok(completeIndex > previousIndex, 'summary is a strict chronological subsequence');
+    assert.deepEqual(withoutPlayback(scene), complete[completeIndex], 'selection preserves all scene truth and source ids');
+    previousIndex = completeIndex;
+  }
+  assert.deepEqual(shuffledSummary, summary, 'input order cannot change replay selection or pacing');
+
+  const protectedKinds = new Set([
+    'goal_sequence', 'goal_retracted', 'card', 'var_review', 'substitution',
+    'phase_break', 'shot', 'restart',
+  ]);
+  const summaryIds = new Set(summary.map((scene) => scene.id));
+  for (const scene of complete.filter((candidate) => protectedKinds.has(candidate.kind))) {
+    assert.ok(summaryIds.has(scene.id), `protected scene ${scene.id} (${scene.kind}) was dropped`);
+  }
+});
+
+test('complete replay playbackRate accelerates every scene without changing truth, count, or order', () => {
+  const frames = replayContractFrames();
+  const normal = buildGameViewTimeline(frames, {
+    pacing: { mode: 'replay', sceneSelection: 'complete', targetDurationMs: null },
+  });
+  const fast = buildGameViewTimeline(frames, {
+    pacing: {
+      mode: 'replay',
+      sceneSelection: 'complete',
+      targetDurationMs: null,
+      playbackRate: 2,
+    },
+  });
+
+  assert.equal(fast.length, normal.length);
+  let runningOffset = 0;
+  fast.forEach((scene, index) => {
+    const normalScene = normal[index];
+    assert.deepEqual(withoutPlayback(scene), withoutPlayback(normalScene));
+    assert.equal(scene.playback.playbackOffsetMs, runningOffset);
+    assert.equal(
+      scene.playback.playbackDurationMs,
+      Math.max(1, Math.round(normalScene.playback.playbackDurationMs / 2)),
+    );
+    runningOffset += scene.playback.playbackDurationMs;
+  });
+});
+
+test('replay target never compresses retained choreography below its scene minimum or ambient below 900ms', () => {
+  const scenes = buildGameViewTimeline(replayContractFrames(), {
+    pacing: { mode: 'replay', targetDurationMs: 1 },
+  });
+
+  let runningOffset = 0;
+  for (const scene of scenes) {
+    assert.equal(scene.playback.playbackOffsetMs, runningOffset, 'playback windows tile without gaps');
+    if (scene.kind === 'ambient') {
+      assert.ok(scene.playback.playbackDurationMs >= 900, 'ambient transition keeps its readability floor');
+    } else {
+      assert.equal(
+        scene.playback.playbackDurationMs,
+        scene.durationHint.minMs,
+        `${scene.kind} keeps its full staged choreography window`,
+      );
+    }
+    runningOffset += scene.playback.playbackDurationMs;
+  }
+  assert.ok(runningOffset > 1, 'the target is best-effort when protected/floored time already exceeds it');
 });
 
 test('every emitted scene carries at least one sourceFrameId', () => {

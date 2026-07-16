@@ -1,7 +1,7 @@
 import type { GameCrewMatchStatus, GameViewScene, GameViewSceneKind, MatchEngineScore } from '@gamecrew/core';
 
 import type { MatchSessionStatus } from '../../state/match-session';
-import type { PlaybackMode } from '../../state/playback-engine';
+import type { ActiveSceneWindow, PlaybackMode } from '../../state/playback-engine';
 import type { GameViewLoadStatus } from './game-view-board-logic';
 
 /**
@@ -26,6 +26,34 @@ export interface GameViewPresentationState {
   score: { home: number; away: number };
 }
 
+/**
+ * Gives every renderer the playback engine's concrete scene window instead
+ * of letting components independently reinterpret `durationHint`. The
+ * director's source-grounded fields stay untouched; only the presentation
+ * duration is narrowed to the active instance. A mismatched window is
+ * ignored defensively so a stale React render can never time the wrong
+ * scene.
+ */
+export function resolvePresentationScene(
+  scene: GameViewScene | null | undefined,
+  window: ActiveSceneWindow | undefined,
+): GameViewScene | null | undefined {
+  if (!scene || !window || window.sceneId !== scene.id) return scene;
+
+  const durationMs = Math.max(0, window.durationMs);
+  if (
+    scene.durationHint.minMs === durationMs
+    && scene.durationHint.maxMs === durationMs
+  ) {
+    return scene;
+  }
+
+  return {
+    ...scene,
+    durationHint: { minMs: durationMs, maxMs: durationMs },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // No score spoiler (fix #3)
 // ---------------------------------------------------------------------------
@@ -46,9 +74,10 @@ export interface GameViewPresentationState {
  *
  * - for any non-`goal_sequence` scene, or a `goal_sequence` scene with no
  *   beats, returns the scene's own `scoreAtMoment` (unchanged behavior);
- * - for a `goal_sequence` scene whose *current* beat is `tension`, returns
- *   `previousScore` (the score the rail was already showing before this
- *   scene started) rather than the scene's post-goal `scoreAtMoment`;
+ * - for a `goal_sequence` scene whose *current* beat is `tension`, prefers
+ *   that beat's source-grounded pre-goal score, falling back to
+ *   `previousScore` for legacy timelines, rather than reading the scene's
+ *   post-goal `scoreAtMoment`;
  * - for a `goal_sequence` scene whose current beat is `celebration` (or any
  *   later beat), returns that beat's own `scoreAtMoment` (falling back to
  *   the scene's) -- the commit moment.
@@ -74,7 +103,7 @@ export function resolveScoreRailScore(
   const clampedIndex = Math.min(Math.max(activeBeatIndex, 0), beats.length - 1);
   const activeBeat = beats[clampedIndex];
 
-  if (activeBeat?.kind === 'tension') return previousScore;
+  if (activeBeat?.kind === 'tension') return activeBeat.scoreAtMoment ?? previousScore;
   return activeBeat?.scoreAtMoment ?? scene.scoreAtMoment;
 }
 
@@ -240,22 +269,15 @@ export function mapSourceActionToSetPieceVariant(
 // ---------------------------------------------------------------------------
 
 /**
- * Set-piece variants minor enough that stopping the world for a full-screen
- * `SetPieceVignette` overstates them -- a throw-in or free kick is a routine
- * restart, not a moment. `corner` and `penalty` keep the full vignette
- * because they carry real goal threat. Kept as its own set (rather than
- * inverting `SET_PIECE_LABELS` or similar) so this decision reads as a
- * product call, not a byproduct of some other list's shape.
- */
-const MINOR_SET_PIECE_VARIANTS: ReadonlySet<ScreenSetPieceVariant> = new Set(['throw_in', 'free_kick']);
-
-/**
  * Decides whether a `set_piece` scene should take over the full screen
  * (`SetPieceVignette`) or render as a compact badge over the still-visible
- * ambient board (fix #2: "minor set pieces stop blanking the board").
- * Unrecognized/missing `sourceAction` defaults to the full vignette --
- * same safe-default posture as `mapSourceActionToSetPieceVariant`, since an
- * unrecognized set-piece type shouldn't silently downgrade to a badge.
+ * board. Product rule (2026-07-15, with the 22-player formation view): the
+ * pitch is never blanked for a dead ball -- the players hold their
+ * positions (see the cluster's 'hold' plan) and a badge names the moment.
+ * Only an explicitly recognized `penalty` still owns the screen; an
+ * unrecognized or missing set-piece type therefore defaults to the QUIET
+ * treatment, not the loud one (this inverts the original safe-default,
+ * which was how "MOROCCO FREE KICK" walls ended up covering the match).
  *
  * This does not change the playback advancement contract: the scene still
  * occupies its full playback window either way (see
@@ -263,7 +285,5 @@ const MINOR_SET_PIECE_VARIANTS: ReadonlySet<ScreenSetPieceVariant> = new Set(['t
  * only decides which visual treatment renders for that window.
  */
 export function shouldSetPieceUseFullVignette(sourceAction: string | undefined): boolean {
-  const variant = mapSourceActionToSetPieceVariant(sourceAction);
-  if (!variant) return true;
-  return !MINOR_SET_PIECE_VARIANTS.has(variant);
+  return mapSourceActionToSetPieceVariant(sourceAction) === 'penalty';
 }

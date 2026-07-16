@@ -18,6 +18,7 @@ import {
   AccessibilityInfo,
   Animated,
   findNodeHandle,
+  FlatList,
   type LayoutChangeEvent,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -777,6 +778,25 @@ export function MatchDetailScreen({
   );
   const pulseItems = getPulseFeedItems(pulseLoadState.entries);
   const visibleGamePresentation = activeMode === 'game' ? gamePresentation : null;
+  const pulseEmptyState = pulseLoadState.status === 'loading' ? (
+    <PulseStatePanel title="Loading Match Pulse" body="Loading the saved match story." />
+  ) : pulseLoadState.status === 'error' ? (
+    <PulseStatePanel
+      title="Match Pulse unavailable"
+      body={getPulseErrorCopy(pulseLoadState.message)}
+      actionLabel="Retry"
+      onAction={reload}
+    />
+  ) : (
+    <PulseStatePanel
+      title={match.status === 'live' ? 'No match updates yet' : 'No saved Match Pulse yet'}
+      body={match.status === 'live'
+        ? 'The match story will appear here as moments are confirmed.'
+        : 'Refresh to check whether this completed match has been added to the archive.'}
+      actionLabel="Refresh"
+      onAction={reload}
+    />
+  );
 
   return (
     <SafeAreaView edges={['top', 'bottom']} style={styles.detailScreen}>
@@ -856,46 +876,35 @@ export function MatchDetailScreen({
       </View>
 
       {activeMode === 'pulse' ? (
-        <ScrollView
+        <FlatList
+          data={pulseItems}
           style={styles.pulseScroll}
           contentContainerStyle={styles.pulseStack}
           contentInsetAdjustmentBehavior="automatic"
-        >
-          {pulseLoadState.status === 'loading' && pulseItems.length === 0 ? (
-            <PulseStatePanel title="Loading Match Pulse" body="Loading the saved match story." />
-          ) : pulseLoadState.status === 'error' && pulseItems.length === 0 ? (
+          initialNumToRender={12}
+          keyExtractor={(item) => item.id}
+          ListEmptyComponent={pulseEmptyState}
+          ListHeaderComponent={pulseLoadState.status === 'error' && pulseItems.length > 0 ? (
             <PulseStatePanel
-              title="Match Pulse unavailable"
-              body={getPulseErrorCopy(pulseLoadState.message)}
+              title="Latest update unavailable"
+              body="Showing the saved Match Pulse timeline. Try again shortly for the latest moments."
               actionLabel="Retry"
               onAction={reload}
             />
-          ) : pulseItems.length === 0 ? (
-            <PulseStatePanel
-              title={match.status === 'live' ? 'No match updates yet' : 'No saved Match Pulse yet'}
-              body={match.status === 'live'
-                ? 'The match story will appear here as moments are confirmed.'
-                : 'Refresh to check whether this completed match has been added to the archive.'}
-              actionLabel="Refresh"
-              onAction={reload}
-            />
-          ) : (
-            <>
-              {pulseLoadState.status === 'error' ? (
-                <PulseStatePanel
-                  title="Latest update unavailable"
-                  body="Showing the saved Match Pulse timeline. Try again shortly for the latest moments."
-                  actionLabel="Retry"
-                  onAction={reload}
-                />
-              ) : null}
-              {pulseItems.map((item) => <PulseMomentRow key={item.id} item={item} />)}
-            </>
-          )}
-        </ScrollView>
+          ) : null}
+          maxToRenderPerBatch={12}
+          removeClippedSubviews={Platform.OS === 'android'}
+          renderItem={({ item }) => <PulseMomentRow item={item} />}
+          windowSize={9}
+        />
       ) : (
         <View style={styles.gameViewContent}>
-          <GameViewScreen match={match} onPresentationChange={setGamePresentation} />
+          <GameViewScreen
+            commentaryEntries={pulseLoadState.entries}
+            commentaryProjectionGeneration={pulseLoadState.projectionGeneration}
+            match={match}
+            onPresentationChange={setGamePresentation}
+          />
           {__DEV__ ? (
             <GameViewDebugToggle fixtureId={match.txline.fixtureId} isLive={match.status === 'live'} />
           ) : null}

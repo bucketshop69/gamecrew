@@ -41,7 +41,13 @@ export type {
 } from './match';
 
 export { sampleTxlineMatches } from './sample-data';
-export { buildGameViewTimeline, computeBeatNarrative, planCommentaryBeats, replayMatchEngine } from './match-engine';
+export {
+  buildGameViewTimeline,
+  COMMENTARY_PLAN_VERSION,
+  computeBeatNarrative,
+  planCommentaryBeats,
+  replayMatchEngine,
+} from './match-engine';
 export type {
   BeatNarrative,
   BeatNarrativeDiscipline,

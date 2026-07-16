@@ -229,6 +229,8 @@ export interface CommentaryBeatSource {
 export interface CommentaryBeat {
   id: string;
   fixtureId: number | string;
+  /** Deterministic planner contract used to invalidate older serialized beats. */
+  plannerVersion: number;
   /** Projection generation supplied by the durable consumer. */
   projectionGeneration: number;
   kind: CommentaryBeatKind;

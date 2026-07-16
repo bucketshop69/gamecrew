@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { planCommentaryBeats } from '../src/match-engine/index.ts';
+import {
+  COMMENTARY_PLAN_VERSION,
+  planCommentaryBeats,
+} from '../src/match-engine/index.ts';
 
 const fixtureId = 18179759;
 
@@ -51,7 +54,7 @@ const teams = [
   { participant: 2, teamId: 'ecuador', name: 'Ecuador' },
 ];
 
-test('groups same-team pressure frames and preserves generation and source coverage', () => {
+test('emits corner and shot immediately with stable versioned ids and no overlapping summary', () => {
   const corner = cue('corner:1', 'set_piece', 10, {
     participant: 1,
     teamId: 'mexico',
@@ -68,30 +71,194 @@ test('groups same-team pressure frames and preserves generation and source cover
     frame(10, 620, [corner]),
   ], { projectionGeneration: 4, teams });
 
-  assert.equal(beats.length, 1);
-  assert.equal(beats[0].id, '18179759:commentary:4:10:11');
-  assert.equal(beats[0].projectionGeneration, 4);
-  assert.equal(beats[0].mustCover, false);
-  assert.equal(beats[0].kind, 'pressure');
-  assert.deepEqual(beats[0].sourceFrameIds, ['18179759:10', '18179759:11']);
-  assert.deepEqual(beats[0].cueIds, ['corner:1', 'shot:2']);
-  assert.match(beats[0].fallbackCommentary, /^Mexico keep the pressure on/);
-  assert.match(beats[0].fallbackCommentary, /1 corner and 1 effort/);
-  assert.doesNotMatch(beats[0].fallbackCommentary, /coordinate|left|right|penalty area/i);
+  assert.equal(COMMENTARY_PLAN_VERSION, 3);
+  assert.equal(beats.length, 2);
+  assert.deepEqual(beats.map((beat) => beat.kind), ['routine', 'routine']);
+  assert.deepEqual(beats.map((beat) => beat.id), [
+    '18179759:commentary:4:routine:10:10:corner%3A1',
+    '18179759:commentary:4:routine:11:11:shot%3A2',
+  ]);
+  assert.deepEqual(beats.map((beat) => beat.plannerVersion), [3, 3]);
+  assert.deepEqual(beats.map((beat) => beat.sourceFrameIds), [
+    ['18179759:10'],
+    ['18179759:11'],
+  ]);
+  assert.equal(beats[0].fallbackCommentary, 'Mexico win a corner.');
+  assert.equal(beats[1].fallbackCommentary, 'Mexico have an effort.');
 });
 
-test('keeps major beats isolated and collapses later confirmed enrichment', () => {
-  const corner = cue('corner:1', 'set_piece', 20, {
+test('splits same-frame card and corner cues into distinct immediate beats', () => {
+  const yellowCard = cue('card:same-frame', 'card', 12, {
+    participant: 2,
+    teamId: 'ecuador',
+    value: { action: 'yellow_card' },
+  });
+  const corner = cue('corner:same-frame', 'set_piece', 12, {
     participant: 1,
     teamId: 'mexico',
     value: { action: 'corner' },
   });
-  const goal = cue('goal:7', 'goal_confirmed', 21, {
+
+  const beats = planCommentaryBeats([
+    frame(12, 680, [yellowCard, corner]),
+  ], { projectionGeneration: 4, teams });
+
+  assert.equal(beats.length, 2);
+  assert.deepEqual(beats.map((beat) => beat.id), [
+    '18179759:commentary:4:routine:12:12:card%3Asame-frame',
+    '18179759:commentary:4:routine:12:12:corner%3Asame-frame',
+  ]);
+  assert.deepEqual(beats.map((beat) => beat.cueIds), [
+    ['card:same-frame'],
+    ['corner:same-frame'],
+  ]);
+  assert.deepEqual(beats.map((beat) => beat.fallbackCommentary), [
+    'Ecuador receive a yellow card.',
+    'Mexico win a corner.',
+  ]);
+});
+
+test('admits throw-ins and observed goal kicks as immediate beats', () => {
+  const throwIn = cue('throw:1', 'set_piece', 20, {
+    participant: 2,
+    teamId: 'ecuador',
+    value: { action: 'throw_in' },
+  });
+  const goalKick = cue('goal-kick:1', 'set_piece', 21, {
+    lifecycle: 'observed',
+    participant: 1,
+    teamId: 'mexico',
+    value: { action: 'goal_kick' },
+  });
+
+  const beats = planCommentaryBeats([
+    frame(20, 700, [throwIn]),
+    frame(21, 710, [goalKick]),
+  ], { projectionGeneration: 0, teams });
+
+  assert.deepEqual(beats.map((beat) => beat.fallbackCommentary), [
+    'Throw-in to Ecuador.',
+    'Mexico take the goal kick.',
+  ]);
+  assert.deepEqual(beats.map((beat) => beat.cueIds), [['throw:1'], ['goal-kick:1']]);
+});
+
+test('admits possession changes and all pressure zones while collapsing repeated identical pressure', () => {
+  const possession = cue('possession', 'possession_change', 30, {
+    updateMode: 'state_replace',
+    lifecycle: 'observed',
+    participant: 1,
+    teamId: 'mexico',
+  });
+  const safePressure = (seq, teamId = 'mexico', participant = 1) => cue('pressure', 'possession_pressure', seq, {
+    updateMode: 'state_replace',
+    lifecycle: 'observed',
+    basis: 'derived_probable',
+    participant,
+    teamId,
+    pressure: 'safe',
+    probableZone: 'safe',
+  });
+  const neutralPressure = cue('pressure', 'possession_pressure', 34, {
+    updateMode: 'state_replace',
+    lifecycle: 'observed',
+    basis: 'derived_probable',
+    participant: 2,
+    teamId: 'ecuador',
+    pressure: 'neutral',
+    probableZone: 'neutral',
+  });
+  const advancedPressure = (seq, pressure) => cue('pressure', 'possession_pressure', seq, {
+    updateMode: 'state_replace',
+    lifecycle: 'observed',
+    basis: 'derived_probable',
+    participant: 2,
+    teamId: 'ecuador',
+    pressure,
+    probableZone: pressure,
+  });
+
+  const beats = planCommentaryBeats([
+    frame(30, 800, [possession]),
+    frame(31, 810, [safePressure(31)]),
+    frame(32, 820, [safePressure(32)]),
+    frame(33, 830, [safePressure(33, 'ecuador', 2)]),
+    frame(34, 840, [neutralPressure]),
+    frame(35, 850, [advancedPressure(35, 'attack')]),
+    frame(36, 860, [advancedPressure(36, 'danger')]),
+    frame(37, 870, [advancedPressure(37, 'high_danger')]),
+  ], { projectionGeneration: 0, teams });
+
+  assert.deepEqual(beats.map((beat) => beat.sourceFrameIds), [
+    ['18179759:30'],
+    ['18179759:31'],
+    ['18179759:33'],
+    ['18179759:34'],
+    ['18179759:35'],
+    ['18179759:36'],
+    ['18179759:37'],
+  ]);
+  assert.deepEqual(beats.map((beat) => beat.fallbackCommentary), [
+    'Mexico take possession.',
+    'Mexico keep the ball in a safe area.',
+    'Ecuador keep the ball in a safe area.',
+    'Ecuador retain possession.',
+    'Ecuador move onto the attack.',
+    'Ecuador advance into a dangerous area.',
+    'Ecuador threaten the goal.',
+  ]);
+});
+
+test('collapses provisional and confirmed routine revisions at the first confirmed anchor', () => {
+  const provisional = cue('corner:revised', 'set_piece', 40, {
+    lifecycle: 'provisional',
+    revision: 1,
+    participant: 1,
+    teamId: 'mexico',
+    value: { action: 'corner' },
+  });
+  const confirmed = { ...provisional, lifecycle: 'confirmed', revision: 2, sourceSeqs: [40, 41] };
+  const enriched = {
+    ...confirmed,
+    revision: 3,
+    sourceSeqs: [40, 41, 43],
+    player: {
+      normativeId: 99,
+      participant: 1,
+      teamId: 'mexico',
+      sourcePreferredName: 'Quinones, Julian',
+      displayName: 'Julián Quiñones',
+    },
+  };
+
+  const beats = planCommentaryBeats([
+    frame(40, 900, [provisional]),
+    frame(41, 900, [confirmed]),
+    frame(43, 900, [enriched]),
+  ], { projectionGeneration: 1, teams });
+
+  assert.equal(beats.length, 1);
+  assert.equal(beats[0].fromSeq, 41);
+  assert.equal(beats[0].toSeq, 41);
+  assert.deepEqual(beats[0].sourceFrameIds, ['18179759:41']);
+  assert.equal(beats[0].simulationCues[0].revision, 3);
+  assert.equal(beats[0].simulationCues[0].player.displayName, 'Julián Quiñones');
+});
+
+test('keeps a goal major isolated and retains full lifecycle evidence for enrichment', () => {
+  const pendingGoal = cue('goal:7', 'goal_pending', 50, {
+    lifecycle: 'provisional',
     participant: 1,
     teamId: 'mexico',
     value: { action: 'goal', sourceId: 7 },
   });
-  const score = cue('score', 'score_commit', 21, {
+  const goal = cue('goal:7', 'goal_confirmed', 51, {
+    revision: 2,
+    participant: 1,
+    teamId: 'mexico',
+    value: { action: 'goal', sourceId: 7 },
+  });
+  const score = cue('score', 'score_commit', 51, {
     updateMode: 'state_replace',
     participant: 1,
     teamId: 'mexico',
@@ -99,142 +266,119 @@ test('keeps major beats isolated and collapses later confirmed enrichment', () =
   });
   const enrichedGoal = {
     ...goal,
-    revision: 2,
+    revision: 3,
+    sourceSeqs: [50, 51, 53],
     player: {
       normativeId: 99,
       participant: 1,
       teamId: 'mexico',
-      sourcePreferredName: 'J. Quiñones',
+      sourcePreferredName: 'Quinones Quinones, Julian Andres',
       displayName: 'Julián Quiñones',
     },
-    sourceSeqs: [21, 23],
   };
 
   const beats = planCommentaryBeats([
-    frame(20, 800, [corner]),
-    frame(21, 810, [goal, score]),
-    frame(23, 810, [enrichedGoal]),
+    frame(50, 1000, [pendingGoal]),
+    frame(51, 1000, [goal, score]),
+    frame(53, 1000, [enrichedGoal]),
   ], { projectionGeneration: 0, teams });
 
-  assert.equal(beats.length, 2);
-  assert.equal(beats[0].kind, 'routine');
-  assert.equal(beats[1].kind, 'major');
-  assert.equal(beats[1].mustCover, true);
-  assert.deepEqual(beats[1].sourceFrameIds, ['18179759:21', '18179759:23']);
-  assert.deepEqual(beats[1].sources, [
-    {
-      frameId: '18179759:21',
-      seq: 21,
-      cueIds: ['goal:7', 'score'],
-      cues: [
-        { cueId: 'goal:7', action: 'goal' },
-        { cueId: 'score', action: 'score_commit' },
-      ],
-      factIds: ['fact:goal:7', 'fact:score'],
-    },
-    {
-      frameId: '18179759:23', seq: 23, cueIds: ['goal:7'],
-      cues: [{ cueId: 'goal:7', action: 'goal' }], factIds: ['fact:goal:7'],
-    },
+  assert.equal(beats.length, 1);
+  assert.equal(beats[0].kind, 'major');
+  assert.equal(beats[0].mustCover, true);
+  assert.equal(beats[0].id, '18179759:commentary:0:major:51:51:goal%3A7+score');
+  assert.deepEqual(beats[0].sourceFrameIds, [
+    '18179759:50',
+    '18179759:51',
+    '18179759:53',
   ]);
-  assert.equal(beats[1].id, '18179759:commentary:0:21:21');
-  assert.match(beats[1].fallbackCommentary, /Julián Quiñones/);
-  assert.match(beats[1].fallbackCommentary, /1-0/);
+  assert.match(beats[0].fallbackCommentary, /Julián Quiñones/);
+  assert.match(beats[0].fallbackCommentary, /1-0/);
 });
 
-test('maps non-contiguous pressure cues to their actual source seqs', () => {
-  const corner = cue('corner:non-contiguous', 'set_piece', 40, {
-    participant: 1, teamId: 'mexico', value: { action: 'corner' },
-  });
-  const shot = cue('shot:non-contiguous', 'shot_outcome', 47, {
-    participant: 1, teamId: 'mexico', value: { action: 'shot' },
-  });
-  const beat = planCommentaryBeats([
-    frame(40, 1000, [corner]),
-    frame(47, 1040, [shot]),
-  ], { projectionGeneration: 3, teams })[0];
-
-  assert.deepEqual(beat.sources, [
-    {
-      frameId: '18179759:40', seq: 40, cueIds: ['corner:non-contiguous'],
-      cues: [{ cueId: 'corner:non-contiguous', action: 'corner' }],
-      factIds: ['fact:corner:non-contiguous'],
-    },
-    {
-      frameId: '18179759:47', seq: 47, cueIds: ['shot:non-contiguous'],
-      cues: [{ cueId: 'shot:non-contiguous', action: 'shot' }],
-      factIds: ['fact:shot:non-contiguous'],
-    },
-  ]);
-});
-
-test('does not merge pressure across teams and omits non-narrative state changes', () => {
-  const mexicoAttack = cue('pressure:1', 'possession_pressure', 30, {
-    updateMode: 'state_replace',
-    lifecycle: 'observed',
-    basis: 'derived_probable',
+test('narrates only goal retractions and ignores minor incident corrections', () => {
+  const goalRetraction = cue('goal:retracted', 'incident_retracted', 60, {
+    lifecycle: 'retracted',
     participant: 1,
     teamId: 'mexico',
-    pressure: 'danger',
+    value: { action: 'goal' },
   });
-  const ecuadorAttack = cue('pressure:2', 'possession_pressure', 31, {
-    updateMode: 'state_replace',
-    lifecycle: 'observed',
-    basis: 'derived_probable',
-    participant: 2,
-    teamId: 'ecuador',
-    pressure: 'attack',
-  });
-  const possession = cue('possession', 'possession_change', 32, {
-    updateMode: 'state_replace',
-    lifecycle: 'observed',
-    participant: 2,
-    teamId: 'ecuador',
+  const cornerRetraction = cue('corner:retracted', 'incident_retracted', 61, {
+    lifecycle: 'retracted',
+    participant: 1,
+    teamId: 'mexico',
+    value: { action: 'corner' },
   });
 
   const beats = planCommentaryBeats([
-    frame(30, 900, [mexicoAttack]),
-    frame(31, 910, [ecuadorAttack]),
-    frame(32, 920, [possession]),
-  ], { projectionGeneration: 2, teams });
+    frame(60, 1100, [goalRetraction]),
+    frame(61, 1110, [cornerRetraction]),
+  ], { projectionGeneration: 0, teams });
 
-  assert.equal(beats.length, 2);
-  assert.deepEqual(beats.map((beat) => beat.kind), ['routine', 'routine']);
-  assert.deepEqual(beats.map((beat) => beat.teamId), ['mexico', 'ecuador']);
+  assert.equal(beats.length, 1);
+  assert.equal(beats[0].kind, 'major');
+  assert.equal(beats[0].fallbackCommentary, 'The goal is ruled out.');
 });
 
-test('rejects an invalid projection generation', () => {
-  assert.throws(
-    () => planCommentaryBeats([], { projectionGeneration: -1 }),
-    /non-negative integer/,
+test('isolates red cards, half-time, and full-time as major beats', () => {
+  const redCard = cue('card:red', 'card', 65, {
+    participant: 2,
+    teamId: 'ecuador',
+    value: { action: 'red_card' },
+  });
+  const halfTime = cue('phase', 'phase_change', 66, {
+    updateMode: 'state_replace',
+    lifecycle: 'observed',
+    value: { phase: 'half_time' },
+  });
+  const fullTime = cue('phase', 'phase_change', 67, {
+    updateMode: 'state_replace',
+    lifecycle: 'observed',
+    value: { phase: 'finalised' },
+  });
+
+  const beats = planCommentaryBeats([
+    frame(65, 1150, [redCard]),
+    frame(66, 2700, [halfTime]),
+    frame(67, 5400, [fullTime]),
+  ], { projectionGeneration: 0, teams });
+
+  assert.deepEqual(beats.map((beat) => beat.kind), ['major', 'major', 'major']);
+  assert.deepEqual(beats.map((beat) => beat.mustCover), [true, true, true]);
+  assert.deepEqual(beats.map((beat) => beat.fallbackCommentary), [
+    'Ecuador receive a red card.',
+    'The first half comes to an end.',
+    'The match is over.',
+  ]);
+});
+
+test('provides deterministic fallbacks for free kicks, penalties, and shot attempts', () => {
+  const actions = [
+    cue('free-kick', 'set_piece', 70, {
+      participant: 1, teamId: 'mexico', value: { action: 'free_kick' },
+    }),
+    cue('penalty', 'set_piece', 71, {
+      participant: 2, teamId: 'ecuador', value: { action: 'penalty' },
+    }),
+    cue('shot-attempt', 'shot_attempt', 72, {
+      updateMode: 'state_replace',
+      lifecycle: 'observed',
+      participant: 1,
+      teamId: 'mexico',
+      value: { action: 'shot' },
+    }),
+  ];
+
+  const beats = planCommentaryBeats(
+    actions.map((item, index) => frame(70 + index, 1200 + index * 10, [item])),
+    { projectionGeneration: 0, teams },
   );
-});
 
-test('narrates kickoff but does not merge unknown-owner pressure into one spell', () => {
-  const provisionalKickoff = cue('restart', 'restart', 0, {
-    updateMode: 'state_replace',
-    lifecycle: 'provisional',
-    participant: 1,
-    teamId: 'mexico',
-    value: { kind: 'kickoff' },
-  });
-  const kickoff = cue('restart', 'restart', 1, {
-    updateMode: 'state_replace',
-    participant: 1,
-    teamId: 'mexico',
-    value: { kind: 'kickoff' },
-  });
-  const firstUnknownShot = cue('shot:unknown:1', 'shot_attempt', 2, { value: { action: 'shot' } });
-  const secondUnknownShot = cue('shot:unknown:2', 'shot_attempt', 3, { value: { action: 'shot' } });
-  const beats = planCommentaryBeats([
-    frame(0, 0, [provisionalKickoff]),
-    frame(1, 0, [kickoff]),
-    frame(2, 30, [firstUnknownShot]),
-    frame(3, 40, [secondUnknownShot]),
-  ], { projectionGeneration: 0, teams });
-
-  assert.equal(beats[0].fallbackCommentary, 'Mexico get the match underway.');
-  assert.deepEqual(beats.map((beat) => beat.kind), ['routine', 'routine', 'routine']);
+  assert.deepEqual(beats.map((beat) => beat.fallbackCommentary), [
+    'Mexico win a free kick.',
+    'Ecuador are awarded a penalty.',
+    'Mexico have a shot.',
+  ]);
 });
 
 test('labels initial, post-goal, and second-half restarts distinctly', () => {
@@ -244,16 +388,16 @@ test('labels initial, post-goal, and second-half restarts distinctly', () => {
     teamId: participant === 1 ? 'mexico' : 'ecuador',
     value: { kind: 'kickoff' },
   })], [fact(`fact:${id}`, seq, { kind: 'phase', value: { phase } })]);
-  const goal = cue('goal:restart', 'goal_confirmed', 2, {
+  const goal = cue('goal:restart', 'goal_confirmed', 81, {
     participant: 1,
     teamId: 'mexico',
     value: { action: 'goal' },
   });
   const beats = planCommentaryBeats([
-    restart('initial', 1, 1, 'first_half'),
-    frame(2, 20, [goal]),
-    restart('after-goal', 3, 2, 'first_half'),
-    restart('second-half', 4, 1, 'second_half'),
+    restart('initial', 80, 1, 'first_half'),
+    frame(81, 810, [goal]),
+    restart('after-goal', 82, 2, 'first_half'),
+    restart('second-half', 83, 1, 'second_half'),
   ], { projectionGeneration: 0, teams });
 
   assert.deepEqual(beats.filter((beat) => beat.restartContext).map((beat) => beat.restartContext), [
@@ -266,81 +410,44 @@ test('labels initial, post-goal, and second-half restarts distinctly', () => {
   ]);
 });
 
-test('caps a pressure spell from its first frame instead of chaining indefinitely', () => {
-  const pressure = (id, seq, clock) => frame(seq, clock, [cue(id, 'possession_pressure', seq, {
-    updateMode: 'state_replace',
-    lifecycle: 'observed',
-    basis: 'derived_probable',
-    participant: 1,
-    teamId: 'mexico',
-    pressure: 'danger',
-  })]);
-  const beats = planCommentaryBeats([
-    pressure('pressure:anchor', 1, 0),
-    pressure('pressure:middle', 2, 80),
-    pressure('pressure:late', 3, 160),
-  ], { projectionGeneration: 0, teams, pressureWindowSeconds: 90 });
-
-  assert.equal(beats.length, 2);
-  assert.deepEqual(beats.map((beat) => beat.sourceFrameIds), [
-    ['18179759:1', '18179759:2'],
-    ['18179759:3'],
-  ]);
-});
-
-test('omits a late-confirmed routine incident that occurred before an already narrated goal', () => {
-  const goal = cue('goal:chronology', 'goal_confirmed', 10, {
+test('retains delayed confirmed incidents instead of silently dropping source truth', () => {
+  const goal = cue('goal:chronology', 'goal_confirmed', 90, {
     participant: 1,
     teamId: 'mexico',
     occurrenceSeconds: 100,
     value: { action: 'goal' },
   });
-  const oldShot = cue('shot:chronology', 'shot_outcome', 11, {
+  const oldShot = cue('shot:chronology', 'shot_outcome', 91, {
     participant: 1,
     teamId: 'mexico',
     occurrenceSeconds: 90,
     value: { action: 'shot' },
   });
-  const restart = cue('restart:chronology', 'restart', 12, {
-    updateMode: 'state_replace',
-    participant: 2,
-    teamId: 'ecuador',
-    occurrenceSeconds: 110,
-    value: { kind: 'kickoff' },
-  });
+
   const beats = planCommentaryBeats([
-    frame(10, 100, [goal]),
-    frame(11, 90, [oldShot]),
-    frame(12, 110, [restart]),
+    frame(90, 100, [goal]),
+    frame(91, 90, [oldShot]),
   ], { projectionGeneration: 0, teams });
 
-  assert.deepEqual(beats.flatMap((beat) => beat.cueIds), ['goal:chronology', 'restart:chronology']);
+  assert.deepEqual(beats.flatMap((beat) => beat.cueIds), [
+    'goal:chronology',
+    'shot:chronology',
+  ]);
 });
 
-test('keeps halftime activity when the second-half playing clock resets', () => {
-  const lateFirstHalfGoal = cue('goal:first-half', 'goal_confirmed', 20, {
-    participant: 1, teamId: 'mexico', occurrenceSeconds: 3000, value: { action: 'goal' },
+test('ignores technical possible-event noise and rejects invalid generations', () => {
+  const possible = cue('possible', 'possible_event', 100, {
+    updateMode: 'state_replace',
+    lifecycle: 'observed',
+    value: { goal: true },
   });
-  const halfTime = cue('phase:half-time', 'phase_change', 21, {
-    updateMode: 'state_replace', value: { phase: 'half_time' },
-  });
-  const substitution = cue('sub:half-time', 'substitution', 22, {
-    participant: 1, teamId: 'mexico', occurrenceSeconds: 2700, value: { action: 'substitution' },
-  });
-  const secondHalf = cue('restart:second-half', 'restart', 23, {
-    updateMode: 'state_replace', participant: 2, teamId: 'ecuador',
-    occurrenceSeconds: 2700, value: { kind: 'kickoff' },
-  });
-  const beats = planCommentaryBeats([
-    frame(20, 3000, [lateFirstHalfGoal]),
-    frame(21, 3001, [halfTime]),
-    frame(22, 2700, [substitution], [fact('fact:sub:half-time', 22, { kind: 'phase', value: { phase: 'half_time' } })]),
-    frame(23, 2700, [secondHalf], [fact('fact:restart:second-half', 23, { kind: 'phase', value: { phase: 'second_half' } })]),
-  ], { projectionGeneration: 0, teams });
 
-  assert.ok(beats.some((beat) => beat.cueIds.includes('sub:half-time')));
-  assert.equal(
-    beats.find((beat) => beat.cueIds.includes('restart:second-half'))?.fallbackCommentary,
-    'Ecuador get the second half underway.',
+  assert.deepEqual(
+    planCommentaryBeats([frame(100, 1300, [possible])], { projectionGeneration: 0, teams }),
+    [],
+  );
+  assert.throws(
+    () => planCommentaryBeats([], { projectionGeneration: -1 }),
+    /non-negative integer/,
   );
 });

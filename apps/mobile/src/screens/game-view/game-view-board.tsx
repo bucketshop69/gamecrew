@@ -1,7 +1,30 @@
 import { gameCrewTokens, type GameViewScene } from '@gamecrew/core';
-import { type ReactNode, useEffect, useMemo, useRef } from 'react';
-import { Animated, Easing, StyleSheet, Text, View, type DimensionValue } from 'react-native';
+import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Animated,
+  Easing,
+  Image,
+  StyleSheet,
+  Text,
+  View,
+  type DimensionValue,
+} from 'react-native';
+import Reanimated, {
+  cancelAnimation,
+  Easing as ReanimatedEasing,
+  FadeIn,
+  type SharedValue,
+  useAnimatedStyle,
+  useSharedValue,
+  withRepeat,
+  withTiming,
+} from 'react-native-reanimated';
 
+import {
+  resolveClusterPlan,
+  type GoalBeatKind,
+} from '../game-view-players/cluster-choreography-logic';
+import { GameViewActionCluster } from '../game-view-players/game-view-action-cluster';
 import {
   type BoardDirection,
   type BoardPresenceState,
@@ -11,8 +34,7 @@ import {
   resolveAmbientPresence,
   resolveBoardPresence,
   resolveCenteredBoxLayout,
-  resolveGoalEndLabels,
-  zoneLabelForDirection,
+  resolveGoalEndTeams,
 } from './game-view-board-logic';
 
 const tokens = gameCrewTokens;
@@ -20,31 +42,34 @@ const tokens = gameCrewTokens;
 /** Max content width for the pitch on wide screens (fix #6): phones stay full-bleed, web/tablet gets a centered pitch. */
 const PITCH_MAX_WIDTH = 480;
 
-/**
- * R1 chalk line color: slightly brighter than `tokens.shell.divider` (the
- * existing quiet boundary gray) so the broadcast pitch markings read as
- * "painted lines" while staying within the black/white/gray shell palette --
- * no green turf, per the product's "GameCrew is black and white; the match
- * brings the color" rule.
- */
-const CHALK_LINE_COLOR = '#3D3D3D';
-/**
- * R1: now that real chalk lines exist, the zone-band divider lines are
- * dimmed further so they read as quiet internal structure rather than
- * competing with the pitch markings.
- */
-const ZONE_LINE_COLOR = 'rgba(255, 255, 255, 0.05)';
+/** Floodlit pitch paint: soft enough to sit in the turf, bright enough to
+ * describe the field at a phone-sized scale. Primary paint anchors the
+ * boundary and halfway geometry; secondary paint keeps box detail quieter. */
+const CHALK_PRIMARY_COLOR = 'rgba(231, 240, 232, 0.62)';
+const CHALK_SECONDARY_COLOR = 'rgba(219, 233, 221, 0.44)';
+const BOARD_SHELL_COLOR = '#050505';
 
 /**
- * R1 addendum: perimeter LED-board strip thickness. Thin enough to read as
- * stadium furniture without shrinking the playable pitch noticeably (per the
- * "10-14px tall strips" guidance); the pitch content inset (`pitchInset`)
- * uses this same value on all four edges so the strips sit just inside the
- * board container but outside the chalk boundary.
+ * The approved perimeter treatment is a three-sided stadium wall: the top
+ * and both touchlines carry inward-facing LED faces, while the near/bottom
+ * edge stays quiet black. A little more face width than the earlier flat
+ * 24px trim gives the perspective transform enough surface to read without
+ * consuming the playing area.
  */
-const PERIMETER_STRIP_SIZE = 12;
+const PERIMETER_STRIP_SIZE = 28;
+const PERIMETER_BOTTOM_SHELL_SIZE = 18;
+const PERIMETER_TOP_CORNER_INSET = 16;
 /** Slightly raised luminance vs the turf so the strip reads as a panel, not a shadow. */
-const PERIMETER_PANEL_COLOR = '#111111';
+const PERIMETER_PANEL_COLOR = '#0B0D0C';
+const PERIMETER_PANEL_EDGE_COLOR = 'rgba(226, 238, 229, 0.14)';
+const PERIMETER_PANEL_LIP_COLOR = '#1A201D';
+const PERIMETER_PANEL_DEPTH_COLOR = '#020303';
+/**
+ * Grass apron between the ad boards and the chalk boundary, so the touchline
+ * doesn't kiss the boards: the "runners' room" real pitches have. The turf
+ * runs under the apron; only the line work and play content inset further.
+ */
+const PITCH_APRON_SIZE = 14;
 
 /**
  * The ambient zone board renderer (work item B1 of
@@ -67,13 +92,23 @@ const PERIMETER_PANEL_COLOR = '#111111';
  */
 export function GameViewBoard({
   awayTeam,
+  bootstrapScene,
+  commentaryOverlay,
+  goalBeat,
   homeTeam,
   overlay,
   participant1Direction = 'up',
   reduceMotion,
   scene,
+  sceneWindowKey,
 }: {
   awayTeam: BoardTeamInfo;
+  /** Nearest prior grounded scene for a cold-mount stoppage; never replaces current-scene truth. */
+  bootstrapScene?: GameViewScene;
+  /** Source-synchronized Match Pulse transcript, positioned in the lower-left HUD slot. */
+  commentaryOverlay?: ReactNode;
+  /** Which goal_sequence beat is currently playing, so the cluster can celebrate through the checking treatment (R4). */
+  goalBeat?: GoalBeatKind;
   homeTeam: BoardTeamInfo;
   /** Slot for a takeover graphic (B2) to render on top of the idle board. */
   overlay?: ReactNode;
@@ -81,8 +116,20 @@ export function GameViewBoard({
   participant1Direction?: BoardDirection;
   reduceMotion: boolean;
   scene: GameViewScene | null;
+  /** Active playback-window identity; refreshes choreography when a logical scene is replaced in place. */
+  sceneWindowKey?: string;
 }) {
   const lastLivePresenceRef = useRef<BoardPresenceState | undefined>(undefined);
+
+  // R4: when the action cluster stages this scene (ambient knot, corner,
+  // shot, goal celebration, kickoff) it IS the possession visual -- the
+  // abstract presence rings would double up as a second focal point, so they
+  // stand down. Scenes the cluster stays off for (takeovers, no-participant
+  // ambient) keep the presence/held-presence treatment unchanged.
+  const clusterActive = useMemo(
+    () => resolveClusterPlan(scene, homeTeam, awayTeam, participant1Direction, goalBeat).kind !== 'none',
+    [awayTeam, goalBeat, homeTeam, participant1Direction, scene],
+  );
 
   const livePresence = useMemo(
     () => resolveAmbientPresence(scene, homeTeam, awayTeam, participant1Direction),
@@ -101,30 +148,55 @@ export function GameViewBoard({
     () => buildBoardAccessibilityLabel(presence),
     [presence],
   );
-  const goalEndLabels = useMemo(
-    () => resolveGoalEndLabels(homeTeam, awayTeam, participant1Direction),
+  const goalEnds = useMemo(
+    () => resolveGoalEndTeams(homeTeam, awayTeam, participant1Direction),
     [awayTeam, homeTeam, participant1Direction],
   );
 
   return (
     <View style={styles.boardOuter}>
-      <View
-        accessibilityLabel={accessibilityLabel}
-        accessibilityRole="image"
-        style={styles.board}
-      >
-        <PerimeterBoards reduceMotion={reduceMotion} />
-        <View style={styles.pitchInset}>
-          <Turf />
-          <ChalkLines />
-          <GoalEndLabel edge="top" label={goalEndLabels.top} />
-          <ZonePitch direction={presence.direction} />
+      <View style={styles.board}>
+        <View
+          accessibilityLabel={accessibilityLabel}
+          accessibilityRole="image"
+          style={styles.boardCanvas}
+        >
+          <PerimeterBoards reduceMotion={reduceMotion} />
+          <View style={styles.pitchInset}>
+            <Turf />
+            {/* Grass apron: line work and play content inset further than the
+                turf, leaving visible out-of-bounds grass next to the boards. */}
+            <View style={styles.apronInset}>
+              <ChalkLines goalEnds={goalEnds} />
+              <ZonePitch />
 
-          <PossessionPresence presence={presence} reduceMotion={reduceMotion} />
+              {clusterActive ? (
+                <GameViewActionCluster
+                  awayTeam={awayTeam}
+                  bootstrapScene={bootstrapScene}
+                  goalBeat={goalBeat}
+                  homeTeam={homeTeam}
+                  participant1Direction={participant1Direction}
+                  reduceMotion={reduceMotion}
+                  scene={scene}
+                  sceneWindowKey={sceneWindowKey}
+                />
+              ) : (
+                <PossessionPresence presence={presence} reduceMotion={reduceMotion} />
+              )}
 
-          {overlay ? <View style={styles.overlaySlot}>{overlay}</View> : null}
-          <GoalEndLabel edge="bottom" label={goalEndLabels.bottom} />
+              {overlay ? <View style={styles.overlaySlot}>{overlay}</View> : null}
+            </View>
+          </View>
         </View>
+
+        {commentaryOverlay ? (
+          <View style={styles.commentaryInset}>
+            <View style={styles.commentarySlot}>
+              {commentaryOverlay}
+            </View>
+          </View>
+        ) : null}
       </View>
     </View>
   );
@@ -137,13 +209,44 @@ export function GameViewBoard({
  * content"). Renders thin stadium-LED-style boards along the pitch edges,
  * just inside the board container but outside the chalk boundary (the
  * `pitchInset` sibling shrinks to make room, so the playable pitch area
- * itself doesn't get visually cramped). Ships with a placeholder-only
- * repeating GAMECREW wordmark -- no fake sponsor content, per the slot
- * system's "ships with placeholder content; ad logic is a separate later
- * decision" rule. Non-interactive and hidden from accessibility: it's
- * stadium furniture, not board content.
+ * itself doesn't get visually cramped). Product-approved revision
+ * 2026-07-16: only the top and side faces carry LED creative. They are
+ * perspective-tilted toward the pitch so they read as stadium furniture;
+ * the near/bottom edge is an uninterrupted black shell. The first five
+ * seconds retain the quiet GAMECREW placeholder; then the Solana ecosystem
+ * showcase travels across the three faces from one shared clock. The names
+ * are presentation creative only and do not imply sponsorship or partnership.
+ * This is a visual trial, not targeting, measurement, or production ad logic.
  */
 function PerimeterBoards({ reduceMotion }: { reduceMotion: boolean }) {
+  const [adsStarted, setAdsStarted] = useState(false);
+  const progress = useSharedValue(0);
+
+  useEffect(() => {
+    cancelAnimation(progress);
+    progress.value = 0;
+    setAdsStarted(false);
+
+    const startTimer = setTimeout(() => {
+      setAdsStarted(true);
+      if (!reduceMotion) {
+        progress.value = withRepeat(
+          withTiming(1, {
+            duration: PERIMETER_AD_LOOP_DURATION_MS,
+            easing: ReanimatedEasing.linear,
+          }),
+          -1,
+          false,
+        );
+      }
+    }, PERIMETER_AD_START_DELAY_MS);
+
+    return () => {
+      clearTimeout(startTimer);
+      cancelAnimation(progress);
+    };
+  }, [progress, reduceMotion]);
+
   return (
     <View
       accessibilityElementsHidden
@@ -151,112 +254,311 @@ function PerimeterBoards({ reduceMotion }: { reduceMotion: boolean }) {
       pointerEvents="none"
       style={StyleSheet.absoluteFill}
     >
-      <PerimeterStrip edge="top" reduceMotion={reduceMotion} />
-      <PerimeterStrip edge="bottom" reduceMotion={reduceMotion} />
-      <PerimeterStrip edge="left" reduceMotion={reduceMotion} />
-      <PerimeterStrip edge="right" reduceMotion={reduceMotion} />
+      <PerimeterStrip adsStarted={adsStarted} edge="top" progress={progress} reduceMotion={reduceMotion} />
+      <PerimeterStrip adsStarted={adsStarted} edge="left" progress={progress} reduceMotion={reduceMotion} />
+      <PerimeterStrip adsStarted={adsStarted} edge="right" progress={progress} reduceMotion={reduceMotion} />
     </View>
   );
 }
 
-const PERIMETER_WORDMARK = 'GAMECREW';
-/** Repeats enough to fill the longest strip edge without measuring layout. */
-const PERIMETER_REPEAT = Array.from({ length: 8 }, (_, index) => index);
-const PERIMETER_DRIFT_DURATION_MS = 26000;
-const PERIMETER_DRIFT_RANGE = 24;
+interface EcosystemBrand {
+  color: string;
+  colorSecondary: string;
+  logo?: {
+    height: number;
+    uri: string;
+    width: number;
+  };
+  mark: string;
+  name: string;
+  panelColor: string;
+  strapline: string;
+}
+
+const ECOSYSTEM_BRANDS: readonly EcosystemBrand[] = [
+  {
+    color: '#14F195',
+    colorSecondary: '#9945FF',
+    logo: {
+      height: 15,
+      uri: 'https://solana.com/src/img/branding/solanaLogoMark.png',
+      width: 17,
+    },
+    mark: 'SOL',
+    name: 'SOLANA',
+    panelColor: '#071B18',
+    strapline: 'NETWORK',
+  },
+  {
+    color: '#C7F284',
+    colorSecondary: '#27C7D9',
+    logo: {
+      height: 16,
+      uri: 'https://jup.ag/svg/jupiter-logo.png',
+      width: 16,
+    },
+    mark: 'JUP',
+    name: 'JUPITER',
+    panelColor: '#0A1C18',
+    strapline: 'ONCHAIN',
+  },
+  {
+    color: '#F3F5EF',
+    colorSecondary: '#8B8F89',
+    mark: '$A',
+    name: '$ANSEM',
+    panelColor: '#161817',
+    strapline: 'COMMUNITY',
+  },
+  {
+    color: '#FF7A45',
+    colorSecondary: '#FFC145',
+    mark: 'PHX',
+    name: 'PHOENIX',
+    panelColor: '#24110A',
+    strapline: 'ORDERBOOK',
+  },
+  {
+    color: '#FF5A0A',
+    colorSecondary: '#7B2CFF',
+    logo: {
+      height: 16,
+      uri: 'https://mintcdn.com/meteora/FuYCvEvL3a7_z_Mt/assets/logo/meteora.png?fit=max&auto=format&n=FuYCvEvL3a7_z_Mt&q=85&s=5ae3f2a17133bed15a6360c41694c4d7',
+      width: 16,
+    },
+    mark: 'MET',
+    name: 'METEORA',
+    panelColor: '#1A1023',
+    strapline: 'LIQUIDITY',
+  },
+];
+const PERIMETER_AD_START_DELAY_MS = 5000;
+const PERIMETER_AD_LOOP_DURATION_MS = 28000;
+/** Keeps the ecosystem wall atmospheric so the match remains the primary focal layer. */
+const PERIMETER_AD_CREATIVE_OPACITY = 0.65;
+const PERIMETER_SPONSOR_WIDTH = 152;
+const PERIMETER_SPONSOR_MARK_HEIGHT = 72;
+const PERIMETER_SPONSOR_GAP = 7;
+const PERIMETER_HORIZONTAL_CYCLE_WIDTH = ECOSYSTEM_BRANDS.length
+  * (PERIMETER_SPONSOR_WIDTH + PERIMETER_SPONSOR_GAP);
+const PERIMETER_VERTICAL_CYCLE_HEIGHT = ECOSYSTEM_BRANDS.length
+  * (PERIMETER_SPONSOR_MARK_HEIGHT + PERIMETER_SPONSOR_GAP);
+const PERIMETER_HORIZONTAL_TRACK_COPIES = [0, 1];
+/** Enough repeated height to keep tall phones/tablets covered through the full one-cycle translation. */
+const PERIMETER_VERTICAL_TRACK_COPIES = [0, 1, 2, 3, 4];
+const PERIMETER_PLACEHOLDER_REPEAT = Array.from({ length: 6 }, (_, index) => index);
 
 function PerimeterStrip({
+  adsStarted,
   edge,
+  progress,
   reduceMotion,
 }: {
-  edge: 'top' | 'bottom' | 'left' | 'right';
+  adsStarted: boolean;
+  edge: 'top' | 'left' | 'right';
+  progress: SharedValue<number>;
   reduceMotion: boolean;
 }) {
-  const drift = useRef(new Animated.Value(0)).current;
-  const driftLoop = useRef<Animated.CompositeAnimation | null>(null);
   const isVertical = edge === 'left' || edge === 'right';
-
-  useEffect(() => {
-    driftLoop.current?.stop();
-    if (reduceMotion) {
-      drift.setValue(0);
-      return;
+  const clockwiseStyle = useAnimatedStyle(() => {
+    if (isVertical) {
+      const translateY = edge === 'left'
+        ? -PERIMETER_VERTICAL_CYCLE_HEIGHT * progress.value
+        : PERIMETER_VERTICAL_CYCLE_HEIGHT * (progress.value - 1);
+      return { transform: [{ translateY }] };
     }
-
-    drift.setValue(0);
-    driftLoop.current = Animated.loop(
-      Animated.sequence([
-        Animated.timing(drift, {
-          toValue: 1,
-          duration: PERIMETER_DRIFT_DURATION_MS,
-          easing: Easing.linear,
-          useNativeDriver: true,
-        }),
-        Animated.timing(drift, {
-          toValue: 0,
-          duration: 0,
-          useNativeDriver: true,
-        }),
-      ]),
-    );
-    driftLoop.current.start();
-
-    return () => {
-      driftLoop.current?.stop();
-    };
-  }, [drift, reduceMotion]);
-
-  const translate = drift.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, -PERIMETER_DRIFT_RANGE],
+    const translateX = PERIMETER_HORIZONTAL_CYCLE_WIDTH * (progress.value - 1);
+    return { transform: [{ translateX }] };
   });
-  // Vertical (left/right) strips reuse the same horizontal text row, then
-  // rotate the whole row 90deg so it reads top-to-bottom like a real
-  // perimeter board's side panel -- the drift still reads as "translateX"
-  // in the row's own (pre-rotation) coordinate space.
-  const transform = isVertical
-    ? [{ rotate: '90deg' }, { translateX: translate }]
-    : [{ translateX: translate }];
+
+  if (!adsStarted) {
+    return (
+      <PerimeterWall edge={edge}>
+        <View style={styles.perimeterStripFace}>
+          {isVertical ? (
+            <View style={styles.perimeterLedColumn}>
+              {PERIMETER_LED_SEGMENTS.map((index) => (
+                <View key={index} style={styles.perimeterLedDash} />
+              ))}
+            </View>
+          ) : (
+            <View style={styles.perimeterContentHorizontal}>
+              {PERIMETER_PLACEHOLDER_REPEAT.map((index) => (
+                <Text key={index} numberOfLines={1} style={styles.perimeterText}>
+                  GAMECREW
+                </Text>
+              ))}
+            </View>
+          )}
+        </View>
+      </PerimeterWall>
+    );
+  }
 
   return (
-    <View style={[styles.perimeterStrip, styles[`perimeterStrip_${edge}`]]}>
-      <Animated.View style={[styles.perimeterContentHorizontal, { transform }]}>
-        {PERIMETER_REPEAT.map((index) => (
-          <Text key={index} numberOfLines={1} style={styles.perimeterText}>
-            {PERIMETER_WORDMARK}
-          </Text>
-        ))}
-      </Animated.View>
+    <PerimeterWall edge={edge}>
+      <View style={styles.perimeterStripFace}>
+        <Reanimated.View
+          entering={reduceMotion ? undefined : FadeIn.duration(420)}
+          style={[
+            isVertical
+              ? styles.perimeterSponsorTrackVertical
+              : styles.perimeterSponsorTrackHorizontal,
+            styles.perimeterAdCreative,
+            clockwiseStyle,
+          ]}
+        >
+          {(isVertical ? PERIMETER_VERTICAL_TRACK_COPIES : PERIMETER_HORIZONTAL_TRACK_COPIES)
+            .flatMap((copy) => ECOSYSTEM_BRANDS.map((brand) => (
+              isVertical ? (
+                <View
+                  key={`${edge}-${copy}-${brand.mark}`}
+                  style={[
+                    styles.perimeterSponsorSide,
+                    { backgroundColor: brand.panelColor },
+                  ]}
+                >
+                  <EcosystemBrandTexture brand={brand} />
+                  <View
+                    style={[
+                      styles.perimeterSponsorSideCreative,
+                      edge === 'left'
+                        ? styles.perimeterSponsorSideCreative_left
+                        : styles.perimeterSponsorSideCreative_right,
+                    ]}
+                  >
+                    <EcosystemBrandMark brand={brand} side />
+                    <Text
+                      numberOfLines={1}
+                      style={styles.perimeterSponsorSideName}
+                    >
+                      {brand.name}
+                    </Text>
+                  </View>
+                </View>
+              ) : (
+                <View
+                  key={`${edge}-${copy}-${brand.mark}`}
+                  style={[
+                    styles.perimeterSponsorHorizontal,
+                    { backgroundColor: brand.panelColor },
+                  ]}
+                >
+                  <EcosystemBrandTexture brand={brand} />
+                  <EcosystemBrandMark brand={brand} />
+                  <Text numberOfLines={1} style={styles.perimeterSponsorName}>
+                    {brand.name}
+                  </Text>
+                  <Text numberOfLines={1} style={styles.perimeterSponsorStrapline}>
+                    {brand.strapline}
+                  </Text>
+                </View>
+              )
+            )))}
+        </Reanimated.View>
+      </View>
+    </PerimeterWall>
+  );
+}
+
+function EcosystemBrandTexture({ brand }: { brand: EcosystemBrand }) {
+  return (
+    <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+      <View style={[styles.perimeterBrandGlow, { backgroundColor: brand.color }]} />
+      <View
+        style={[
+          styles.perimeterBrandStripe,
+          { backgroundColor: brand.colorSecondary },
+        ]}
+      />
+      <View style={[styles.perimeterBrandScanline, styles.perimeterBrandScanline_top]} />
+      <View style={[styles.perimeterBrandScanline, styles.perimeterBrandScanline_bottom]} />
     </View>
   );
 }
 
-/**
- * Subtle gray label naming the team whose goal sits at this pitch end (fix
- * #1's "attack-direction affordance"), e.g. "ECUADOR GOAL" at the top edge.
- * Deliberately quiet -- textDim color, small caps -- so it reads as chrome,
- * not a takeover.
- */
-function GoalEndLabel({ edge, label }: { edge: 'top' | 'bottom'; label: string }) {
+function EcosystemBrandMark({
+  brand,
+  side = false,
+}: {
+  brand: EcosystemBrand;
+  side?: boolean;
+}) {
+  const containerStyle = side
+    ? styles.perimeterSponsorSideMark
+    : styles.perimeterSponsorLogo;
+
   return (
     <View
-      accessibilityElementsHidden
-      importantForAccessibility="no-hide-descendants"
-      style={[styles.goalEndLabel, edge === 'top' ? styles.goalEndLabelTop : styles.goalEndLabelBottom]}
+      style={[
+        containerStyle,
+        brand.logo
+          ? styles.perimeterSponsorLogoImageShell
+          : { borderColor: brand.color },
+      ]}
     >
-      <Text style={styles.goalEndLabelText}>{label}</Text>
+      {brand.logo ? (
+        <Image
+          resizeMode="contain"
+          source={{ uri: brand.logo.uri }}
+          style={{ height: brand.logo.height, width: brand.logo.width }}
+        />
+      ) : (
+        <Text
+          style={[
+            side
+              ? styles.perimeterSponsorSideText
+              : styles.perimeterSponsorLogoText,
+            { color: brand.color },
+          ]}
+        >
+          {brand.mark}
+        </Text>
+      )}
     </View>
   );
 }
 
 /**
- * R1 (docs/issues/game-view-realism-experiment.md): the turf surface under
- * everything else. Alternating near-black horizontal mowing-stripe bands so
- * the board reads as grass under floodlights rather than a flat void.
- * Deliberately barely-perceptible -- two adjacent shell grays, no green --
- * per the product's "GameCrew is black and white; the match brings the
- * color" rule. Purely decorative: hidden from accessibility, sits below the
- * chalk lines and zone chrome.
+ * Physical shell around each LED face. The transforms turn the side faces
+ * toward one another and pitch the far/top face toward the grass. Dark inner
+ * lips and lower end caps supply the depth cue without introducing another
+ * bright decorative layer.
+ */
+function PerimeterWall({
+  children,
+  edge,
+}: {
+  children: ReactNode;
+  edge: 'top' | 'left' | 'right';
+}) {
+  return (
+    <View style={[styles.perimeterWall, styles[`perimeterWall_${edge}`]]}>
+      {children}
+      <View style={[styles.perimeterWallLip, styles[`perimeterWallLip_${edge}`]]} />
+      {edge !== 'top' ? <View style={styles.perimeterWallEndCap} /> : null}
+    </View>
+  );
+}
+
+/** Quiet LED segments for the side rails; enough to fill any pitch height. */
+const PERIMETER_LED_SEGMENTS = Array.from({ length: 18 }, (_, index) => index);
+
+/** The two team identities the chalk layer needs to paint each goal mouth. */
+interface GoalEndColors {
+  top: BoardTeamInfo;
+  bottom: BoardTeamInfo;
+}
+
+/**
+ * The turf surface under everything else: alternating dark-green horizontal
+ * mowing-stripe bands so the board reads as grass under floodlights.
+ * Product decision 2026-07-15 (turf pass, with the 22-player formation
+ * view): the pitch is greenish -- the earlier "no green, black shell only"
+ * rule is overridden for the playing surface specifically; the shell around
+ * the board stays black. Deliberately deep and desaturated so team colors
+ * and chalk lines still carry the scene. Purely decorative: hidden from
+ * accessibility, sits below the chalk lines and zone chrome.
  */
 function Turf() {
   return (
@@ -270,7 +572,7 @@ function Turf() {
           key={index}
           style={[
             styles.turfStripe,
-            { backgroundColor: stripe === 0 ? tokens.shell.background : TURF_STRIPE_ALT },
+            { backgroundColor: stripe === 0 ? TURF_STRIPE_BASE : TURF_STRIPE_ALT },
           ]}
         />
       ))}
@@ -281,8 +583,13 @@ function Turf() {
 /** Count of alternating turf stripes running the length of the pitch. */
 const TURF_STRIPE_COUNT = 12;
 const TURF_STRIPES = Array.from({ length: TURF_STRIPE_COUNT }, (_, index) => index % 2);
-/** Slightly lighter than shell.background -- a barely-perceptible mowing band, not a visible line. */
-const TURF_STRIPE_ALT = '#080808';
+/**
+ * Floodlit-grass greens: clearly green against the black shell, dark enough
+ * that white chalk, the ball, and both teams' colors stay the loudest
+ * things on screen. Base vs alt is the mowing-stripe contrast.
+ */
+const TURF_STRIPE_BASE = '#112A1A';
+const TURF_STRIPE_ALT = '#183820';
 
 /**
  * R1: broadcast chalk line work drawn as plain bordered Views (max width
@@ -293,15 +600,15 @@ const TURF_STRIPE_ALT = '#080808';
  * board's own flex layout at any width. Sits above the turf, below the zone
  * chrome/presence per the layering order in the parent render.
  */
-function ChalkLines() {
+function ChalkLines({ goalEnds }: { goalEnds: GoalEndColors }) {
   return (
     <View
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
       style={StyleSheet.absoluteFill}
     >
-      <PenaltyArea edge="top" />
-      <PenaltyArea edge="bottom" />
+      <PenaltyArea edge="top" goalColor={goalEnds.top.color} />
+      <PenaltyArea edge="bottom" goalColor={goalEnds.bottom.color} />
       <CornerArc corner="topLeft" />
       <CornerArc corner="topRight" />
       <CornerArc corner="bottomLeft" />
@@ -321,7 +628,7 @@ const penaltyArcDiameterPct = PITCH_MARKINGS.penaltyArc.radiusPct * 2 * 100;
  * is clipped by the box's own overflow -- per the constraint, "arc can be
  * approximated with a bordered half-circle View clipped by overflow").
  */
-function PenaltyArea({ edge }: { edge: 'top' | 'bottom' }) {
+function PenaltyArea({ edge, goalColor }: { edge: 'top' | 'bottom'; goalColor: string }) {
   const edgeStyle: { top: DimensionValue } | { bottom: DimensionValue } =
     edge === 'top' ? { top: 0 } : { bottom: 0 };
   const penaltySpotFromGoalLinePct: DimensionValue = `${PITCH_MARKINGS.penaltySpot.fromGoalLinePct * 100}%`;
@@ -377,13 +684,19 @@ function PenaltyArea({ edge }: { edge: 'top' | 'bottom' }) {
           ]}
         />
       </View>
-      <GoalMouth edge={edge} />
+      <GoalMouth edge={edge} goalColor={goalColor} />
     </View>
   );
 }
 
-/** Small bracket rectangle just outside the goal line, hinting at the goal frame. */
-function GoalMouth({ edge }: { edge: 'top' | 'bottom' }) {
+/**
+ * Bracket rectangle just outside the goal line, hinting at the goal frame.
+ * Painted in the defending team's color (frame + translucent "netting"
+ * fill): the language-free replacement for the old "FRANCE GOAL" end
+ * labels -- which end is whose now reads from color alone, matching the
+ * team colors already carried by the figures and score rail.
+ */
+function GoalMouth({ edge, goalColor }: { edge: 'top' | 'bottom'; goalColor: string }) {
   return (
     <View
       style={[
@@ -392,12 +705,15 @@ function GoalMouth({ edge }: { edge: 'top' | 'bottom' }) {
           ? { top: -(PITCH_MARKINGS.goalMouth.depthPct * 100) }
           : { bottom: -(PITCH_MARKINGS.goalMouth.depthPct * 100) },
         {
+          borderColor: goalColor,
           left: `${goalMouthLayout.leftPct}%`,
           width: `${goalMouthLayout.widthPct}%`,
           height: `${PITCH_MARKINGS.goalMouth.depthPct * 100}%`,
         },
       ]}
-    />
+    >
+      <View style={[StyleSheet.absoluteFill, styles.goalMouthNetting, { backgroundColor: goalColor }]} />
+    </View>
   );
 }
 
@@ -423,41 +739,21 @@ function CornerArc({ corner }: { corner: keyof typeof CORNER_STYLE_KEY }) {
 }
 
 /**
- * The abstract top-down pitch: subtle horizontal zone bands with gray lines
- * and labels, dividing the board into semantic bands (defensive / midfield /
- * attack / danger / high danger), plus a visible boundary (side/goal lines,
- * center line + circle hint -- fix #6) so the board reads as a pitch rather
- * than full-bleed emptiness.
- *
- * Band chrome follows the CURRENT possession direction so the labels never
- * contradict the presence: when the possessing team attacks the top edge the
- * rows read danger-at-top / own-third-at-bottom, and when possession flips
- * to the team attacking the bottom edge the label order mirrors (the row
- * weights stay physical -- narrow strips near both goals). The goal-end
- * labels are the fixed anchors; this text is deliberately quiet chrome, not
- * a broadcast-style pitch with markings.
+ * The pitch structure layer: boundary (side/goal lines), center line,
+ * center circle, and spot. The zone-band hairlines and text labels
+ * ("DANGER", "MIDFIELD", "OWN THIRD") that used to divide the board are
+ * gone -- product direction 2026-07-15: with 22 players and a real ball on
+ * the pitch, the match itself shows where the danger is, and the
+ * commentary lower-third carries the words. The semantic zones still drive
+ * all staging logic; they just aren't printed on the grass.
  */
-function ZonePitch({ direction }: { direction: BoardDirection }) {
-  const rows = direction === 'down'
-    ? ZONE_BAND_ROWS.map((band, index) => ({
-        ...band,
-        zone: ZONE_BAND_ROWS[ZONE_BAND_ROWS.length - 1 - index].zone,
-      }))
-    : ZONE_BAND_ROWS;
+function ZonePitch() {
   return (
     <View
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
       style={StyleSheet.absoluteFill}
     >
-      <View style={styles.pitchSurface}>
-        {rows.map((band) => (
-          <View key={band.zone} style={[styles.zoneBand, { flex: band.weight }]}>
-            <View style={styles.zoneBandLine} />
-            <Text style={styles.zoneBandLabel}>{zoneLabelForDirection(band.zone, direction)}</Text>
-          </View>
-        ))}
-      </View>
       <View style={styles.pitchBoundary} pointerEvents="none" />
       <View style={styles.centerLine} />
       <View style={styles.centerCircle} />
@@ -465,21 +761,6 @@ function ZonePitch({ direction }: { direction: BoardDirection }) {
     </View>
   );
 }
-
-/**
- * Top-to-bottom band order matching the visual layout (top edge = one
- * team's attacking direction, bottom edge = the other's). Weighted so
- * high-danger/danger bands read as narrower, closer-to-goal strips than the
- * wide midfield band -- matching `ZONE_BAND_POSITION` in
- * game-view-board-logic.ts.
- */
-const ZONE_BAND_ROWS: readonly { zone: 'high_danger' | 'danger' | 'attack' | 'neutral' | 'safe'; weight: number }[] = [
-  { zone: 'high_danger', weight: 0.8 },
-  { zone: 'danger', weight: 1.2 },
-  { zone: 'attack', weight: 1.6 },
-  { zone: 'neutral', weight: 2 },
-  { zone: 'safe', weight: 1.2 },
-];
 
 const PULSE_SCALE_DELTA = 0.14;
 const DRIFT_RANGE = 0.035;
@@ -658,59 +939,44 @@ const styles = StyleSheet.create({
   // viewports.
   boardOuter: {
     alignItems: 'center',
-    backgroundColor: tokens.shell.background,
+    backgroundColor: BOARD_SHELL_COLOR,
     flex: 1,
   },
   board: {
-    backgroundColor: tokens.shell.background,
+    backgroundColor: BOARD_SHELL_COLOR,
     flex: 1,
     maxWidth: PITCH_MAX_WIDTH,
     overflow: 'hidden',
     position: 'relative',
     width: '100%',
   },
-  // R1 addendum: insets all pitch content (turf, chalk lines, zone chrome,
-  // presence, overlay, goal-end labels) by PERIMETER_STRIP_SIZE on every
-  // edge so the perimeter LED-board strips have room to sit just inside the
-  // board container without visually cramping the playable pitch.
+  boardCanvas: {
+    ...StyleSheet.absoluteFill,
+  },
+  // R1 addendum: the far/top and touchline edges make room for the three LED
+  // walls; the near/bottom edge keeps only a smaller black-shell reveal.
   pitchInset: {
-    bottom: PERIMETER_STRIP_SIZE,
+    bottom: PERIMETER_BOTTOM_SHELL_SIZE,
     left: PERIMETER_STRIP_SIZE,
     position: 'absolute',
     right: PERIMETER_STRIP_SIZE,
     top: PERIMETER_STRIP_SIZE,
   },
-  pitchSurface: {
-    flex: 1,
-    flexDirection: 'column',
-  },
-  zoneBand: {
-    alignItems: 'center',
-    justifyContent: 'flex-start',
-    paddingTop: tokens.spacing.xs,
-  },
-  zoneBandLine: {
-    backgroundColor: ZONE_LINE_COLOR,
-    height: StyleSheet.hairlineWidth,
-    left: 0,
+  // The runners' room: grass between the boards and the touchline.
+  apronInset: {
+    bottom: PITCH_APRON_SIZE,
+    left: PITCH_APRON_SIZE,
     position: 'absolute',
-    right: 0,
-    top: 0,
-  },
-  zoneBandLabel: {
-    color: tokens.shell.textDim,
-    fontSize: 9,
-    fontWeight: tokens.typography.weight.bold,
-    letterSpacing: 1,
-    textTransform: 'uppercase',
+    right: PITCH_APRON_SIZE,
+    top: PITCH_APRON_SIZE,
   },
   // Fix #6, upgraded for R1: a visible pitch boundary (side lines + goal
   // lines) so the board reads as a pitch rather than an unbounded gradient.
-  // Uses CHALK_LINE_COLOR (brighter than the plain shell divider) now that
-  // it's drawn alongside full broadcast markings.
+  // Uses the primary chalk paint so the field's outer geometry anchors the
+  // quieter secondary details at phone scale.
   pitchBoundary: {
-    borderColor: CHALK_LINE_COLOR,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: CHALK_PRIMARY_COLOR,
+    borderWidth: 1,
     bottom: 0,
     left: 0,
     position: 'absolute',
@@ -718,8 +984,8 @@ const styles = StyleSheet.create({
     top: 0,
   },
   centerLine: {
-    backgroundColor: CHALK_LINE_COLOR,
-    height: StyleSheet.hairlineWidth,
+    backgroundColor: CHALK_PRIMARY_COLOR,
+    height: 1,
     left: 0,
     position: 'absolute',
     right: 0,
@@ -728,9 +994,9 @@ const styles = StyleSheet.create({
   // Fix #6: a center-circle hint (kept small/subtle) plus the center spot,
   // completing the "pitch" read without becoming a broadcast-style diagram.
   centerCircle: {
-    borderColor: CHALK_LINE_COLOR,
+    borderColor: CHALK_PRIMARY_COLOR,
     borderRadius: 999,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     height: 72,
     left: '50%',
     marginLeft: -36,
@@ -740,7 +1006,7 @@ const styles = StyleSheet.create({
     width: 72,
   },
   centerDot: {
-    backgroundColor: CHALK_LINE_COLOR,
+    backgroundColor: CHALK_PRIMARY_COLOR,
     borderRadius: 2,
     height: 4,
     left: '50%',
@@ -758,12 +1024,12 @@ const styles = StyleSheet.create({
   // R1: shared style for both the outer penalty box and the six-yard box --
   // only position/left/width/height differ per instance.
   penaltyBox: {
-    borderColor: CHALK_LINE_COLOR,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: CHALK_SECONDARY_COLOR,
+    borderWidth: 1,
     position: 'absolute',
   },
   penaltySpot: {
-    backgroundColor: CHALK_LINE_COLOR,
+    backgroundColor: CHALK_SECONDARY_COLOR,
     borderRadius: 2,
     height: 3,
     left: '50%',
@@ -782,76 +1048,59 @@ const styles = StyleSheet.create({
     right: '10%',
   },
   penaltyArc: {
-    borderColor: CHALK_LINE_COLOR,
+    borderColor: CHALK_SECONDARY_COLOR,
     borderRadius: 999,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     left: '50%',
     position: 'absolute',
     transform: [{ translateX: '-50%' }, { translateY: '-50%' }],
   },
-  // R1: small bracket rectangle just outside the goal line hinting at the
-  // goal frame -- open-bottomed toward the pitch (no border on the edge
-  // facing the field) so it reads as a goal mouth, not a closed box.
+  // Small bracket rectangle just outside the goal line hinting at the goal
+  // frame. The border color is applied per-instance in the defending team's
+  // color (see GoalMouth); slightly heavier than the chalk hairlines because
+  // it now carries meaning, not just structure.
   goalMouth: {
-    borderColor: CHALK_LINE_COLOR,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1.5,
+    overflow: 'hidden',
     position: 'absolute',
+  },
+  // Translucent team-color wash inside the goal frame -- reads as netting.
+  goalMouthNetting: {
+    opacity: 0.22,
   },
   // R1: corner quarter-circle hints via the border-radius trick -- a small
   // square with only the pitch-facing corner rounded and bordered.
   cornerArc: {
-    borderColor: CHALK_LINE_COLOR,
+    borderColor: CHALK_SECONDARY_COLOR,
     position: 'absolute',
   },
   cornerArcTopLeft: {
     borderBottomRightRadius: 999,
-    borderRightWidth: StyleSheet.hairlineWidth,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderRightWidth: 1,
+    borderBottomWidth: 1,
     left: 0,
     top: 0,
   },
   cornerArcTopRight: {
     borderBottomLeftRadius: 999,
-    borderLeftWidth: StyleSheet.hairlineWidth,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderLeftWidth: 1,
+    borderBottomWidth: 1,
     right: 0,
     top: 0,
   },
   cornerArcBottomLeft: {
     borderTopRightRadius: 999,
-    borderRightWidth: StyleSheet.hairlineWidth,
-    borderTopWidth: StyleSheet.hairlineWidth,
+    borderRightWidth: 1,
+    borderTopWidth: 1,
     left: 0,
     bottom: 0,
   },
   cornerArcBottomRight: {
     borderTopLeftRadius: 999,
-    borderLeftWidth: StyleSheet.hairlineWidth,
-    borderTopWidth: StyleSheet.hairlineWidth,
+    borderLeftWidth: 1,
+    borderTopWidth: 1,
     right: 0,
     bottom: 0,
-  },
-  // Fix #1: quiet goal-end labels so zone bands read relative to a real
-  // goal at either end of the pitch.
-  goalEndLabel: {
-    alignItems: 'center',
-    left: 0,
-    position: 'absolute',
-    right: 0,
-    zIndex: 2,
-  },
-  goalEndLabelTop: {
-    top: tokens.spacing.sm,
-  },
-  goalEndLabelBottom: {
-    bottom: tokens.spacing.sm,
-  },
-  goalEndLabelText: {
-    color: tokens.shell.textDim,
-    fontSize: 9,
-    fontWeight: tokens.typography.weight.bold,
-    letterSpacing: 1.5,
-    textTransform: 'uppercase',
   },
   presenceAnchor: {
     alignItems: 'center',
@@ -894,52 +1143,285 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFill,
     zIndex: 10,
   },
-  // R1 addendum (C3 perimeter slot pulled forward): base panel style shared
-  // by all four strip edges -- a slightly raised-luminance dark panel,
-  // clipped so the drifting wordmark content never spills past its strip.
-  perimeterStrip: {
-    alignItems: 'center',
-    backgroundColor: PERIMETER_PANEL_COLOR,
-    justifyContent: 'center',
+  commentarySlot: {
+    bottom: 10,
+    left: 10,
+    maxWidth: 310,
+    pointerEvents: 'none',
+    position: 'absolute',
+    width: '72%',
+    zIndex: 20,
+  },
+  commentaryInset: {
+    bottom: PERIMETER_BOTTOM_SHELL_SIZE + PITCH_APRON_SIZE,
+    left: PERIMETER_STRIP_SIZE + PITCH_APRON_SIZE,
+    pointerEvents: 'box-none',
+    position: 'absolute',
+    right: PERIMETER_STRIP_SIZE + PITCH_APRON_SIZE,
+    top: PERIMETER_STRIP_SIZE + PITCH_APRON_SIZE,
+    zIndex: 20,
+  },
+  // Three-sided physical wall shell. The perspective/rotation lives here so
+  // both placeholder and active creative inherit exactly the same geometry.
+  perimeterWall: {
+    backgroundColor: PERIMETER_PANEL_DEPTH_COLOR,
+    borderColor: PERIMETER_PANEL_EDGE_COLOR,
+    borderWidth: StyleSheet.hairlineWidth,
     overflow: 'hidden',
     position: 'absolute',
   },
-  perimeterStrip_top: {
+  perimeterWall_top: {
     height: PERIMETER_STRIP_SIZE,
+    left: PERIMETER_TOP_CORNER_INSET,
+    right: PERIMETER_TOP_CORNER_INSET,
+    top: -2,
+    transform: [
+      { perspective: 420 },
+      { rotateX: '-12deg' },
+      { scaleX: 1.025 },
+    ],
+    zIndex: 4,
+  },
+  perimeterWall_left: {
+    bottom: PERIMETER_BOTTOM_SHELL_SIZE - 1,
+    left: -2,
+    top: PERIMETER_STRIP_SIZE - 6,
+    transform: [
+      { perspective: 520 },
+      { rotateY: '42deg' },
+      { rotateZ: '1.1deg' },
+    ],
+    width: PERIMETER_STRIP_SIZE + 4,
+    zIndex: 3,
+  },
+  perimeterWall_right: {
+    bottom: PERIMETER_BOTTOM_SHELL_SIZE - 1,
+    right: -2,
+    top: PERIMETER_STRIP_SIZE - 6,
+    transform: [
+      { perspective: 520 },
+      { rotateY: '-42deg' },
+      { rotateZ: '-1.1deg' },
+    ],
+    width: PERIMETER_STRIP_SIZE + 4,
+    zIndex: 3,
+  },
+  perimeterStripFace: {
+    alignItems: 'center',
+    backgroundColor: PERIMETER_PANEL_COLOR,
+    bottom: 3,
+    justifyContent: 'center',
+    left: 3,
+    overflow: 'hidden',
+    position: 'absolute',
+    right: 3,
+    top: 2,
+  },
+  perimeterWallLip: {
+    backgroundColor: PERIMETER_PANEL_LIP_COLOR,
+    position: 'absolute',
+  },
+  perimeterWallLip_top: {
+    bottom: 0,
+    height: 3,
     left: 0,
     right: 0,
-    top: 0,
   },
-  perimeterStrip_bottom: {
-    bottom: 0,
-    height: PERIMETER_STRIP_SIZE,
-    left: 0,
-    right: 0,
-  },
-  perimeterStrip_left: {
-    bottom: 0,
-    left: 0,
-    top: 0,
-    width: PERIMETER_STRIP_SIZE,
-  },
-  perimeterStrip_right: {
+  perimeterWallLip_left: {
     bottom: 0,
     right: 0,
     top: 0,
-    width: PERIMETER_STRIP_SIZE,
+    width: 3,
+  },
+  perimeterWallLip_right: {
+    bottom: 0,
+    left: 0,
+    top: 0,
+    width: 3,
+  },
+  perimeterWallEndCap: {
+    backgroundColor: '#111512',
+    borderTopColor: 'rgba(236,244,238,0.16)',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    bottom: 0,
+    height: 7,
+    left: 0,
+    position: 'absolute',
+    right: 0,
   },
   perimeterContentHorizontal: {
     alignItems: 'center',
     flexDirection: 'row',
   },
+  perimeterAdCreative: {
+    opacity: PERIMETER_AD_CREATIVE_OPACITY,
+  },
+  perimeterSponsorTrackHorizontal: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: PERIMETER_SPONSOR_GAP,
+  },
+  perimeterSponsorTrackVertical: {
+    alignItems: 'center',
+    flexDirection: 'column',
+    gap: PERIMETER_SPONSOR_GAP,
+  },
+  perimeterSponsorHorizontal: {
+    alignItems: 'center',
+    borderRightColor: 'rgba(255,255,255,0.08)',
+    borderRightWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 6,
+    height: PERIMETER_STRIP_SIZE,
+    overflow: 'hidden',
+    paddingHorizontal: 8,
+    position: 'relative',
+    width: PERIMETER_SPONSOR_WIDTH,
+  },
+  perimeterSponsorLogo: {
+    alignItems: 'center',
+    borderRadius: 3,
+    borderWidth: 1,
+    height: 15,
+    justifyContent: 'center',
+    width: 15,
+    zIndex: 2,
+  },
+  perimeterSponsorLogoImageShell: {
+    backgroundColor: 'rgba(0,0,0,0.18)',
+    borderColor: 'transparent',
+    borderWidth: 0,
+  },
+  perimeterSponsorLogoText: {
+    fontSize: 7,
+    fontWeight: '900',
+    letterSpacing: -0.3,
+    lineHeight: 9,
+  },
+  perimeterSponsorName: {
+    color: '#F7FBF8',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1.1,
+    lineHeight: 12,
+    textShadowColor: 'rgba(0,0,0,0.72)',
+    textShadowOffset: { height: 1, width: 0 },
+    textShadowRadius: 2,
+    zIndex: 2,
+  },
+  perimeterSponsorStrapline: {
+    color: 'rgba(255,255,255,0.62)',
+    fontSize: 6,
+    fontWeight: '700',
+    letterSpacing: 0.9,
+    lineHeight: 8,
+    textShadowColor: 'rgba(0,0,0,0.72)',
+    textShadowOffset: { height: 1, width: 0 },
+    textShadowRadius: 2,
+    zIndex: 2,
+  },
+  perimeterSponsorSide: {
+    alignItems: 'center',
+    borderBottomColor: 'rgba(255,255,255,0.07)',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    height: PERIMETER_SPONSOR_MARK_HEIGHT,
+    justifyContent: 'center',
+    overflow: 'hidden',
+    position: 'relative',
+    width: PERIMETER_STRIP_SIZE,
+  },
+  perimeterSponsorSideCreative: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 5,
+    height: 22,
+    justifyContent: 'center',
+    width: 64,
+    zIndex: 2,
+  },
+  perimeterSponsorSideCreative_left: {
+    transform: [{ rotateZ: '-90deg' }],
+  },
+  perimeterSponsorSideCreative_right: {
+    transform: [{ rotateZ: '90deg' }],
+  },
+  perimeterSponsorSideMark: {
+    alignItems: 'center',
+    borderRadius: 3,
+    borderWidth: 1,
+    height: 16,
+    justifyContent: 'center',
+    width: 16,
+  },
+  perimeterSponsorSideText: {
+    fontSize: 7,
+    fontWeight: '900',
+    letterSpacing: -0.4,
+    lineHeight: 9,
+  },
+  perimeterSponsorSideName: {
+    color: '#F7FBF8',
+    fontSize: 8,
+    fontWeight: '900',
+    letterSpacing: 0.8,
+    lineHeight: 10,
+    textShadowColor: 'rgba(0,0,0,0.72)',
+    textShadowOffset: { height: 1, width: 0 },
+    textShadowRadius: 2,
+  },
+  perimeterBrandGlow: {
+    borderRadius: 999,
+    height: 54,
+    left: -16,
+    opacity: 0.14,
+    position: 'absolute',
+    top: -19,
+    width: 76,
+  },
+  perimeterBrandStripe: {
+    height: 10,
+    opacity: 0.16,
+    position: 'absolute',
+    right: -12,
+    top: 7,
+    transform: [{ rotateZ: '-18deg' }],
+    width: 76,
+  },
+  perimeterBrandScanline: {
+    backgroundColor: 'rgba(255,255,255,0.055)',
+    height: StyleSheet.hairlineWidth,
+    left: 0,
+    position: 'absolute',
+    right: 0,
+  },
+  perimeterBrandScanline_top: {
+    top: '34%',
+  },
+  perimeterBrandScanline_bottom: {
+    top: '68%',
+  },
+  perimeterLedColumn: {
+    alignItems: 'center',
+    flex: 1,
+    flexDirection: 'column',
+    justifyContent: 'space-evenly',
+  },
+  // Sized for the deeper approved walls: dashes and wordmark scale with the
+  // face so the LED panels read as real stadium furniture, not trim.
+  perimeterLedDash: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 1.5,
+    height: 16,
+    width: 3,
+  },
   perimeterText: {
     color: tokens.shell.textDim,
-    fontSize: 8,
+    fontSize: 13,
     fontWeight: tokens.typography.weight.bold,
-    letterSpacing: 2,
+    letterSpacing: 3,
     marginHorizontal: tokens.spacing.lg,
     marginVertical: tokens.spacing.lg,
-    opacity: 0.5,
+    opacity: 0.34,
     textTransform: 'uppercase',
   },
 });

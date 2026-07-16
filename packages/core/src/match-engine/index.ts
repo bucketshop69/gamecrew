@@ -1,5 +1,5 @@
 export { replayMatchEngine } from './replay';
-export { planCommentaryBeats } from './commentary';
+export { COMMENTARY_PLAN_VERSION, planCommentaryBeats } from './commentary';
 export { computeBeatNarrative } from './narrative';
 export {
   buildGameViewTimeline,

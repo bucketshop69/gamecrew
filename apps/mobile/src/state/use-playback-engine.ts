@@ -1,8 +1,8 @@
-import { buildGameViewTimeline } from '@gamecrew/core';
+import { buildGameViewTimeline, type SemanticFrame } from '@gamecrew/core';
 import { useEffect, useRef, useState } from 'react';
 
 import { createMatchSessionDefaultDeps } from './match-session-defaults';
-import { acquireMatchSession } from './match-session';
+import { acquireMatchSession, type MatchSessionHandle } from './match-session';
 import { PlaybackEngine, type PlaybackSnapshot } from './playback-engine';
 
 // This file is only consumed by React screens (bundled by Metro), never by
@@ -17,15 +17,39 @@ const EMPTY_SNAPSHOT: PlaybackSnapshot = {
   headIndex: -1,
   timeline: [],
   currentScene: undefined,
+  activeSceneWindow: undefined,
   sessionStatus: 'loading',
   headRevision: 0,
+  projectionGeneration: 0,
   frameCount: 0,
 };
+
+/** Product-selected acceleration for complete historical match playback. */
+const COMPLETE_REPLAY_PLAYBACK_RATE = 1.15;
+
+/**
+ * Live and historical playback both retain the complete semantic timeline.
+ * Historical fixtures differ only by receiving a concrete accelerated
+ * wall-clock schedule: no possession, zone transition, or incident is
+ * sampled out, and this contains no fixture-specific choreography.
+ */
+function buildProductionTimeline(frames: readonly SemanticFrame[], isLive: boolean) {
+  return isLive
+    ? buildGameViewTimeline(frames)
+    : buildGameViewTimeline(frames, {
+        pacing: {
+          mode: 'replay',
+          sceneSelection: 'complete',
+          playbackRate: COMPLETE_REPLAY_PLAYBACK_RATE,
+        },
+      });
+}
 
 export interface PlaybackEngineControls {
   play: () => void;
   pause: () => void;
   startReplay: () => void;
+  startReplayAt: (index: number) => void;
   scrubTo: (index: number) => void;
 }
 
@@ -33,6 +57,7 @@ const NOOP_CONTROLS: PlaybackEngineControls = {
   play: () => {},
   pause: () => {},
   startReplay: () => {},
+  startReplayAt: () => {},
   scrubTo: () => {},
 };
 
@@ -57,6 +82,7 @@ export function usePlaybackEngine(
 
   const [snapshot, setSnapshot] = useState<PlaybackSnapshot>(EMPTY_SNAPSHOT);
   const engineRef = useRef<PlaybackEngine | null>(null);
+  const sessionRef = useRef<MatchSessionHandle | null>(null);
   const [controls, setControls] = useState<PlaybackEngineControls>(NOOP_CONTROLS);
 
   useEffect(() => {
@@ -64,7 +90,10 @@ export function usePlaybackEngine(
       fixtureId,
       createMatchSessionDefaultDeps(() => isLiveRef.current),
     );
-    const engine = new PlaybackEngine(session, { director: buildGameViewTimeline });
+    sessionRef.current = session;
+    const engine = new PlaybackEngine(session, {
+      director: (frames) => buildProductionTimeline(frames, isLiveRef.current),
+    });
     engineRef.current = engine;
 
     const unsubscribe = engine.subscribe(setSnapshot);
@@ -73,6 +102,7 @@ export function usePlaybackEngine(
       play: () => engine.play(),
       pause: () => engine.pause(),
       startReplay: () => engine.startReplay(),
+      startReplayAt: (index: number) => engine.startReplayAt(index),
       scrubTo: (index: number) => engine.scrubTo(index),
     });
 
@@ -80,9 +110,21 @@ export function usePlaybackEngine(
       unsubscribe();
       engine.dispose();
       engineRef.current = null;
+      sessionRef.current = null;
       setControls(NOOP_CONTROLS);
     };
   }, [fixtureId]);
+
+  // A completed upcoming-fixture backfill has no timer left to observe the
+  // kickoff transition. Nudge the existing shared session when live status
+  // changes instead of tearing down its accumulated frame log. Re-project
+  // the same durable frames first because live is unpaced, while finished/
+  // upcoming fixtures use the complete accelerated replay schedule.
+  useEffect(() => {
+    engineRef.current?.refreshProjection();
+    sessionRef.current?.syncLiveStatus();
+    if (isLive) engineRef.current?.play();
+  }, [isLive]);
 
   return { snapshot, controls };
 }

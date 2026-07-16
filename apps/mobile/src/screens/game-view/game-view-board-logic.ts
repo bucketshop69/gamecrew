@@ -87,39 +87,31 @@ export function directionForParticipant(
   return participant1Direction === 'up' ? 'down' : 'up';
 }
 
-export interface GoalEndLabels {
-  /** Label for the board's top edge, e.g. "ECUADOR GOAL". */
-  top: string;
-  /** Label for the board's bottom edge. */
-  bottom: string;
+export interface GoalEndTeams<Team> {
+  /** The team whose goal sits at the board's top edge. */
+  top: Team;
+  /** The team whose goal sits at the board's bottom edge. */
+  bottom: Team;
 }
 
 /**
- * Resolves the attack-direction affordance labels for fix #1: a subtle
- * gray label at each pitch end naming the team whose GOAL sits there (i.e.
- * the team the *other* side attacks toward), so the existing zone-band
- * chrome reads as "toward a real goal" instead of an unlabeled abstract
- * gradient. Participant 1's own attacking edge (`participant1Direction`)
- * is where participant 2's goal sits, and vice versa.
+ * Resolves which team's goal sits at each pitch end. Replaces the old
+ * "FRANCE GOAL" text labels (fix #1) with a language-free affordance: the
+ * renderer paints each goal mouth in the defending team's color, so the
+ * ends read as "whose goal" without words (product direction 2026-07-15).
+ * Participant 1's own attacking edge (`participant1Direction`) is where
+ * participant 2's goal sits, and vice versa.
  */
-export function resolveGoalEndLabels(
-  homeTeam: BoardTeamInfoName,
-  awayTeam: BoardTeamInfoName,
+export function resolveGoalEndTeams<Team>(
+  homeTeam: Team,
+  awayTeam: Team,
   participant1Direction: BoardDirection = 'up',
-): GoalEndLabels {
-  const homeGoalName = `${homeTeam.name.toUpperCase()} GOAL`;
-  const awayGoalName = `${awayTeam.name.toUpperCase()} GOAL`;
-
+): GoalEndTeams<Team> {
   // Participant 1 attacks toward participant1Direction, i.e. that edge is
   // where participant 2 (away) defends its own goal.
   return participant1Direction === 'up'
-    ? { top: awayGoalName, bottom: homeGoalName }
-    : { top: homeGoalName, bottom: awayGoalName };
-}
-
-/** Minimal team shape `resolveGoalEndLabels` needs -- just the display name. */
-export interface BoardTeamInfoName {
-  name: string;
+    ? { top: awayTeam, bottom: homeTeam }
+    : { top: homeTeam, bottom: awayTeam };
 }
 
 /**

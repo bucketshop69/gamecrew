@@ -283,6 +283,8 @@ export interface MatchPulseCommentaryEntry {
   boardHint?: MatchPulseBoardHint;
   /** Optional engine grounding for durable, generation-safe commentary. */
   projectionGeneration?: number;
+  /** Deterministic planner contract version that produced this entry. */
+  commentaryPlanVersion?: number;
   commentaryBeatKind?: 'routine' | 'pressure' | 'major';
   mustCover?: boolean;
   sourceFrameIds?: readonly string[];

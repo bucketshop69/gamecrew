@@ -87,15 +87,23 @@ export async function fetchEngineFrames(
   fixtureId: string,
   {
     afterRevision = 0,
+    projectionGeneration,
     limit,
     signal,
   }: {
     afterRevision?: number;
+    projectionGeneration?: number;
     limit?: number;
     signal?: AbortSignal;
   } = {},
 ): Promise<EngineFramesResponse> {
   const params = new URLSearchParams({ afterRevision: String(afterRevision) });
+  if (projectionGeneration !== undefined) {
+    // The engine route names this wire parameter `generation`; keep the
+    // public client option explicit while honoring the API contract so a
+    // corrected projection can actually trigger `resyncRequired`.
+    params.set('generation', String(projectionGeneration));
+  }
   if (limit !== undefined) {
     params.set('limit', String(limit));
   }

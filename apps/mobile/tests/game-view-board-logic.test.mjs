@@ -10,7 +10,7 @@ import {
   resolveAmbientPresence,
   resolveBoardPresence,
   resolveCenteredBoxLayout,
-  resolveGoalEndLabels,
+  resolveGoalEndTeams,
   resolveHeldPresence,
   selectStatePanelCopy,
   zoneLabelForDirection,
@@ -272,22 +272,22 @@ test('pressureToIntensity: the floor does not clip the high end of the gradient'
   assert.ok(high.scale > low.scale);
 });
 
-// --- resolveGoalEndLabels (fix #1) ---
+// --- resolveGoalEndTeams (fix #1, revised to a language-free color affordance) ---
 
-test('resolveGoalEndLabels: participant 1 attacking up puts participant 2\'s (away) goal at the top', () => {
-  const home = { name: 'Mexico' };
-  const away = { name: 'Ecuador' };
-  const labels = resolveGoalEndLabels(home, away, 'up');
-  assert.equal(labels.top, 'ECUADOR GOAL');
-  assert.equal(labels.bottom, 'MEXICO GOAL');
+test('resolveGoalEndTeams: participant 1 attacking up puts participant 2\'s (away) goal at the top', () => {
+  const home = { name: 'Mexico', color: '#0A6640' };
+  const away = { name: 'Ecuador', color: '#FFD100' };
+  const ends = resolveGoalEndTeams(home, away, 'up');
+  assert.equal(ends.top, away);
+  assert.equal(ends.bottom, home);
 });
 
-test('resolveGoalEndLabels: flips when participant 1 attacks down', () => {
-  const home = { name: 'Mexico' };
-  const away = { name: 'Ecuador' };
-  const labels = resolveGoalEndLabels(home, away, 'down');
-  assert.equal(labels.top, 'MEXICO GOAL');
-  assert.equal(labels.bottom, 'ECUADOR GOAL');
+test('resolveGoalEndTeams: flips when participant 1 attacks down', () => {
+  const home = { name: 'Mexico', color: '#0A6640' };
+  const away = { name: 'Ecuador', color: '#FFD100' };
+  const ends = resolveGoalEndTeams(home, away, 'down');
+  assert.equal(ends.top, home);
+  assert.equal(ends.bottom, away);
 });
 
 // --- zoneLabelForDirection (fix #1) ---

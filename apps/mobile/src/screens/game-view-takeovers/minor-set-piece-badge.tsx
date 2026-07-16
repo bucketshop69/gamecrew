@@ -1,13 +1,11 @@
 import type { GameViewScene } from '@gamecrew/core';
-import { useRef } from 'react';
-import { Animated, Easing, Platform, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import { resolveSetPieceVariant, setPieceLabel, type SetPieceVariant } from './game-view-takeover-logic';
 import {
   teamForParticipant,
   tokens,
   useDelayedCompletion,
-  useMountedOnce,
   useTakeoverAnnouncement,
   type TakeoverBaseProps,
 } from './takeover-shared';
@@ -64,27 +62,8 @@ export function MinorSetPieceBadge({
   );
 }
 
-function BadgeEntrance({ children, reduceMotion }: { children: React.ReactNode; reduceMotion: boolean }) {
-  const entrance = useRef(new Animated.Value(reduceMotion ? 1 : 0)).current;
-
-  useMountedOnce(() => {
-    if (reduceMotion) return;
-    Animated.timing(entrance, {
-      duration: 180,
-      easing: Easing.out(Easing.cubic),
-      isInteraction: false,
-      toValue: 1,
-      useNativeDriver: Platform.OS !== 'web',
-    }).start();
-  });
-
-  const translateY = entrance.interpolate({ inputRange: [0, 1], outputRange: [-8, 0] });
-
-  return (
-    <Animated.View style={[styles.entranceWrap, { opacity: entrance, transform: [{ translateY }] }]}>
-      {children}
-    </Animated.View>
-  );
+function BadgeEntrance({ children }: { children: React.ReactNode; reduceMotion: boolean }) {
+  return <View style={styles.entranceWrap}>{children}</View>;
 }
 
 const styles = StyleSheet.create({

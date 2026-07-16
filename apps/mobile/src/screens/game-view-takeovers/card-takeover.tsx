@@ -1,17 +1,11 @@
 import type { GameViewScene } from '@gamecrew/core';
-import { useRef } from 'react';
-import { Animated, Easing, Platform, StyleSheet, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import { playerDisplayName, resolveCardVariant, type CardVariant } from './game-view-takeover-logic';
 import {
-  TakeoverEyebrow,
-  TakeoverHeadline,
-  TakeoverShell,
-  TakeoverSubline,
   teamForParticipant,
   tokens,
   useDelayedCompletion,
-  useMountedOnce,
   useTakeoverAnnouncement,
   type TakeoverBaseProps,
 } from './takeover-shared';
@@ -27,11 +21,16 @@ const CARD_LABEL: Record<CardVariant, string> = {
 };
 
 /**
- * Card takeover: a yellow or red card graphic with team-color accent and the
- * carded player's name when the source provides it. The director's `card`
- * scene does not carry the yellow/red distinction (only the source cue's
- * `value.action` does, see game-view-takeover-logic.ts's
- * resolveCardVariant doc comment) so the caller supplies it via `variant`.
+ * Card banner: a compact pill over the still-visible board -- a small
+ * card-shaped chip in yellow/red plus the team (and player when the source
+ * provides one). Was a full-screen takeover; product feedback (2026-07-15,
+ * with the 22-player formation view) is that a card must not blank the
+ * pitch -- the players hold their positions underneath (see the cluster's
+ * 'hold' plan) and richer detail belongs to the commentary layer.
+ *
+ * The director's `card` scene does not carry the yellow/red distinction
+ * (only the source cue's `value.action` does, see resolveCardVariant's doc
+ * comment) so the caller supplies it via `variant`.
  */
 export function CardTakeover({
   awayTeam,
@@ -51,62 +50,72 @@ export function CardTakeover({
     player ? `${player}${team ? `, ${team.name}` : ''}.` : team ? `${team.name}.` : undefined,
   ].filter(Boolean).join(' ');
 
+  const bannerText = [
+    player ?? team?.name,
+    CARD_LABEL[resolvedVariant],
+  ].filter(Boolean).join(' · ').toUpperCase();
+
   useTakeoverAnnouncement(announcement);
   useDelayedCompletion(scene.durationHint.minMs, onComplete);
 
   return (
-    <TakeoverShell accessibilityLabel={announcement} backgroundColor={tokens.shell.surface}>
-      <CardEntrance reduceMotion={reduceMotion}>
-        <View style={[styles.cardGraphic, { backgroundColor: cardColor }]} />
-        {team ? <View style={[styles.teamAccent, { backgroundColor: team.color }]} /> : null}
-        <TakeoverEyebrow style={styles.eyebrow}>{team?.name ?? 'Card'}</TakeoverEyebrow>
-        <TakeoverHeadline style={[styles.headline, resolvedVariant === 'red' && styles.headlineRed]}>
-          {CARD_LABEL[resolvedVariant]}
-        </TakeoverHeadline>
-        {player ? <TakeoverSubline style={styles.subline}>{player}</TakeoverSubline> : null}
-      </CardEntrance>
-    </TakeoverShell>
+    <CardEntrance reduceMotion={reduceMotion}>
+      <View
+        accessibilityLabel={announcement}
+        accessibilityLiveRegion="polite"
+        accessible
+        importantForAccessibility="yes"
+        style={styles.pill}
+      >
+        <View style={[styles.cardChip, { backgroundColor: cardColor }]} />
+        {team ? <View style={[styles.teamDot, { backgroundColor: team.color }]} /> : null}
+        <Text numberOfLines={1} style={styles.text}>{bannerText}</Text>
+      </View>
+    </CardEntrance>
   );
 }
 
-function CardEntrance({ children, reduceMotion }: { children: React.ReactNode; reduceMotion: boolean }) {
-  const entrance = useRef(new Animated.Value(reduceMotion ? 1 : 0)).current;
-
-  useMountedOnce(() => {
-    if (reduceMotion) return;
-    Animated.timing(entrance, {
-      duration: 240,
-      easing: Easing.out(Easing.back(1.4)),
-      isInteraction: false,
-      toValue: 1,
-      useNativeDriver: Platform.OS !== 'web',
-    }).start();
-  });
-
-  const scale = entrance.interpolate({ inputRange: [0, 1], outputRange: [0.7, 1] });
-
-  return (
-    <Animated.View style={{ alignItems: 'center', opacity: entrance, transform: [{ scale }] }}>
-      {children}
-    </Animated.View>
-  );
+function CardEntrance({ children }: { children: React.ReactNode; reduceMotion: boolean }) {
+  // Compact incident banners are information before motion. Keeping this
+  // shell static also avoids a web/JS-driver entrance race where a short
+  // replay scene could remain at opacity 0 for its entire visible window.
+  return <View style={styles.wrap}>{children}</View>;
 }
 
 const styles = StyleSheet.create({
-  cardGraphic: {
-    borderRadius: 6,
-    height: 84,
-    marginBottom: tokens.spacing.lg,
-    width: 60,
+  wrap: {
+    alignItems: 'center',
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: tokens.spacing.lg,
   },
-  teamAccent: {
+  pill: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(5, 5, 5, 0.86)',
+    borderColor: tokens.shell.divider,
     borderRadius: tokens.radii.pill,
-    height: 4,
-    marginBottom: tokens.spacing.md,
-    width: 48,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: tokens.spacing.sm,
+    paddingHorizontal: tokens.spacing.md,
+    paddingVertical: tokens.spacing.sm,
   },
-  eyebrow: { color: tokens.shell.text },
-  headline: { color: tokens.shell.text, fontSize: 40 },
-  headlineRed: { color: '#E23546' },
-  subline: { color: tokens.shell.text },
+  // A little card, not a dot: the shape is the signal.
+  cardChip: {
+    borderRadius: 2,
+    height: 14,
+    width: 10,
+  },
+  teamDot: {
+    borderRadius: 4,
+    height: 8,
+    width: 8,
+  },
+  text: {
+    color: tokens.shell.text,
+    fontSize: tokens.typography.size.label,
+    fontWeight: tokens.typography.weight.bold,
+    letterSpacing: 1,
+  },
 });

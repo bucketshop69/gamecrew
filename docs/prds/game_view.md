@@ -36,14 +36,15 @@ TxLINE provides sparse semantic events, not player tracking. The engine's own mo
 
 Therefore:
 
-- Game View must not continuously simulate 22 tracked players.
-- Continuous play is shown as an abstract possession presence inside a zone, not as player figures at claimed positions.
-- Stylized player silhouettes are allowed only inside staged vignettes (corner, penalty, celebration), because those are recognizable scenes, not positional claims.
+- Game View renders a full 22-player top-down tactical view (Football Manager-2D style): two 11-figure formation blocks of thin stickmen whose shapes slide and compress with the true facts (possession, zone, pressure), with the players nearest the ball staging the engaged action. *(Amended 2026-07-15, second revision: product rejected both the abstract-presence board and the small-cluster version after seeing them; the 22-figure look was approved from a mockup. See `docs/issues/game-view-realism-experiment.md`.)*
+- Every figure position is honest theater, never data: formations are cosmetic defaults (never claimed lineups), invented movement may never contradict a known fact, and no real player name or number ever appears on an invented figure. Player identity appears only in takeover typography where the source provides it.
+- The ball never crosses a zone boundary without a real cue (zone change, possession change, set piece, shot, goal, restart). A turnover may be staged as a defender's interception because the possession change itself is a fact.
+- Staged vignettes (corner, penalty, celebration) remain allowed as recognizable scenes.
 - Every visible state change must trace back to a semantic frame fact or simulation cue.
 
 The rule in one line:
 
-**Game View illustrates what TxLINE says. It never invents where the ball or players are.**
+**Game View illustrates what TxLINE says. Staging may dramatize inside the truth; it never contradicts or outruns it.**
 
 ## User Job
 
@@ -108,10 +109,10 @@ The taxonomy may grow, but every kind must map to source cue kinds that already 
 The ambient scene is the default state and covers most of the match:
 
 - the pitch is divided into semantic zones aligned with engine pressure bands (defensive / midfield / attack / danger / high danger)
-- possession is shown as a team-colored presence in the active zone
-- the presence drifts and pulses within its zone so play feels alive; drift inside a zone is presentation, not data
-- rising pressure moves the presence toward goal and increases visual intensity
-- possession changes flip the presence to the other team's color and direction
+- both teams are always on the board as 11-figure formation blocks; the possessing team's block pushes toward the ball's true zone and the defending block compresses goal-side of it *(amended 2026-07-15, realism experiment, second revision)*
+- the 2–3 possession figures nearest the ball knock it between them, with 1–2 opponents pressing; the other figures hold formation with short line-shifts
+- the baseline is calm — occasional passes; rising pressure quickens the tempo and pushes both blocks toward the dangerous end
+- possession changes are staged as an interception: an opposing figure takes the ball and both formations turn over
 
 ## Two Layers Of Graphics
 
@@ -124,12 +125,12 @@ Game View has exactly two presentation layers, and every scene belongs to one:
 
 The goal sequence is the flagship takeover and is fully cue-driven:
 
-1. `goal_pending` → tension beat: play freezes, checking treatment ("GOAL?").
-2. `goal_confirmed` / `score_commit` → celebration beat: team color takeover, scorer when source provides it, new scoreline. Celebration vignettes (players to the corner) are staged scenes and allowed.
-3. `restart` (after_goal) → reset beat: board returns to kickoff arrangement, ambient play resumes at the new score.
-4. `incident_retracted` → the takeback: a distinct overturn treatment that visibly removes the goal and restores the prior score. This is a product moment, not an error state — it proves the grounding.
+1. `goal_pending` → tension beat: the players begin celebrating immediately (as real players do before the referee confirms) while the board shows the checking treatment ("GOAL?"). The scoreline does not change.
+2. `goal_confirmed` / `score_commit` → celebration beat: team color takeover, scorer when source provides it, new scoreline. The figures run to a randomly chosen corner (left or right) and the team joins them.
+3. `restart` (after_goal) → reset beat: both teams jog back and line up in their own halves for kickoff; ambient play resumes at the new score.
+4. `incident_retracted` → the takeback: the celebration cuts off, a distinct overturn treatment visibly removes the goal and restores the prior score, and play resumes with a neutral restart (the source does not always say which restart the referee gave, so none is invented). This is a product moment, not an error state — it proves the grounding.
 
-Provisional versus confirmed lifecycle must be visually distinct. A provisional goal never shows the full confirmed celebration.
+Provisional versus confirmed lifecycle must be visually distinct: pending shows on-pitch celebration plus the checking treatment only; the scoreline change and the full typographic takeover are reserved for confirmation. *(Amended 2026-07-15: on-pitch celebration during pending is deliberate — it mirrors real players and makes the takeback beat land harder.)*
 
 ## Director And Renderer Split
 
@@ -319,7 +320,7 @@ This PRD does not include:
 
 ## Product Decisions
 
-- Game View is a zone-based abstract board, not a player simulation. This is a product identity decision, not a temporary limitation.
+- Game View is a dramatized zone-based board, not a tracked player simulation: a small action cluster stages the true match state; it never simulates 22 players or claims positions. *(Amended 2026-07-15 — the realism experiment's gate decides whether the cluster keeps this weight or reduces to ball-plus-presence.)*
 - Staged vignettes may use stylized silhouettes because they depict scenes, not positions.
 - The director lives in `packages/core` so the scene timeline is testable against recorded fixtures without UI, and reusable for future surfaces.
 - Live and replay share one director and one renderer; replay is the reliable demo path for judging.

@@ -14,7 +14,7 @@ function frame(id, stateRevision, seq = stateRevision) {
   };
 }
 
-function scene(id, durationHint = { minMs: 1000, maxMs: 1000 }) {
+function scene(id, durationHint = { minMs: 1000, maxMs: 1000 }, playbackDurationMs) {
   return {
     id,
     fixtureId: 'fx-1',
@@ -22,6 +22,9 @@ function scene(id, durationHint = { minMs: 1000, maxMs: 1000 }) {
     startRevision: 0,
     sourceFrameIds: [id],
     durationHint,
+    ...(playbackDurationMs === undefined
+      ? {}
+      : { playback: { playbackOffsetMs: 0, playbackDurationMs } }),
   };
 }
 
@@ -38,6 +41,7 @@ function createFakeSession(initialSnapshot) {
         return () => listeners.delete(listener);
       },
       getSnapshot: () => snapshot,
+      syncLiveStatus: () => {},
       release: () => {
         released = true;
       },
@@ -123,29 +127,64 @@ test('derives the scene timeline from session frames via the injected director',
   engine.dispose();
 });
 
-test('live mode tracks the head minus the live buffer', () => {
+test('live mode drains a three-scene poll burst in source order after the time buffer', async () => {
   const { director } = countingDirector();
+  const clock = createFakeClock();
   const { handle, push } = createFakeSession(
     baseSnapshot({ frames: [frame('f1', 1)], headRevision: 1, status: 'live' }),
   );
 
-  const engine = new PlaybackEngine(handle, { director, liveBufferScenes: 1 });
-
-  // Only one scene exists; buffer clamps to index 0 (can't go negative).
+  const engine = new PlaybackEngine(handle, { director, clock, liveBufferMs: 4000 });
   assert.equal(engine.getSnapshot().playheadIndex, 0);
 
   push(
     baseSnapshot({
-      frames: [frame('f1', 1), frame('f2', 2), frame('f3', 3)],
-      headRevision: 3,
+      frames: [frame('f1', 1), frame('f2', 2), frame('f3', 3), frame('f4', 4)],
+      headRevision: 4,
       status: 'live',
     }),
   );
 
-  const snapshot = engine.getSnapshot();
-  assert.equal(snapshot.headIndex, 2, 'head is the newest scene index');
-  assert.equal(snapshot.playheadIndex, 1, 'playhead lags the head by the live buffer');
-  assert.equal(snapshot.currentScene.id, 'f2');
+  assert.equal(engine.getSnapshot().headIndex, 3, 'data head advances immediately');
+  assert.equal(engine.getSnapshot().currentScene.id, 'f1', 'playhead waits behind the time buffer');
+
+  const played = [];
+  const unsubscribe = engine.subscribe((snapshot) => {
+    const id = snapshot.currentScene?.id;
+    if (id && played.at(-1) !== id) played.push(id);
+  });
+
+  await clock.flush(4000);
+  assert.equal(engine.getSnapshot().currentScene.id, 'f2');
+  await clock.flush(1000);
+  assert.equal(engine.getSnapshot().currentScene.id, 'f3');
+  await clock.flush(1000);
+  assert.equal(engine.getSnapshot().currentScene.id, 'f4');
+  assert.deepEqual(played, ['f2', 'f3', 'f4']);
+
+  unsubscribe();
+  engine.dispose();
+});
+
+test('newest live scene becomes visible after the time buffer without a future event', async () => {
+  const { director } = countingDirector();
+  const clock = createFakeClock();
+  const { handle, push } = createFakeSession(
+    baseSnapshot({ frames: [frame('f1', 1)], headRevision: 1, status: 'live' }),
+  );
+  const engine = new PlaybackEngine(handle, { director, clock, liveBufferMs: 4000 });
+
+  push(baseSnapshot({
+    frames: [frame('f1', 1), frame('f2', 2)],
+    headRevision: 2,
+    status: 'live',
+  }));
+
+  await clock.flush(3999);
+  assert.equal(engine.getSnapshot().currentScene.id, 'f1');
+  await clock.flush(1);
+  assert.equal(engine.getSnapshot().currentScene.id, 'f2');
+  assert.equal(clock.pendingCount(), 0, 'latest scene holds without waiting for another event');
 
   engine.dispose();
 });
@@ -160,7 +199,7 @@ test('pause freezes the playhead even as new data arrives', () => {
     }),
   );
 
-  const engine = new PlaybackEngine(handle, { director, liveBufferScenes: 0 });
+  const engine = new PlaybackEngine(handle, { director, clock: createFakeClock(), liveBufferMs: 0 });
   assert.equal(engine.getSnapshot().playheadIndex, 1);
 
   engine.pause();
@@ -205,6 +244,33 @@ test('scrubTo moves the playhead to an explicit index and clamps to bounds', () 
   engine.dispose();
 });
 
+test('startReplayAt enters replay at an explicit scene and continues on the normal schedule', async () => {
+  const clock = createFakeClock();
+  const { handle } = createFakeSession(
+    baseSnapshot({
+      frames: [frame('f1', 1), frame('f2', 2), frame('f3', 3)],
+      headRevision: 3,
+      status: 'complete',
+    }),
+  );
+  const engine = new PlaybackEngine(handle, {
+    director: (frames) => frames.map((item) => scene(item.id, undefined, 1000)),
+    clock,
+  });
+
+  engine.startReplayAt(1);
+  assert.equal(engine.getSnapshot().mode, 'replay');
+  assert.equal(engine.getSnapshot().currentScene.id, 'f2');
+
+  await clock.flush(1000);
+  assert.equal(engine.getSnapshot().currentScene.id, 'f3');
+
+  engine.startReplayAt(999);
+  assert.equal(engine.getSnapshot().currentScene.id, 'f3', 'capture/seek starts clamp to the timeline');
+
+  engine.dispose();
+});
+
 test('replay plays from the start and advances on the fake clock per scene duration', async () => {
   const { director } = countingDirector();
   const clock = createFakeClock();
@@ -216,13 +282,13 @@ test('replay plays from the start and advances on the fake clock per scene durat
     }),
   );
 
-  const engine = new PlaybackEngine(handle, { director, clock, replaySpeed: 1 });
+  const engine = new PlaybackEngine(handle, { director, clock });
 
   engine.startReplay();
   assert.equal(engine.getSnapshot().mode, 'replay');
   assert.equal(engine.getSnapshot().playheadIndex, 0);
 
-  // Each scene here has durationHint {1000,1000} -> 1000ms per step at replaySpeed 1.
+  // No concrete playback metadata here, so the 1000ms minimum hint is the fallback window.
   await clock.flush(1000);
   assert.equal(engine.getSnapshot().playheadIndex, 1);
 
@@ -236,8 +302,7 @@ test('replay plays from the start and advances on the fake clock per scene durat
   engine.dispose();
 });
 
-test('replay pacing is compressed by replaySpeed', async () => {
-  const { director } = countingDirector();
+test('replay consumes the director playback duration exactly without a second speed multiplier', async () => {
   const clock = createFakeClock();
   const { handle } = createFakeSession(
     baseSnapshot({
@@ -247,17 +312,51 @@ test('replay pacing is compressed by replaySpeed', async () => {
     }),
   );
 
-  const engine = new PlaybackEngine(handle, { director, clock, replaySpeed: 10 });
+  const director = (frames) => frames.map((f) => scene(f.id, { minMs: 4000, maxMs: 8000 }, 375));
+  const engine = new PlaybackEngine(handle, { director, clock });
   engine.startReplay();
 
-  // durationHint {1000,1000} / replaySpeed 10 = 100ms per step.
-  await clock.flush(100);
+  assert.equal(engine.getSnapshot().activeSceneWindow.durationMs, 375);
+  await clock.flush(374);
+  assert.equal(engine.getSnapshot().playheadIndex, 0);
+  await clock.flush(1);
   assert.equal(engine.getSnapshot().playheadIndex, 1);
 
   engine.dispose();
 });
 
-test('play() after replay/pause resumes live-buffer tracking', () => {
+test('replay holds an initial partial loading timeline until the session settles', () => {
+  const { director } = countingDirector();
+  const clock = createFakeClock();
+  const { handle, push } = createFakeSession(
+    baseSnapshot({
+      frames: [frame('partial-1', 1)],
+      headRevision: 1,
+      projectionGeneration: 1,
+      status: 'loading',
+    }),
+  );
+  const engine = new PlaybackEngine(handle, { director, clock });
+
+  engine.startReplay();
+  assert.equal(engine.getSnapshot().playheadIndex, -1);
+  assert.equal(engine.getSnapshot().activeSceneWindow, undefined);
+  assert.equal(clock.pendingCount(), 0);
+
+  push(baseSnapshot({
+    frames: [frame('partial-1', 1)],
+    headRevision: 1,
+    projectionGeneration: 1,
+    status: 'complete',
+  }));
+  assert.equal(engine.getSnapshot().currentScene.id, 'partial-1');
+  assert.match(engine.getSnapshot().activeSceneWindow.instanceKey, /^1:partial-1:/);
+  assert.equal(clock.pendingCount(), 1);
+
+  engine.dispose();
+});
+
+test('play() after replay/pause jumps to the current live head', () => {
   const { director } = countingDirector();
   const { handle } = createFakeSession(
     baseSnapshot({
@@ -267,18 +366,18 @@ test('play() after replay/pause resumes live-buffer tracking', () => {
     }),
   );
 
-  const engine = new PlaybackEngine(handle, { director, liveBufferScenes: 1 });
+  const engine = new PlaybackEngine(handle, { director });
   engine.scrubTo(0);
   assert.equal(engine.getSnapshot().playheadIndex, 0);
 
   engine.play();
   assert.equal(engine.getSnapshot().mode, 'live');
-  assert.equal(engine.getSnapshot().playheadIndex, 1, 'back to head minus buffer');
+  assert.equal(engine.getSnapshot().playheadIndex, 2, 'back to the current live head');
 
   engine.dispose();
 });
 
-test('timeline is memoized on headRevision: the director does not re-run when head is unchanged', () => {
+test('timeline memoization skips status-only updates but rebuilds when the data head advances', () => {
   const { director, callCount } = countingDirector();
   const { handle, push } = createFakeSession(
     baseSnapshot({ frames: [frame('f1', 1)], headRevision: 1, status: 'live' }),
@@ -304,6 +403,120 @@ test('timeline is memoized on headRevision: the director does not re-run when he
   );
 
   assert.equal(callCount(), callsAfterConstruction + 1, 'director re-ran once the head advanced');
+
+  engine.dispose();
+});
+
+test('refreshProjection re-runs the director at the same data head and remaps the live playhead', () => {
+  let useSummary = true;
+  let calls = 0;
+  const director = (frames) => {
+    calls += 1;
+    return useSummary ? [scene('summary')] : frames.map((item) => scene(item.id));
+  };
+  const { handle } = createFakeSession(
+    baseSnapshot({
+      frames: [frame('f1', 1), frame('f2', 2)],
+      headRevision: 2,
+      status: 'live',
+    }),
+  );
+  const engine = new PlaybackEngine(handle, { director });
+
+  assert.deepEqual(engine.getSnapshot().timeline.map((item) => item.id), ['summary']);
+  useSummary = false;
+  engine.refreshProjection();
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(calls, 2);
+  assert.deepEqual(snapshot.timeline.map((item) => item.id), ['f1', 'f2']);
+  assert.equal(snapshot.currentScene.id, 'f2', 'live mode holds the head of the refreshed timeline');
+
+  engine.dispose();
+});
+
+test('projection generation change rebuilds and resets the active scene even at the same head revision', () => {
+  const { director, callCount } = countingDirector();
+  const { handle, push } = createFakeSession(
+    baseSnapshot({
+      frames: [frame('old', 1)],
+      headRevision: 1,
+      projectionGeneration: 1,
+      status: 'live',
+    }),
+  );
+  const engine = new PlaybackEngine(handle, { director });
+  const oldInstanceKey = engine.getSnapshot().activeSceneWindow.instanceKey;
+
+  push(baseSnapshot({
+    frames: [frame('corrected', 1)],
+    headRevision: 1,
+    projectionGeneration: 2,
+    status: 'live',
+  }));
+
+  const snapshot = engine.getSnapshot();
+  assert.equal(snapshot.currentScene.id, 'corrected');
+  assert.equal(snapshot.projectionGeneration, 2);
+  assert.notEqual(snapshot.activeSceneWindow.instanceKey, oldInstanceKey);
+  assert.match(snapshot.activeSceneWindow.instanceKey, /^2:corrected:/);
+  assert.equal(callCount(), 2, 'same revision is rebuilt when generation changes');
+
+  engine.dispose();
+});
+
+test('replay restarts when an empty correction generation repopulates without another generation change', async () => {
+  const { director } = countingDirector();
+  const clock = createFakeClock();
+  const { handle, push } = createFakeSession(
+    baseSnapshot({
+      frames: [frame('old-1', 1), frame('old-2', 2)],
+      headRevision: 2,
+      projectionGeneration: 1,
+      status: 'complete',
+    }),
+  );
+  const engine = new PlaybackEngine(handle, { director, clock });
+  engine.startReplay();
+  assert.equal(engine.getSnapshot().currentScene.id, 'old-1');
+  assert.equal(clock.pendingCount(), 1);
+
+  push(baseSnapshot({
+    frames: [],
+    headRevision: 0,
+    projectionGeneration: 2,
+    status: 'loading',
+  }));
+  assert.equal(engine.getSnapshot().playheadIndex, -1);
+  assert.equal(engine.getSnapshot().currentScene, undefined);
+  assert.equal(clock.pendingCount(), 0);
+
+  push(baseSnapshot({
+    frames: [frame('corrected-1', 1)],
+    headRevision: 1,
+    projectionGeneration: 2,
+    status: 'loading',
+  }));
+  assert.equal(engine.getSnapshot().headIndex, 0, 'partial corrected data is derived but not presented');
+  assert.equal(engine.getSnapshot().playheadIndex, -1);
+  assert.equal(engine.getSnapshot().currentScene, undefined);
+  assert.equal(engine.getSnapshot().activeSceneWindow, undefined);
+  assert.equal(clock.pendingCount(), 0, 'partial loading page never schedules replay advancement');
+
+  push(baseSnapshot({
+    frames: [frame('corrected-1', 1), frame('corrected-2', 2)],
+    headRevision: 2,
+    projectionGeneration: 2,
+    status: 'complete',
+  }));
+  const corrected = engine.getSnapshot();
+  assert.equal(corrected.playheadIndex, 0);
+  assert.equal(corrected.currentScene.id, 'corrected-1');
+  assert.match(corrected.activeSceneWindow.instanceKey, /^2:corrected-1:/);
+  assert.equal(clock.pendingCount(), 1, 'corrected replay schedules scene advancement');
+
+  await clock.flush(1000);
+  assert.equal(engine.getSnapshot().currentScene.id, 'corrected-2');
 
   engine.dispose();
 });

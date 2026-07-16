@@ -1,8 +1,15 @@
-import { type GameCrewMatch, type GameViewScene, gameCrewTokens, type MatchEngineScore } from '@gamecrew/core';
+import {
+  type GameCrewMatch,
+  type GameViewScene,
+  gameCrewTokens,
+  type MatchEngineScore,
+  type MatchPulseCommentaryEntry,
+} from '@gamecrew/core';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AccessibilityInfo, StyleSheet, View } from 'react-native';
 
 import { usePlaybackEngine } from '../../state/use-playback-engine';
+import { findNearestPriorStageableScene } from '../game-view-players/cluster-choreography-logic';
 import {
   activeGoalSequenceBeatIndex,
   planGoalSequenceBeats,
@@ -10,6 +17,11 @@ import {
 import { GameViewTakeover } from '../game-view-takeovers/game-view-takeover';
 import { MinorSetPieceBadge } from '../game-view-takeovers/minor-set-piece-badge';
 import { GameViewBoard } from './game-view-board';
+import {
+  isGameViewCommentaryProjectionCompatible,
+  selectVisibleGameViewCommentary,
+} from './game-view-commentary-logic';
+import { GameViewCommentaryOverlay } from './game-view-commentary-overlay';
 import { GameViewStatePanel, GameViewStaleBanner } from './game-view-state-panel';
 import {
   type GameViewPresentationState,
@@ -18,6 +30,7 @@ import {
   mapSourceActionToCardVariant,
   mapSourceActionToSetPieceVariant,
   resolveGameViewLoadState,
+  resolvePresentationScene,
   resolveScoreRailScore,
   selectPlaybackModeForMatchStatus,
   shouldSetPieceUseFullVignette,
@@ -48,9 +61,13 @@ const tokens = gameCrewTokens;
  * game-view-screen-logic.ts for the full reasoning.
  */
 export function GameViewScreen({
+  commentaryEntries,
+  commentaryProjectionGeneration,
   match,
   onPresentationChange,
 }: {
+  commentaryEntries?: readonly MatchPulseCommentaryEntry[];
+  commentaryProjectionGeneration?: number;
   match: GameCrewMatch;
   onPresentationChange?: (state: GameViewPresentationState | null) => void;
 }) {
@@ -74,12 +91,27 @@ export function GameViewScreen({
   // update (startReplay() restarts the timeline from scene 0 if called
   // again).
   useEffect(() => {
-    if (desiredMode !== 'replay') return;
+    if (desiredMode !== 'replay') {
+      // A fixture can genuinely travel upcoming -> live -> finished without
+      // this screen remounting. Re-arm replay while it is live so the final
+      // status transition can start the newly compressed replay timeline.
+      startedReplayRef.current = false;
+      return;
+    }
     if (startedReplayRef.current) return;
+    // Paginated backfill can expose a partial timeline while the session is
+    // still loading. Starting here would replay that prefix and miss the
+    // eventual full-match compression; wait for loading to settle instead.
+    if (snapshot.sessionStatus === 'loading') return;
     if (snapshot.timeline.length === 0) return;
     startedReplayRef.current = true;
     controls.startReplay();
-  }, [controls, desiredMode, snapshot.timeline.length]);
+  }, [
+    controls,
+    desiredMode,
+    snapshot.sessionStatus,
+    snapshot.timeline.length,
+  ]);
 
   const homeTeam = useMemo(
     () => ({
@@ -100,6 +132,20 @@ export function GameViewScreen({
   );
 
   const currentScene = snapshot.currentScene;
+  const sceneWindow = snapshot.activeSceneWindow;
+  const presentationScene = useMemo(
+    () => resolvePresentationScene(currentScene, sceneWindow) ?? undefined,
+    [currentScene, sceneWindow],
+  );
+  const bootstrapScene = useMemo(
+    () => findNearestPriorStageableScene(
+      snapshot.timeline,
+      presentationScene,
+      homeTeam,
+      awayTeam,
+    ),
+    [awayTeam, homeTeam, presentationScene, snapshot.timeline],
+  );
   const hasScenes = snapshot.timeline.length > 0;
   const { status: loadStatus, isStale } = resolveGameViewLoadState(
     snapshot.sessionStatus,
@@ -110,7 +156,39 @@ export function GameViewScreen({
   // active so `resolveScoreRailScore` can hold the pre-goal score through
   // the tension beat and commit only once celebration starts. See
   // `useGoalSequenceScoreHold`'s doc comment.
-  const { activeBeatIndex, previousScoreRef } = useGoalSequenceScoreHold(currentScene, reduceMotion);
+  const { activeBeatIndex, previousScoreRef } = useGoalSequenceScoreHold(
+    presentationScene,
+    reduceMotion,
+    sceneWindow?.instanceKey,
+  );
+
+  // R4: the board's action cluster celebrates on the pitch during the
+  // checking (tension) beat and yields to the confirmation takeover once the
+  // celebration beat starts -- same beat clock the score hold above uses.
+  const activeGoalBeat = presentationScene?.kind === 'goal_sequence' && presentationScene.beats?.length
+    ? presentationScene.beats[Math.min(activeBeatIndex, presentationScene.beats.length - 1)]
+    : undefined;
+  const goalBeat = activeGoalBeat?.kind;
+
+  const visibleCommentary = useMemo(
+    () => selectVisibleGameViewCommentary(
+      isGameViewCommentaryProjectionCompatible(
+        commentaryProjectionGeneration,
+        snapshot.projectionGeneration,
+      ) ? commentaryEntries ?? [] : [],
+      snapshot.timeline,
+      snapshot.playheadIndex,
+      activeGoalBeat,
+    ),
+    [
+      activeGoalBeat,
+      commentaryEntries,
+      commentaryProjectionGeneration,
+      snapshot.playheadIndex,
+      snapshot.projectionGeneration,
+      snapshot.timeline,
+    ],
+  );
 
   useEffect(() => {
     if (!currentScene) {
@@ -146,7 +224,7 @@ export function GameViewScreen({
       return;
     }
     startedReplayRef.current = false;
-    if (snapshot.timeline.length > 0) {
+    if (snapshot.sessionStatus !== 'loading' && snapshot.timeline.length > 0) {
       startedReplayRef.current = true;
       controls.startReplay();
     }
@@ -165,25 +243,27 @@ export function GameViewScreen({
   // SetPieceVignette that corner/penalty use -- see
   // `shouldSetPieceUseFullVignette`'s doc comment. The scene still occupies
   // its full playback window either way; only the visual treatment differs.
-  const isMinorSetPiece = currentScene?.kind === 'set_piece'
-    && !shouldSetPieceUseFullVignette(currentScene.sourceAction);
+  const isMinorSetPiece = presentationScene?.kind === 'set_piece'
+    && !shouldSetPieceUseFullVignette(presentationScene.sourceAction);
 
-  const overlay = currentScene && isMinorSetPiece ? (
+  const overlay = presentationScene && isMinorSetPiece ? (
     <MinorSetPieceBadge
+      key={sceneWindow?.instanceKey ?? presentationScene.id}
       awayTeam={awayTeam}
       homeTeam={homeTeam}
       reduceMotion={reduceMotion}
-      scene={currentScene}
-      variant={mapSourceActionToSetPieceVariant(currentScene.sourceAction)}
+      scene={presentationScene}
+      variant={mapSourceActionToSetPieceVariant(presentationScene.sourceAction)}
     />
-  ) : currentScene && isTakeoverSceneKind(currentScene.kind) ? (
+  ) : presentationScene && isTakeoverSceneKind(presentationScene.kind) ? (
     <GameViewTakeover
+      key={sceneWindow?.instanceKey ?? presentationScene.id}
       awayTeam={awayTeam}
-      cardVariant={mapSourceActionToCardVariant(currentScene.sourceAction)}
+      cardVariant={mapSourceActionToCardVariant(presentationScene.sourceAction)}
       homeTeam={homeTeam}
       reduceMotion={reduceMotion}
-      scene={currentScene}
-      setPieceVariant={mapSourceActionToSetPieceVariant(currentScene.sourceAction)}
+      scene={presentationScene}
+      setPieceVariant={mapSourceActionToSetPieceVariant(presentationScene.sourceAction)}
     />
   ) : undefined;
 
@@ -191,10 +271,16 @@ export function GameViewScreen({
     <View style={styles.root}>
       <GameViewBoard
         awayTeam={awayTeam}
+        bootstrapScene={bootstrapScene}
+        commentaryOverlay={visibleCommentary.length > 0
+          ? <GameViewCommentaryOverlay entries={visibleCommentary} />
+          : undefined}
+        goalBeat={goalBeat}
         homeTeam={homeTeam}
         overlay={overlay}
         reduceMotion={reduceMotion}
-        scene={currentScene ?? null}
+        scene={presentationScene ?? null}
+        sceneWindowKey={sceneWindow?.instanceKey}
       />
       {isStale ? <GameViewStaleBanner /> : null}
     </View>
@@ -223,7 +309,11 @@ export function GameViewScreen({
  * against; this hook mirrors that by jumping straight to the last beat
  * instead of scheduling per-beat timers.
  */
-function useGoalSequenceScoreHold(scene: GameViewScene | undefined, reduceMotion: boolean) {
+function useGoalSequenceScoreHold(
+  scene: GameViewScene | undefined,
+  reduceMotion: boolean,
+  sceneWindowKey: string | undefined,
+) {
   const [activeBeatIndex, setActiveBeatIndex] = useState(0);
   const previousScoreRef = useRef<MatchEngineScore | undefined>(undefined);
 
@@ -252,11 +342,13 @@ function useGoalSequenceScoreHold(scene: GameViewScene | undefined, reduceMotion
     return () => {
       timers.forEach(clearTimeout);
     };
-    // Re-run only when the scene identity or reduce-motion mode changes,
-    // matching AnimatedGoalSequence's own timer-reset-on-scene.id pattern in
-    // goal-sequence-takeover.tsx.
+    // The playback engine can replace one logical goal scene in place when
+    // a provisional goal becomes confirmed. Its scene id stays stable, but
+    // the active-window instance changes; keying on that instance restarts
+    // the beat clock and keeps the score rail synchronized with the freshly
+    // mounted takeover.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reduceMotion, scene?.id, scene?.kind]);
+  }, [reduceMotion, scene?.id, scene?.kind, sceneWindowKey]);
 
   return { activeBeatIndex, previousScoreRef };
 }

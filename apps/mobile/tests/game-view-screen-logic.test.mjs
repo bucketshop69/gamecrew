@@ -7,11 +7,64 @@ import {
   mapSourceActionToCardVariant,
   mapSourceActionToSetPieceVariant,
   resolveGameViewLoadState,
+  resolvePresentationScene,
   resolveScoreRailScore,
   selectPlaybackModeForMatchStatus,
   shouldSetPieceUseFullVignette,
   shouldTakeoverOnCompleteAdvancePlayback,
 } from '../src/screens/game-view/game-view-screen-logic.ts';
+
+// ---------------------------------------------------------------------------
+// Authoritative renderer window
+// ---------------------------------------------------------------------------
+
+test('resolvePresentationScene applies the active engine window without mutating match truth', () => {
+  const scene = {
+    id: 'shot-1',
+    fixtureId: 'fx-1',
+    kind: 'shot',
+    startRevision: 8,
+    sourceFrameIds: ['f8'],
+    participant: 2,
+    zone: 'danger',
+    durationHint: { minMs: 2500, maxMs: 5000 },
+  };
+  const result = resolvePresentationScene(scene, {
+    instanceKey: '3:shot-1:9',
+    sceneId: 'shot-1',
+    startedAtMs: 100,
+    durationMs: 1400,
+    mode: 'replay',
+  });
+
+  assert.notEqual(result, scene);
+  assert.deepEqual(result.durationHint, { minMs: 1400, maxMs: 1400 });
+  assert.equal(result.participant, 2);
+  assert.equal(result.zone, 'danger');
+  assert.deepEqual(scene.durationHint, { minMs: 2500, maxMs: 5000 });
+});
+
+test('resolvePresentationScene ignores a stale window belonging to another scene', () => {
+  const scene = {
+    id: 'ambient-2',
+    fixtureId: 'fx-1',
+    kind: 'ambient',
+    startRevision: 9,
+    sourceFrameIds: ['f9'],
+    durationHint: { minMs: 0, maxMs: 0 },
+  };
+  const result = resolvePresentationScene(scene, {
+    instanceKey: '3:ambient-1:8',
+    sceneId: 'ambient-1',
+    startedAtMs: 100,
+    durationMs: 900,
+    mode: 'live',
+  });
+
+  assert.equal(result, scene);
+  assert.equal(resolvePresentationScene(scene, undefined), scene);
+  assert.equal(resolvePresentationScene(undefined, undefined), undefined);
+});
 
 // ---------------------------------------------------------------------------
 // Mode selection
@@ -139,20 +192,22 @@ test('mapSourceActionToSetPieceVariant returns undefined for unrecognized or mis
 // Minor set-piece badge vs full vignette (fix #2)
 // ---------------------------------------------------------------------------
 
-test('shouldSetPieceUseFullVignette: corner and penalty keep the full vignette', () => {
-  assert.equal(shouldSetPieceUseFullVignette('corner'), true);
+test('shouldSetPieceUseFullVignette: only penalty keeps the full vignette', () => {
   assert.equal(shouldSetPieceUseFullVignette('penalty'), true);
 });
 
-test('shouldSetPieceUseFullVignette: throw-in and free kick render as a compact badge instead', () => {
+test('shouldSetPieceUseFullVignette: board-staged set pieces render as a compact badge over the visible board', () => {
+  // Corner joined the badge set in R4: the swing is staged on the board by
+  // the action cluster, so the vignette would hide the delivery itself.
+  assert.equal(shouldSetPieceUseFullVignette('corner'), false);
   assert.equal(shouldSetPieceUseFullVignette('throw_in'), false);
   assert.equal(shouldSetPieceUseFullVignette('free_kick'), false);
 });
 
-test('shouldSetPieceUseFullVignette: unrecognized or missing sourceAction defaults to the full vignette', () => {
-  assert.equal(shouldSetPieceUseFullVignette(undefined), true);
-  assert.equal(shouldSetPieceUseFullVignette('goal_kick'), true);
-  assert.equal(shouldSetPieceUseFullVignette(''), true);
+test('shouldSetPieceUseFullVignette: unrecognized or missing sourceAction defaults to the quiet badge, never a full-screen wall', () => {
+  assert.equal(shouldSetPieceUseFullVignette(undefined), false);
+  assert.equal(shouldSetPieceUseFullVignette('goal_kick'), false);
+  assert.equal(shouldSetPieceUseFullVignette(''), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -198,6 +253,19 @@ test('resolveScoreRailScore: holds the previous score while the active beat is t
 
   const result = resolveScoreRailScore(scene, previousScore, 0);
   assert.deepEqual(result, previousScore, 'tension beat must not leak the post-goal score');
+});
+
+test('resolveScoreRailScore: a fresh goal scene reads its tension beat pre-goal score without prior local state', () => {
+  const scene = goalSequenceScene(
+    [
+      { kind: 'tension', lifecycle: 'provisional', sourceFrameIds: ['f1'], scoreAtMoment: { participant1: 2, participant2: 1 } },
+      { kind: 'celebration', lifecycle: 'confirmed', sourceFrameIds: ['f2'], scoreAtMoment: { participant1: 3, participant2: 1 } },
+    ],
+    { scoreAtMoment: { participant1: 3, participant2: 1 } },
+  );
+
+  const result = resolveScoreRailScore(scene, undefined, 0);
+  assert.deepEqual(result, { participant1: 2, participant2: 1 }, 'fresh mount must show neither a false 0-0 nor the post-goal 3-1');
 });
 
 test('resolveScoreRailScore: commits the new score once the celebration beat is active', () => {

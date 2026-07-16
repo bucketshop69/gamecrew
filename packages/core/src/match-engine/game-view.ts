@@ -52,6 +52,7 @@ export interface GameViewGoalBeat {
   lifecycle: MatchEngineLifecycle;
   sourceFrameIds: readonly string[];
   player?: MatchEnginePlayer;
+  /** Pre-goal on tension; committed post-goal on celebration. */
   scoreAtMoment?: MatchEngineScore;
 }
 
@@ -68,6 +69,7 @@ export interface GameViewScene {
   /** State revision this scene first became true at. */
   startRevision: number;
   sourceFrameIds: readonly string[];
+  sourceCueIds: readonly string[];
   participant?: MatchEngineParticipant;
   teamId?: number | string;
   zone?: GameViewZone;
@@ -114,6 +116,13 @@ export interface GameViewPlaybackTiming {
 export interface GameViewReplayPacingOptions {
   mode: 'replay';
   /**
+   * `summary` deterministically samples routine play before pacing so staged
+   * moments remain readable; `complete` keeps every derived scene (useful for
+   * debugging). Live/unpaced timelines never run replay selection. Defaults
+   * to `summary`.
+   */
+  sceneSelection?: 'summary' | 'complete';
+  /**
    * Upper bound, in milliseconds, on how long any single ambient stretch is
    * allowed to occupy in the compressed replay timeline, regardless of how
    * much match-clock time it actually spanned. Quiet stretches longer than
@@ -122,12 +131,12 @@ export interface GameViewReplayPacingOptions {
    */
   ambientStretchCapMs?: number;
   /**
-   * Best-effort total replay length in milliseconds. Major moments
-   * (goal_sequence, goal_retracted, card, var_review, phase_break) always
-   * keep their full duration; ambient and minor takeovers (set_piece, shot,
-   * substitution, restart) scale down proportionally, with a small floor so
-   * motion stays legible, until the timeline fits the target. Defaults to
-   * `DEFAULT_REPLAY_TARGET_DURATION_MS`; pass `null` to disable scaling.
+   * Best-effort total replay length in milliseconds. Every retained
+   * non-ambient scene keeps its full `durationHint.minMs`; only ambient time
+   * scales, and never below its readability floor. The result may exceed the
+   * target when protected moments plus floors already consume more than the
+   * budget. Defaults to `DEFAULT_REPLAY_TARGET_DURATION_MS`; pass `null` to
+   * disable ambient scaling.
    */
   targetDurationMs?: number | null;
   /**
@@ -136,6 +145,12 @@ export interface GameViewReplayPacingOptions {
    * play). Defaults to `DEFAULT_REPLAY_MS_PER_MATCH_SECOND`.
    */
   msPerMatchSecond?: number;
+  /**
+   * Uniform wall-clock acceleration applied after scene selection and
+   * duration planning. A value of 2 plays every retained scene at 2x while
+   * preserving its facts, ordering, and source ids. Defaults to 1.
+   */
+  playbackRate?: number;
 }
 
 export interface GameViewTimelineOptions {
@@ -145,13 +160,16 @@ export interface GameViewTimelineOptions {
 
 /** Default cap on a single compressed ambient stretch in a replay timeline. */
 export const DEFAULT_REPLAY_AMBIENT_CAP_MS = 2500;
-/** Default best-effort replay length: a full match tells its story in ~5 minutes. */
+/** Aspirational replay budget; protected moments/readability floors may push the result past it. */
 export const DEFAULT_REPLAY_TARGET_DURATION_MS = 300_000;
-/** Floor for scaled flexible scenes so compressed motion stays legible. */
-const REPLAY_SCALED_SCENE_FLOOR_MS = 200;
-/** Scene kinds that never lose screen time to replay target scaling. */
-const REPLAY_FIXED_KINDS: ReadonlySet<GameViewSceneKind> = new Set([
-  'goal_sequence', 'goal_retracted', 'card', 'var_review', 'phase_break',
+/** Minimum readable window for a sampled ambient formation transition. */
+const REPLAY_AMBIENT_FLOOR_MS = 900;
+/** One honest ambient state sample per two match-clock minutes. */
+const REPLAY_AMBIENT_BUCKET_SECONDS = 120;
+/** Scene kinds that a replay summary never drops. */
+const REPLAY_PROTECTED_KINDS: ReadonlySet<GameViewSceneKind> = new Set([
+  'goal_sequence', 'goal_retracted', 'card', 'var_review', 'substitution',
+  'phase_break', 'shot', 'restart',
 ]);
 /** Default "real pace" ambient playback rate: 1 match-minute per 1.5 playback-seconds. */
 export const DEFAULT_REPLAY_MS_PER_MATCH_SECOND = 25;
@@ -220,9 +238,17 @@ function scenePriority(kind: GameViewSceneKind, cue: SimulationCue): number {
   return TAKEOVER_PRIORITY[kind];
 }
 
-/** Deterministic id: fixture + kind + the ordered source frame ids it was built from. */
-function sceneId(fixtureId: number | string, kind: GameViewSceneKind, sourceFrameIds: readonly string[]): string {
-  return `${fixtureId}:game-view:${kind}:${sourceFrameIds.join('+')}`;
+/** Deterministic id: fixture + kind + the ordered source frame and cue ids it was built from. */
+function sceneId(
+  fixtureId: number | string,
+  kind: GameViewSceneKind,
+  sourceFrameIds: readonly string[],
+  sourceCueIds: readonly string[],
+): string {
+  const cueKey = uniqueSourceIds(sourceCueIds)
+    .map((cueId) => encodeURIComponent(cueId))
+    .join('+');
+  return `${fixtureId}:game-view:${kind}:${sourceFrameIds.join('+')}:cues:${cueKey}`;
 }
 
 function compareFrames(left: SemanticFrame, right: SemanticFrame): number {
@@ -237,6 +263,7 @@ interface AmbientAccumulator {
   fixtureId: number | string;
   startRevision: number;
   sourceFrameIds: string[];
+  sourceCueIds: string[];
   participant?: MatchEngineParticipant;
   teamId?: number | string;
   zone?: GameViewZone;
@@ -248,11 +275,17 @@ interface AmbientAccumulator {
 
 function freezeAmbient(accumulator: AmbientAccumulator): GameViewScene {
   return {
-    id: sceneId(accumulator.fixtureId, 'ambient', accumulator.sourceFrameIds),
+    id: sceneId(
+      accumulator.fixtureId,
+      'ambient',
+      accumulator.sourceFrameIds,
+      accumulator.sourceCueIds,
+    ),
     fixtureId: accumulator.fixtureId,
     kind: 'ambient',
     startRevision: accumulator.startRevision,
     sourceFrameIds: uniqueSourceIds(accumulator.sourceFrameIds),
+    sourceCueIds: uniqueSourceIds(accumulator.sourceCueIds),
     participant: accumulator.participant,
     teamId: accumulator.teamId,
     zone: accumulator.zone,
@@ -268,6 +301,13 @@ interface DirectorState {
   fixtureId: number | string;
   scenes: GameViewScene[];
   ambient?: AmbientAccumulator;
+  /**
+   * Ordinary incident scenes keyed by their stable cue id. TxLINE commonly
+   * emits provisional then confirmed revisions for one throw-in/corner/shot;
+   * replay upgrades the first scene in place so one real incident is staged
+   * exactly once while retaining every supporting source frame.
+   */
+  incidentScenes: Map<string, GameViewScene>;
   /** Latest confirmed score seen so far, tracked for scoreEvents + goal_retracted restoration. */
   latestScore?: MatchEngineScore;
   /** Open goal_sequence scene awaiting its celebration beat, keyed by the goal cue id. */
@@ -276,6 +316,13 @@ interface DirectorState {
   confirmedGoalScenes: Map<string, { scene: GameViewScene; scoreBefore?: MatchEngineScore }>;
   phase?: MatchEnginePhase;
   clockSeconds?: number;
+  /**
+   * The most recent semantic zone any possession cue placed the play in.
+   * Set-piece scenes fall back to it when their own cue carries no zone
+   * (real feeds routinely omit it on throw-ins/free kicks), so the renderer
+   * can stage the dead ball where play actually was instead of guessing.
+   */
+  lastZone?: GameViewZone;
 }
 
 /**
@@ -330,6 +377,7 @@ function extendOrOpenAmbient(
   const participant = cue.participant;
   const zone = cue.probableZone ?? cue.pressure;
   const teamId = cue.teamId;
+  if (zone) state.lastZone = zone;
   const current = state.ambient;
 
   const sameOwner = current
@@ -343,6 +391,7 @@ function extendOrOpenAmbient(
     // closes (mutate-before-freeze), so the emitted scene is always a
     // finished, immutable snapshot.
     current.sourceFrameIds.push(frame.id);
+    current.sourceCueIds.push(cue.id);
     current.pressure = cue.pressure ?? current.pressure;
     current.scoreAtMoment = state.latestScore ?? current.scoreAtMoment;
     current.clockSeconds = frame.matchClockSeconds ?? current.clockSeconds;
@@ -356,6 +405,7 @@ function extendOrOpenAmbient(
     fixtureId: state.fixtureId,
     startRevision: frame.stateRevision,
     sourceFrameIds: [frame.id],
+    sourceCueIds: [cue.id],
     participant,
     teamId,
     zone,
@@ -370,11 +420,13 @@ function baseTakeoverFields(
   state: DirectorState,
   frame: SemanticFrame,
   sourceFrameIds: readonly string[],
+  sourceCueIds: readonly string[],
 ) {
   return {
     fixtureId: state.fixtureId,
     startRevision: frame.stateRevision,
     sourceFrameIds: uniqueSourceIds(sourceFrameIds),
+    sourceCueIds: uniqueSourceIds(sourceCueIds),
     scoreAtMoment: state.latestScore,
     clockSeconds: frame.matchClockSeconds,
     phase: state.phase,
@@ -383,24 +435,39 @@ function baseTakeoverFields(
 
 function handleSetPiece(state: DirectorState, frame: SemanticFrame, cue: SimulationCue) {
   closeAmbient(state);
+  const zone = cue.probableZone ?? cue.pressure ?? state.lastZone;
+  const existing = mergeIncidentScene(state, frame, cue, 'set_piece');
+  if (existing) {
+    if (zone) existing.zone = zone;
+    if (typeof cue.value.action === 'string') existing.sourceAction = cue.value.action;
+    return;
+  }
   const scene: GameViewScene = {
-    ...baseTakeoverFields(state, frame, [frame.id]),
-    id: sceneId(state.fixtureId, 'set_piece', [frame.id]),
+    ...baseTakeoverFields(state, frame, [frame.id], [cue.id]),
+    id: sceneId(state.fixtureId, 'set_piece', [frame.id], [cue.id]),
     kind: 'set_piece',
     participant: cue.participant,
     teamId: cue.teamId,
     lifecycle: cue.lifecycle,
+    // The semantic band where the dead ball is taken, when the source
+    // supplies one -- lets the renderer stage throw-ins/free kicks at a
+    // truthful pitch height instead of guessing (same band the ambient
+    // scenes already use).
+    ...(zone ? { zone } : {}),
     ...(typeof cue.value.action === 'string' ? { sourceAction: cue.value.action } : {}),
     durationHint: DEFAULT_DURATION.set_piece,
   };
+  rememberIncidentScene(state, cue, scene);
   state.scenes.push(scene);
 }
 
 function handleShot(state: DirectorState, frame: SemanticFrame, cue: SimulationCue) {
   closeAmbient(state);
+  const existing = mergeIncidentScene(state, frame, cue, 'shot');
+  if (existing) return;
   const scene: GameViewScene = {
-    ...baseTakeoverFields(state, frame, [frame.id]),
-    id: sceneId(state.fixtureId, 'shot', [frame.id]),
+    ...baseTakeoverFields(state, frame, [frame.id], [cue.id]),
+    id: sceneId(state.fixtureId, 'shot', [frame.id], [cue.id]),
     kind: 'shot',
     participant: cue.participant,
     teamId: cue.teamId,
@@ -408,14 +475,20 @@ function handleShot(state: DirectorState, frame: SemanticFrame, cue: SimulationC
     lifecycle: cue.lifecycle,
     durationHint: DEFAULT_DURATION.shot,
   };
+  rememberIncidentScene(state, cue, scene);
   state.scenes.push(scene);
 }
 
 function handleCard(state: DirectorState, frame: SemanticFrame, cue: SimulationCue) {
   closeAmbient(state);
+  const existing = mergeIncidentScene(state, frame, cue, 'card');
+  if (existing) {
+    if (typeof cue.value.action === 'string') existing.sourceAction = cue.value.action;
+    return;
+  }
   const scene: GameViewScene = {
-    ...baseTakeoverFields(state, frame, [frame.id]),
-    id: sceneId(state.fixtureId, 'card', [frame.id]),
+    ...baseTakeoverFields(state, frame, [frame.id], [cue.id]),
+    id: sceneId(state.fixtureId, 'card', [frame.id], [cue.id]),
     kind: 'card',
     participant: cue.participant,
     teamId: cue.teamId,
@@ -424,14 +497,17 @@ function handleCard(state: DirectorState, frame: SemanticFrame, cue: SimulationC
     ...(typeof cue.value.action === 'string' ? { sourceAction: cue.value.action } : {}),
     durationHint: DEFAULT_DURATION.card,
   };
+  rememberIncidentScene(state, cue, scene);
   state.scenes.push(scene);
 }
 
 function handleSubstitution(state: DirectorState, frame: SemanticFrame, cue: SimulationCue) {
   closeAmbient(state);
+  const existing = mergeIncidentScene(state, frame, cue, 'substitution');
+  if (existing) return;
   const scene: GameViewScene = {
-    ...baseTakeoverFields(state, frame, [frame.id]),
-    id: sceneId(state.fixtureId, 'substitution', [frame.id]),
+    ...baseTakeoverFields(state, frame, [frame.id], [cue.id]),
+    id: sceneId(state.fixtureId, 'substitution', [frame.id], [cue.id]),
     kind: 'substitution',
     participant: cue.participant,
     teamId: cue.teamId,
@@ -439,21 +515,55 @@ function handleSubstitution(state: DirectorState, frame: SemanticFrame, cue: Sim
     lifecycle: cue.lifecycle,
     durationHint: DEFAULT_DURATION.substitution,
   };
+  rememberIncidentScene(state, cue, scene);
   state.scenes.push(scene);
 }
 
 function handleVar(state: DirectorState, frame: SemanticFrame, cue: SimulationCue) {
   closeAmbient(state);
+  const existing = mergeIncidentScene(state, frame, cue, 'var_review');
+  if (existing) return;
   const scene: GameViewScene = {
-    ...baseTakeoverFields(state, frame, [frame.id]),
-    id: sceneId(state.fixtureId, 'var_review', [frame.id]),
+    ...baseTakeoverFields(state, frame, [frame.id], [cue.id]),
+    id: sceneId(state.fixtureId, 'var_review', [frame.id], [cue.id]),
     kind: 'var_review',
     participant: cue.participant,
     teamId: cue.teamId,
     lifecycle: cue.lifecycle,
     durationHint: DEFAULT_DURATION.var_review,
   };
+  rememberIncidentScene(state, cue, scene);
   state.scenes.push(scene);
+}
+
+function mergeIncidentScene(
+  state: DirectorState,
+  frame: SemanticFrame,
+  cue: SimulationCue,
+  expectedKind: GameViewSceneKind,
+): GameViewScene | undefined {
+  if (cue.updateMode !== 'incident_upsert') return undefined;
+  const existing = state.incidentScenes.get(cue.id);
+  if (!existing || existing.kind !== expectedKind) return undefined;
+
+  existing.sourceFrameIds = uniqueSourceIds([...existing.sourceFrameIds, frame.id]);
+  existing.sourceCueIds = uniqueSourceIds([...existing.sourceCueIds, cue.id]);
+  existing.lifecycle = cue.lifecycle;
+  existing.participant = cue.participant ?? existing.participant;
+  existing.teamId = cue.teamId ?? existing.teamId;
+  existing.player = cue.player ?? existing.player;
+  existing.scoreAtMoment = state.latestScore ?? existing.scoreAtMoment;
+  existing.clockSeconds = frame.matchClockSeconds ?? existing.clockSeconds;
+  existing.phase = state.phase ?? existing.phase;
+  return existing;
+}
+
+function rememberIncidentScene(
+  state: DirectorState,
+  cue: SimulationCue,
+  scene: GameViewScene,
+): void {
+  if (cue.updateMode === 'incident_upsert') state.incidentScenes.set(cue.id, scene);
 }
 
 function handlePhaseChange(state: DirectorState, frame: SemanticFrame, cue: SimulationCue) {
@@ -461,8 +571,8 @@ function handlePhaseChange(state: DirectorState, frame: SemanticFrame, cue: Simu
   if (typeof phase === 'string') state.phase = phase as MatchEnginePhase;
   closeAmbient(state);
   const scene: GameViewScene = {
-    ...baseTakeoverFields(state, frame, [frame.id]),
-    id: sceneId(state.fixtureId, 'phase_break', [frame.id]),
+    ...baseTakeoverFields(state, frame, [frame.id], [cue.id]),
+    id: sceneId(state.fixtureId, 'phase_break', [frame.id], [cue.id]),
     kind: 'phase_break',
     lifecycle: cue.lifecycle,
     durationHint: DEFAULT_DURATION.phase_break,
@@ -473,8 +583,8 @@ function handlePhaseChange(state: DirectorState, frame: SemanticFrame, cue: Simu
 function handleRestart(state: DirectorState, frame: SemanticFrame, cue: SimulationCue) {
   closeAmbient(state);
   const scene: GameViewScene = {
-    ...baseTakeoverFields(state, frame, [frame.id]),
-    id: sceneId(state.fixtureId, 'restart', [frame.id]),
+    ...baseTakeoverFields(state, frame, [frame.id], [cue.id]),
+    id: sceneId(state.fixtureId, 'restart', [frame.id], [cue.id]),
     kind: 'restart',
     participant: cue.participant,
     teamId: cue.teamId,
@@ -494,24 +604,32 @@ function handleGoalPending(state: DirectorState, frame: SemanticFrame, cue: Simu
   closeAmbient(state);
   const key = cue.id;
   const existing = state.pendingGoalScenes.get(key);
+  // A confirmed goal_sequence stores the post-goal score on the scene, so
+  // the tension beat must carry its own immutable pre-goal score. Preserve
+  // the first pending revision's value if the same incident is refined.
+  const preGoalScore = existing?.tensionBeat.scoreAtMoment
+    ?? state.latestScore
+    ?? { participant1: 0, participant2: 0 };
   const tensionBeat: GameViewGoalBeat = {
     kind: 'tension',
     lifecycle: cue.lifecycle,
     sourceFrameIds: [frame.id],
     player: cue.player,
+    scoreAtMoment: preGoalScore,
   };
   if (existing) {
     // Mutate the scene already sitting in state.scenes in place; its
     // position in the timeline (set when it was first opened) is correct
     // and does not need to move for a later tension revision.
     existing.scene.sourceFrameIds = uniqueSourceIds([...existing.scene.sourceFrameIds, frame.id]);
+    existing.scene.sourceCueIds = uniqueSourceIds([...existing.scene.sourceCueIds, cue.id]);
     existing.tensionBeat = tensionBeat;
     existing.scene.beats = [tensionBeat];
     return;
   }
   const scene: GameViewScene = {
-    ...baseTakeoverFields(state, frame, [frame.id]),
-    id: sceneId(state.fixtureId, 'goal_sequence', [frame.id]),
+    ...baseTakeoverFields(state, frame, [frame.id], [cue.id]),
+    id: sceneId(state.fixtureId, 'goal_sequence', [frame.id], [cue.id]),
     kind: 'goal_sequence',
     participant: cue.participant,
     teamId: cue.teamId,
@@ -588,6 +706,11 @@ function handleGoalConfirmed(
     // the score transition at first confirmation.
     const scene = alreadyConfirmed.scene;
     scene.sourceFrameIds = uniqueSourceIds([...scene.sourceFrameIds, frame.id]);
+    scene.sourceCueIds = uniqueSourceIds([
+      ...scene.sourceCueIds,
+      goalCue.id,
+      ...(scoreCue ? [scoreCue.id] : []),
+    ]);
     if (goalCue.player && !scene.player) scene.player = goalCue.player;
     const beats = scene.beats;
     if (beats) {
@@ -633,6 +756,11 @@ function handleGoalConfirmed(
 
   if (pending) {
     pending.scene.sourceFrameIds = uniqueSourceIds([...pending.scene.sourceFrameIds, frame.id]);
+    pending.scene.sourceCueIds = uniqueSourceIds([
+      ...pending.scene.sourceCueIds,
+      goalCue.id,
+      ...(scoreCue ? [scoreCue.id] : []),
+    ]);
     pending.scene.lifecycle = 'confirmed';
     pending.scene.scoreAtMoment = after;
     pending.scene.player = goalCue.player ?? pending.scene.player;
@@ -644,9 +772,10 @@ function handleGoalConfirmed(
     return;
   }
 
+  const sourceCueIds = [goalCue.id, ...(scoreCue ? [scoreCue.id] : [])];
   const scene: GameViewScene = {
-    ...baseTakeoverFields(state, frame, [frame.id]),
-    id: sceneId(state.fixtureId, 'goal_sequence', [frame.id]),
+    ...baseTakeoverFields(state, frame, [frame.id], sourceCueIds),
+    id: sceneId(state.fixtureId, 'goal_sequence', [frame.id], sourceCueIds),
     kind: 'goal_sequence',
     participant: goalCue.participant,
     teamId: goalCue.teamId,
@@ -678,7 +807,18 @@ function handleIncidentRetracted(state: DirectorState, frame: SemanticFrame, cue
   const isGoalRetraction = retractedAction === 'goal'
     || pendingGoal !== undefined
     || state.confirmedGoalScenes.has(cue.id);
-  if (!isGoalRetraction) return;
+  if (!isGoalRetraction) {
+    // A complete replay must not stage a minor incident the source later
+    // withdrew. Remove the provisional scene rather than silently showing a
+    // corner/throw-in that final truth says did not stand.
+    const retractedScene = state.incidentScenes.get(cue.id);
+    if (retractedScene) {
+      const index = state.scenes.indexOf(retractedScene);
+      if (index >= 0) state.scenes.splice(index, 1);
+      state.incidentScenes.delete(cue.id);
+    }
+    return;
+  }
   if (pendingGoal) state.pendingGoalScenes.delete(cue.id);
   closeAmbient(state);
   const matchingGoal = state.confirmedGoalScenes.get(cue.id);
@@ -687,8 +827,8 @@ function handleIncidentRetracted(state: DirectorState, frame: SemanticFrame, cue
   if (matchingGoal) state.confirmedGoalScenes.delete(cue.id);
 
   const scene: GameViewScene = {
-    ...baseTakeoverFields(state, frame, [frame.id]),
-    id: sceneId(state.fixtureId, 'goal_retracted', [frame.id]),
+    ...baseTakeoverFields(state, frame, [frame.id], [cue.id]),
+    id: sceneId(state.fixtureId, 'goal_retracted', [frame.id], [cue.id]),
     kind: 'goal_retracted',
     participant: cue.participant,
     teamId: cue.teamId,
@@ -747,6 +887,7 @@ export function buildGameViewTimeline(
   const state: DirectorState = {
     fixtureId: ordered[0]!.fixtureId,
     scenes: [],
+    incidentScenes: new Map(),
     pendingGoalScenes: new Map(),
     confirmedGoalScenes: new Map(),
   };
@@ -812,10 +953,76 @@ export function buildGameViewTimeline(
   closeAmbient(state);
 
   if (options.pacing?.mode === 'replay') {
-    return applyReplayPacing(state.scenes, options.pacing);
+    const replayScenes = options.pacing.sceneSelection === 'complete'
+      ? state.scenes
+      : selectReplaySummaryScenes(state.scenes);
+    return applyReplayPacing(replayScenes, options.pacing);
   }
 
   return state.scenes;
+}
+
+/**
+ * Selects an honest, deterministic replay summary from the complete scene
+ * sequence. This is a strict filtering pass: it never clones, merges,
+ * reorders, or modifies scene truth/source ids.
+ *
+ * Protected incidents and staged attacking moments are retained in full.
+ * Routine set pieces retain the first real example of each source action in
+ * each half. Ambient play retains the last real state in each fixed
+ * two-minute match-clock bucket; choosing the bucket's last state is a
+ * neutral clock rule, not an intensity-based highlight choice.
+ */
+function selectReplaySummaryScenes(
+  scenes: readonly GameViewScene[],
+): readonly GameViewScene[] {
+  const selected = new Set<GameViewScene>();
+  const routineSetPieceKeys = new Set<string>();
+  const lastAmbientByBucket = new Map<string, GameViewScene>();
+
+  for (const scene of scenes) {
+    if (REPLAY_PROTECTED_KINDS.has(scene.kind)) {
+      selected.add(scene);
+      continue;
+    }
+
+    if (scene.kind === 'set_piece') {
+      if (isProtectedReplaySetPiece(scene)) {
+        selected.add(scene);
+        continue;
+      }
+
+      const action = scene.sourceAction ?? 'unknown';
+      const key = `${replayHalfKey(scene)}:${action}`;
+      if (!routineSetPieceKeys.has(key)) {
+        routineSetPieceKeys.add(key);
+        selected.add(scene);
+      }
+      continue;
+    }
+
+    if (scene.kind === 'ambient') {
+      const bucket = typeof scene.clockSeconds === 'number'
+        ? String(Math.floor(Math.max(0, scene.clockSeconds) / REPLAY_AMBIENT_BUCKET_SECONDS))
+        : `unknown:${replayHalfKey(scene)}`;
+      lastAmbientByBucket.set(bucket, scene);
+    }
+  }
+
+  for (const scene of lastAmbientByBucket.values()) selected.add(scene);
+  return scenes.filter((scene) => selected.has(scene));
+}
+
+function isProtectedReplaySetPiece(scene: GameViewScene): boolean {
+  if (scene.sourceAction === 'corner' || scene.sourceAction === 'penalty') return true;
+  return scene.sourceAction === 'free_kick'
+    && (scene.zone === 'danger' || scene.zone === 'high_danger');
+}
+
+function replayHalfKey(scene: GameViewScene): 'first_half' | 'second_half' {
+  if (scene.phase === 'first_half' || scene.phase === 'first_half_ready') return 'first_half';
+  if (scene.phase === 'second_half' || scene.phase === 'second_half_ready') return 'second_half';
+  return (scene.clockSeconds ?? 0) < HALF_REGULATION_SECONDS ? 'first_half' : 'second_half';
 }
 
 /**
@@ -831,7 +1038,7 @@ export function buildGameViewTimeline(
  *   capped at `ambientStretchCapMs` so a long quiet spell (e.g. minutes of
  *   midfield possession) never stalls the replay -- it compresses toward the
  *   cap instead. Ambient scenes with no clock delta (e.g. no clock data, or
- *   the very first scene) get a nominal minimum so they still occupy time.
+ *   the very first scene) get the readability floor so they still occupy time.
  * - Every takeover scene (everything except `ambient`) keeps its full
  *   `durationHint.minMs` as its playback duration: takeovers are never
  *   compressed, per the PRD ("takeovers keep their durationHint").
@@ -848,6 +1055,11 @@ function applyReplayPacing(
   const targetDurationMs = pacing.targetDurationMs === undefined
     ? DEFAULT_REPLAY_TARGET_DURATION_MS
     : pacing.targetDurationMs;
+  const playbackRate = typeof pacing.playbackRate === 'number'
+    && Number.isFinite(pacing.playbackRate)
+    && pacing.playbackRate > 0
+    ? pacing.playbackRate
+    : 1;
 
   let lastClockSeconds: number | undefined;
   const rawDurations: number[] = [];
@@ -859,7 +1071,10 @@ function applyReplayPacing(
         ? Math.max(0, clockSeconds - lastClockSeconds)
         : 0;
       const realPaceMs = deltaSeconds * msPerMatchSecond;
-      durationMs = Math.min(Math.max(realPaceMs, DEFAULT_DURATION.restart.minMs), ambientCapMs);
+      durationMs = Math.min(
+        Math.max(realPaceMs, REPLAY_AMBIENT_FLOOR_MS),
+        Math.max(ambientCapMs, REPLAY_AMBIENT_FLOOR_MS),
+      );
     } else {
       durationMs = scene.durationHint.minMs;
     }
@@ -867,15 +1082,15 @@ function applyReplayPacing(
     if (typeof scene.clockSeconds === 'number') lastClockSeconds = scene.clockSeconds;
   }
 
-  // Best-effort fit to the target: fixed kinds keep their full moment, the
-  // flexible remainder shares whatever budget is left, floored for legibility.
+  // Best-effort fit to the target: every retained non-ambient scene keeps its
+  // full staged window; only ambient time shares the remaining budget.
   let flexScale = 1;
   if (targetDurationMs !== null) {
     let fixedTotal = 0;
     let flexTotal = 0;
     scenes.forEach((scene, index) => {
-      if (REPLAY_FIXED_KINDS.has(scene.kind)) fixedTotal += rawDurations[index];
-      else flexTotal += rawDurations[index];
+      if (scene.kind === 'ambient') flexTotal += rawDurations[index];
+      else fixedTotal += rawDurations[index];
     });
     if (flexTotal > 0 && fixedTotal + flexTotal > targetDurationMs) {
       flexScale = Math.max(0, targetDurationMs - fixedTotal) / flexTotal;
@@ -886,9 +1101,10 @@ function applyReplayPacing(
   const paced: GameViewScene[] = [];
   scenes.forEach((scene, index) => {
     const raw = rawDurations[index];
-    const durationMs = REPLAY_FIXED_KINDS.has(scene.kind) || flexScale === 1
+    const plannedDurationMs = scene.kind !== 'ambient' || flexScale === 1
       ? raw
-      : Math.max(REPLAY_SCALED_SCENE_FLOOR_MS, Math.round(raw * flexScale));
+      : Math.max(REPLAY_AMBIENT_FLOOR_MS, Math.round(raw * flexScale));
+    const durationMs = Math.max(1, Math.round(plannedDurationMs / playbackRate));
     paced.push({ ...scene, playback: { playbackOffsetMs: offsetMs, playbackDurationMs: durationMs } });
     offsetMs += durationMs;
   });

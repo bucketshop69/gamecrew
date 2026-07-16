@@ -1,6 +1,6 @@
 # Game View: presentation polish
 
-**Status:** Deferred until Phase B (`game-view-board-and-presentation.md`) proves the choreography on device. Phase C of `docs/prds/game_view.md`.
+**Status:** Active partial implementation. Commentary and the demo perimeter slot are in place; navigation, remaining overlay slots, and sound stay deferred. Phase C of `docs/prds/game_view.md`.
 
 ## Objective
 
@@ -11,13 +11,16 @@ The cosmetic and monetization-adjacent layers on top of the working board: navig
 | Order | Work item | Status |
 |---|---|---|
 | C1 | Seek bar with goal/card chapter markers; jump to any moment live or finished | Deferred |
-| C2 | Commentary caption synced to scenes from existing Match Pulse entries | Deferred |
-| C3 | Overlay slot system (perimeter strip, corner lockup, break interstitial) with placeholder content | Deferred |
+| C2 | Commentary caption synced to scenes from existing Match Pulse entries | Done (uncommitted, 2026-07-16) |
+| C3 | Overlay slot system (perimeter strip, corner lockup, break interstitial) | In progress — ecosystem perimeter showcase implemented; corner/break slots deferred |
 | C4 | Sound: pressure-driven crowd bed, takeover stingers (cuttable) | Deferred |
 
 ## Notes
 
 - Slots are groundwork for the advertising direction discussed in the vision (broadcast-native placements, sponsored moments, phase-break interstitials) — the slot system ships with placeholder content; ad logic is a separate later decision.
+- **Perimeter ad trial (2026-07-16, revised after screenshot review):** a quiet startup treatment holds for five seconds (GAMECREW on the far/top face, dim LED segments on the sides), then a Solana ecosystem showcase (Solana, Jupiter, $ANSEM, Phoenix, and Meteora) travels across one shared Reanimated clock. Solana, Jupiter, and Meteora use their official transparent icon marks over dual-tone, LED-textured panels; $ANSEM and Phoenix remain restrained wordmark treatments until verified assets are available. These names are presentation creative only and do not imply sponsorship or partnership. The approved physical treatment uses inward-facing LED walls on the far/top and both touchline sides, with dark lips/end caps for depth; the near/bottom edge remains an uninterrupted black shell and carries no ad creative. There is no targeting, tracking, interaction, or production sponsor model.
 - Captions reuse Match Pulse commentary entries; no parallel copy generation.
+- The lower-left transcript follows durable source-frame sequence, not a second timer. It keeps the latest four reached lines, accepts both enriched and grounded-fallback copy, survives delayed clock corrections without flicker, and withholds confirmed-goal wording until the celebration beat.
+- **Immediate-event revision (2026-07-16):** Match Pulse planner v3 emits one grounded caption for every meaningful semantic moment instead of replacing routine play with 90-second pressure summaries. Same-frame incidents are split into distinct cue-specific captions, while a goal and its score commit remain one moment. Game View scenes now retain the same cue IDs, so captions sharing a TxLINE frame activate on their own ordered visual scene rather than appearing together. Throw-ins, goal kicks, possession changes, pressure-zone changes, set pieces, shots, cards, substitutions, VAR, goals, restarts, and phase changes are retained; only repeated identical possession state, lifecycle duplicates, retracted minor incidents, and technical noise are removed. France–Spain now projects 730 immediate entries with 128/128 final visual incidents covered and cue-aligned exactly once.
 - Sound attaches to scenes (kind, pressure, lifecycle already on the scene model); cutting it changes nothing else.
 - Playful-bet prompts will compete with sponsor content for ambient-mode attention; define a slot-priority rule (bets during play, ads during breaks) when this phase starts.

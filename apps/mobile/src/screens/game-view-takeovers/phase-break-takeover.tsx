@@ -1,23 +1,23 @@
 import type { GameViewScene } from '@gamecrew/core';
-import { useRef } from 'react';
-import { Animated, Easing, Platform, StyleSheet } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import { formatScoreline, phaseBreakLabel, resolvePhaseBreakMoment } from './game-view-takeover-logic';
 import {
-  TakeoverHeadline,
-  TakeoverScoreline,
-  TakeoverShell,
   tokens,
   useDelayedCompletion,
-  useMountedOnce,
   useTakeoverAnnouncement,
   type TakeoverBaseProps,
 } from './takeover-shared';
 
 /**
- * Kickoff / half-time / full-time typography moment. The moment is resolved
- * from `scene.phase` (the only signal a phase_break scene carries -- see
- * resolvePhaseBreakMoment's doc comment) rather than any invented field.
+ * Kickoff / half-time / full-time as a compact pill over the still-visible
+ * board. Was a full-screen typography card; product direction (2026-07-15,
+ * with the 22-player formation view) is that the break IS the picture --
+ * the players assemble for kickoff or walk off to their benches (see the
+ * cluster's phase-break staging) -- so the copy shrinks to a quiet label,
+ * and the commentary lower-third will carry the words once it lands. The
+ * moment is resolved from `scene.phase` (the only signal a phase_break
+ * scene carries), never invented.
  */
 export function PhaseBreakTakeover({
   onComplete,
@@ -38,36 +38,49 @@ export function PhaseBreakTakeover({
   useDelayedCompletion(scene.durationHint.minMs, onComplete);
 
   return (
-    <TakeoverShell accessibilityLabel={announcement} backgroundColor={tokens.shell.background}>
-      <FadeIn reduceMotion={reduceMotion}>
-        <TakeoverHeadline style={styles.headline}>{label}</TakeoverHeadline>
-        {showScore && scoreline ? (
-          <TakeoverScoreline style={styles.scoreline}>{scoreline}</TakeoverScoreline>
-        ) : null}
-      </FadeIn>
-    </TakeoverShell>
+    <FadeIn reduceMotion={reduceMotion}>
+      <View
+        accessibilityLabel={announcement}
+        accessibilityLiveRegion="polite"
+        accessible
+        importantForAccessibility="yes"
+        style={styles.pill}
+      >
+        <Text numberOfLines={1} style={styles.text}>
+          {showScore && scoreline ? `${label} · ${scoreline}` : label}
+        </Text>
+      </View>
+    </FadeIn>
   );
 }
 
-function FadeIn({ children, reduceMotion }: { children: React.ReactNode; reduceMotion: boolean }) {
-  const entrance = useRef(new Animated.Value(reduceMotion ? 1 : 0)).current;
-
-  useMountedOnce(() => {
-    if (reduceMotion) return undefined;
-    Animated.timing(entrance, {
-      duration: 320,
-      easing: Easing.out(Easing.cubic),
-      isInteraction: false,
-      toValue: 1,
-      useNativeDriver: Platform.OS !== 'web',
-    }).start();
-    return undefined;
-  });
-
-  return <Animated.View style={{ alignItems: 'center', opacity: entrance }}>{children}</Animated.View>;
+function FadeIn({ children }: { children: React.ReactNode; reduceMotion: boolean }) {
+  return <View style={styles.wrap}>{children}</View>;
 }
 
 const styles = StyleSheet.create({
-  headline: { color: tokens.shell.text, fontSize: 44, letterSpacing: 2 },
-  scoreline: { color: tokens.shell.text },
+  wrap: {
+    alignItems: 'center',
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: tokens.spacing.lg,
+  },
+  pill: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(5, 5, 5, 0.86)',
+    borderColor: tokens.shell.divider,
+    borderRadius: tokens.radii.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    paddingHorizontal: tokens.spacing.md,
+    paddingVertical: tokens.spacing.sm,
+  },
+  text: {
+    color: tokens.shell.text,
+    fontSize: tokens.typography.size.label,
+    fontVariant: ['tabular-nums'],
+    fontWeight: tokens.typography.weight.bold,
+    letterSpacing: 1.5,
+  },
 });

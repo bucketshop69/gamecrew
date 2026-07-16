@@ -148,6 +148,41 @@ test('dedupes frames by id across overlapping pages', async () => {
   handle.release();
 });
 
+test('omits generation on bootstrap then sends the active generation on subsequent requests', async () => {
+  const clock = createFakeClock();
+  const fetcher = createFakeFetcher([
+    {
+      fixtureId: 'fx-1',
+      projectionGeneration: 7,
+      resyncRequired: false,
+      frames: [frame('f1', 1)],
+      headRevision: 1,
+      nextAfterRevision: 1,
+      hasMore: false,
+    },
+  ]);
+
+  const handle = acquireMatchSession('fx-1', {
+    isLive: () => true,
+    fetchFrames: fetcher.fn,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    now: clock.now,
+    pollIntervalMs: 10_000,
+    staleAfterMs: 30_000,
+  });
+
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(fetcher.calls[0].projectionGeneration, undefined);
+
+  await clock.flush(10_000);
+  assert.equal(fetcher.calls[1].projectionGeneration, 7);
+
+  handle.release();
+});
+
 test('paginates full backfill via hasMore/nextAfterRevision before settling to live', async () => {
   const clock = createFakeClock();
   const fetcher = createFakeFetcher([
@@ -261,7 +296,10 @@ test('resyncRequired clears the log and refetches from zero', async () => {
   assert.equal(snapshot.frames.length, 1, 'log was reset then repopulated from zero');
   assert.deepEqual(snapshot.frames.map((f) => f.id), ['g1']);
   assert.equal(fetcher.calls.length, 2, 'the resync signal triggers one extra refetch from zero');
+  assert.equal(fetcher.calls[0].projectionGeneration, 1, 'the correction is detected against the prior generation');
   assert.equal(fetcher.calls[1].afterRevision, 0, 'the refetch after resync starts from zero');
+  assert.equal(fetcher.calls[1].projectionGeneration, 2, 'the refetch acknowledges the replacement generation');
+  assert.equal(snapshot.projectionGeneration, 2);
 
   handle.release();
 });
@@ -436,6 +474,63 @@ test('single backfill for finished fixtures does not keep polling', async () => 
 
   assert.equal(handle.getSnapshot().status, 'complete');
   assert.equal(clock.pendingCount(), 0, 'no poll timer scheduled for a finished fixture');
+
+  handle.release();
+});
+
+test('upcoming-to-live transition restarts polling on the existing session', async () => {
+  const clock = createFakeClock();
+  let live = false;
+  const fetcher = createFakeFetcher([
+    {
+      fixtureId: 'fx-1',
+      projectionGeneration: 1,
+      resyncRequired: false,
+      frames: [frame('f1', 1)],
+      headRevision: 1,
+      nextAfterRevision: 1,
+      hasMore: false,
+    },
+    {
+      fixtureId: 'fx-1',
+      projectionGeneration: 1,
+      resyncRequired: false,
+      frames: [frame('f2', 2)],
+      headRevision: 2,
+      nextAfterRevision: 2,
+      hasMore: false,
+    },
+  ]);
+
+  const handle = acquireMatchSession('fx-1', {
+    isLive: () => live,
+    fetchFrames: fetcher.fn,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+    now: clock.now,
+    pollIntervalMs: 10_000,
+    staleAfterMs: 30_000,
+  });
+
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(handle.getSnapshot().status, 'complete');
+  assert.equal(fetcher.calls.length, 1);
+  assert.equal(clock.pendingCount(), 0);
+
+  live = true;
+  handle.syncLiveStatus();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(fetcher.calls.length, 2, 'kickoff nudge performs an immediate incremental poll');
+  assert.equal(fetcher.calls[1].afterRevision, 1);
+  assert.equal(fetcher.calls[1].projectionGeneration, 1);
+  assert.equal(handle.getSnapshot().status, 'live');
+  assert.deepEqual(handle.getSnapshot().frames.map((value) => value.id), ['f1', 'f2']);
+  assert.ok(clock.pendingCount() > 0, 'live poll/stale timers are scheduled after kickoff');
 
   handle.release();
 });

@@ -5,6 +5,7 @@
   "dependencies": {
     "@gamecrew/core": "workspace:*",
     "expo": "~56.0.12",
+    "expo-audio": "~56.0.12",
     "expo-constants": "~56.0.19",
     "expo-linking": "~56.0.14",
     "expo-router": "~56.2.12",

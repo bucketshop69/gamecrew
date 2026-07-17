@@ -50,14 +50,14 @@ test('commentary stays empty until Game View has an active source scene', () => 
   assert.deepEqual(selectVisibleGameViewCommentary([commentary(1)], [scene(1)], -1), []);
 });
 
-test('shows the latest four reached entries in chronological display order', () => {
+test('shows the current entry plus the two prior entries in chronological display order', () => {
   const timeline = [1, 2, 3, 4, 5, 6].map((sequence) => scene(sequence));
   const entriesNewestFirst = [6, 5, 4, 3, 2, 1].map((sequence) => commentary(sequence));
 
   const visible = selectVisibleGameViewCommentary(entriesNewestFirst, timeline, 4);
 
   assert.equal(visible.length, GAME_VIEW_COMMENTARY_LINE_LIMIT);
-  assert.deepEqual(visible.map((entry) => entry.sortSeq), [2, 3, 4, 5]);
+  assert.deepEqual(visible.map((entry) => entry.sortSeq), [3, 4, 5]);
 });
 
 test('never shows commentary from a future source sequence', () => {

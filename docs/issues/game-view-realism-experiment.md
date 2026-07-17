@@ -22,7 +22,7 @@ Real events anchor everything. The cluster dramatizes around true state (possess
 | R2 | Player characters: stylized silhouettes, team colors, pose set (run, strike, keeper, celebrate), dev-only gallery for taste review | Done |
 | R3 | Taste checkpoint: screenshots reviewed by product before wiring | Done — verdicts in "Settled decisions" below |
 | R4 | Action cluster + ball motion: 5-6 silhouettes (both teams) + traveling ball driven by director scenes (passes, shots at goal, corners swung in, celebrations) | In progress |
-| R5 | Sound | Deferred — designed as its own conversation after the visuals are judged; expo-audio dependency approved in principle (verified 2026-07-15: no audio library in the project today) |
+| R5 | Sound | First permanent slice done (2026-07-17): pressure crowd bed + grounded whistle/strike/swell/goal effects; TTS deferred |
 | R6 | Integrated judgment vs the gate; keep, tune, or reduce weightage | Planned — Bibhu judges directly on localhost once R4 lands |
 
 ## Settled decisions (product grill, 2026-07-15 — REVISED same day after seeing it live)
@@ -52,7 +52,7 @@ Real events anchor everything. The cluster dramatizes around true state (possess
 
 ## Constraints
 
-- No new dependencies for the visual layers; code-native Views/Animated/Reanimated only (react-native-reanimated 4.5 is already in the project; no Lottie/media assets). Sound is deferred; when it returns, adding expo-audio plus bundled short audio files is pre-approved (verified 2026-07-15: no audio API exists in the project today).
+- No new dependencies for the visual layers; code-native Views/Animated/Reanimated only (react-native-reanimated 4.5 is already in the project; no Lottie/media assets). R5 adds the pre-approved `expo-audio` dependency and five bundled royalty-free short/looping audio files; source and license provenance lives beside those assets in `apps/mobile/assets/audio/SOURCES.md`.
 - Reduce-motion: cluster and ball animation reduce to state changes; takeover information stays complete.
 - Performance: the board must stay smooth on device; cluster is capped at ~5 figures.
 - All pure decision logic unit-tested; visual layers behind the existing scene contract.

@@ -101,6 +101,7 @@ export function GameViewBoard({
   reduceMotion,
   scene,
   sceneWindowKey,
+  soundControl,
 }: {
   awayTeam: BoardTeamInfo;
   /** Nearest prior grounded scene for a cold-mount stoppage; never replaces current-scene truth. */
@@ -118,6 +119,8 @@ export function GameViewBoard({
   scene: GameViewScene | null;
   /** Active playback-window identity; refreshes choreography when a logical scene is replaced in place. */
   sceneWindowKey?: string;
+  /** User-initiated sound switch, kept inside the centered broadcast board on wide screens. */
+  soundControl?: ReactNode;
 }) {
   const lastLivePresenceRef = useRef<BoardPresenceState | undefined>(undefined);
 
@@ -197,6 +200,8 @@ export function GameViewBoard({
             </View>
           </View>
         ) : null}
+
+        {soundControl ? <View style={styles.soundControlSlot}>{soundControl}</View> : null}
       </View>
     </View>
   );
@@ -1160,6 +1165,12 @@ const styles = StyleSheet.create({
     right: PERIMETER_STRIP_SIZE + PITCH_APRON_SIZE,
     top: PERIMETER_STRIP_SIZE + PITCH_APRON_SIZE,
     zIndex: 20,
+  },
+  soundControlSlot: {
+    position: 'absolute',
+    right: PERIMETER_STRIP_SIZE + PITCH_APRON_SIZE + 8,
+    top: PERIMETER_STRIP_SIZE + PITCH_APRON_SIZE + 8,
+    zIndex: 30,
   },
   // Three-sided physical wall shell. The perspective/rotation lives here so
   // both placeholder and active creative inherit exactly the same geometry.

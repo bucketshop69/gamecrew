@@ -99,13 +99,13 @@ const styles = StyleSheet.create({
     opacity: 1,
   },
   entryRecent: {
-    opacity: 0.74,
+    opacity: 0.37,
   },
   entryOlder: {
-    opacity: 0.56,
+    opacity: 0.28,
   },
   entryOldest: {
-    opacity: 0.4,
+    opacity: 0.2,
   },
   minute: {
     color: '#E7F0E8',

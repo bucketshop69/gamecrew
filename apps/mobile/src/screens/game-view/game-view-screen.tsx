@@ -22,6 +22,8 @@ import {
   selectVisibleGameViewCommentary,
 } from './game-view-commentary-logic';
 import { GameViewCommentaryOverlay } from './game-view-commentary-overlay';
+import { useGameViewSoundPreference } from './game-view-sound-preference';
+import { GameViewSoundToggle } from './game-view-sound-toggle';
 import { GameViewStatePanel, GameViewStaleBanner } from './game-view-state-panel';
 import {
   type GameViewPresentationState,
@@ -36,6 +38,7 @@ import {
   shouldSetPieceUseFullVignette,
 } from './game-view-screen-logic';
 import { DEFAULT_AWAY_COLOR, DEFAULT_HOME_COLOR, getTeamColor } from './game-view-team-colors';
+import { useGameViewSoundscape } from './use-game-view-soundscape';
 
 export type { GameViewPresentationState } from './game-view-screen-logic';
 
@@ -72,6 +75,7 @@ export function GameViewScreen({
   onPresentationChange?: (state: GameViewPresentationState | null) => void;
 }) {
   const reduceMotion = useReduceMotionPreference();
+  const [soundEnabled, setSoundEnabled] = useGameViewSoundPreference();
   const isLive = isLiveMatchStatus(match.status);
   const { snapshot, controls } = usePlaybackEngine(match.txline.fixtureId, isLive);
 
@@ -169,6 +173,26 @@ export function GameViewScreen({
     ? presentationScene.beats[Math.min(activeBeatIndex, presentationScene.beats.length - 1)]
     : undefined;
   const goalBeat = activeGoalBeat?.kind;
+
+  const soundscape = useGameViewSoundscape({
+    enabled: soundEnabled,
+    goalBeat,
+    isStale,
+    scene: presentationScene,
+    sceneWindowKey: sceneWindow?.instanceKey,
+  });
+
+  const handleSoundToggle = () => {
+    if (soundEnabled) {
+      soundscape.deactivate();
+      setSoundEnabled(false);
+      return;
+    }
+    // Called directly inside the press gesture so browsers are allowed to
+    // open their audio context; the state-driven sound plan takes over after.
+    soundscape.activateFromGesture();
+    setSoundEnabled(true);
+  };
 
   const visibleCommentary = useMemo(
     () => selectVisibleGameViewCommentary(
@@ -281,6 +305,12 @@ export function GameViewScreen({
         reduceMotion={reduceMotion}
         scene={presentationScene ?? null}
         sceneWindowKey={sceneWindow?.instanceKey}
+        soundControl={(
+          <GameViewSoundToggle
+            enabled={soundEnabled}
+            onPress={handleSoundToggle}
+          />
+        )}
       />
       {isStale ? <GameViewStaleBanner /> : null}
     </View>

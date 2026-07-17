@@ -270,13 +270,14 @@ If polling stops returning fresh frames, keep the board at its last state, drop 
 
 ## Sound Hook
 
-Sound is part of the Game View direction but ships last within this PRD's scope:
+The first permanent sound slice shipped on 2026-07-17:
 
 - a crowd bed whose intensity follows ambient pressure
-- short stingers on takeovers (whistle, goal, card)
-- muted by default or respecting device state; never autoplay loud
+- short, restrained effects grounded in entered scenes (referee whistle, ball strike, crowd swell, goal confirmation roar)
+- muted by default, enabled by an explicit Game View switch, respectful of device silent mode, and never active in the background
+- natural-speed audio even when a finished match is replayed on a compressed visual clock
 
-The scene model must carry enough information (kind, pressure, lifecycle) that sound attaches to scenes without new director logic. If sound is cut for time, nothing else in this PRD changes.
+Sound consumes the same active playback-window identity as the renderer. Ambient volume may crossfade as pressure changes; a punctuating effect fires at most once when its source scene (or goal beat) is entered, with short per-effect cooldowns to stop dense feeds becoming noisy. No new event detector or director logic exists in the sound layer. TTS remains out of scope.
 
 ## Out Of Scope
 

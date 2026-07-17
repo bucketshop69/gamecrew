@@ -29,6 +29,9 @@ yarn-debug.*
 yarn-error.*
 pnpm-debug.log*
 
+# Local captures and exported social media clips
+artifacts/
+
 # macOS
 .DS_Store
 *.pem

@@ -4,8 +4,8 @@ import type {
   MatchPulseCommentaryEntry,
 } from '@gamecrew/core';
 
-/** Product decision: keep a small running transcript, with the newest line at the bottom. */
-export const GAME_VIEW_COMMENTARY_LINE_LIMIT = 4;
+/** Product decision: current commentary plus the two prior grounded lines, newest at the bottom. */
+export const GAME_VIEW_COMMENTARY_LINE_LIMIT = 3;
 
 /**
  * Selects the Match Pulse lines that are honest at the current Game View

@@ -18,6 +18,7 @@ import type {
 const INCIDENT_ACTIONS = new Set([
   'free_kick', 'shot', 'goal', 'yellow_card', 'red_card', 'substitution',
   'injury', 'throw_in', 'corner', 'goal_kick', 'additional_time', 'var', 'var_end',
+  'penalty', 'penalty_outcome',
 ]);
 const PRESSURE_BY_ACTION: Record<string, MatchEnginePressure> = {
   safe_possession: 'safe',
@@ -91,6 +92,18 @@ function scoreFrom(record: TxlineMatchEngineRecord, fallback: MatchEngineScore):
     participant1: typeof first === 'number' ? first : fallback.participant1,
     participant2: typeof second === 'number' ? second : fallback.participant2,
   };
+}
+
+function isScoredPenaltyOutcome(record: TxlineMatchEngineRecord): boolean {
+  return record.Action === 'penalty_outcome'
+    && typeof record.Data?.Outcome === 'string'
+    && record.Data.Outcome.toLowerCase() === 'scored';
+}
+
+function isScoredPenaltyIncident(incident: CanonicalIncident): boolean {
+  return incident.action === 'penalty_outcome'
+    && typeof incident.data.Outcome === 'string'
+    && incident.data.Outcome.toLowerCase() === 'scored';
 }
 
 function provenance(record: TxlineMatchEngineRecord): MatchEngineProvenance {
@@ -262,6 +275,10 @@ function cueKindFor(incident: CanonicalIncident): SimulationCue['kind'] {
     case 'free_kick': case 'corner': case 'throw_in': case 'goal_kick': return 'set_piece';
     case 'shot': return incident.lifecycle === 'confirmed' ? 'shot_outcome' : 'shot_attempt';
     case 'goal': return incident.lifecycle === 'confirmed' ? 'goal_confirmed' : 'goal_pending';
+    case 'penalty': return 'set_piece';
+    case 'penalty_outcome': return isScoredPenaltyIncident(incident)
+      ? incident.lifecycle === 'confirmed' ? 'goal_confirmed' : 'goal_pending'
+      : 'incident';
     case 'yellow_card': case 'red_card': return 'card';
     case 'substitution': return 'substitution';
     case 'injury': return 'injury';
@@ -292,6 +309,52 @@ export function replayMatchEngine(
   };
   recomputePlayers(state, context);
   const frames: SemanticFrame[] = [];
+
+  function commitConfirmedScore(
+    record: TxlineMatchEngineRecord,
+    frame: SemanticFrame,
+    candidateScore: MatchEngineScore,
+    details: {
+      participant?: MatchEngineParticipant;
+      teamId?: number | string;
+      occurrenceSeconds?: number;
+      sourceSeqs: number[];
+    },
+  ) {
+    if (
+      candidateScore.participant1 < state.confirmedScore.participant1
+      || candidateScore.participant2 < state.confirmedScore.participant2
+    ) return;
+    const scoreChanged = stable(state.confirmedScore) !== stable(candidateScore);
+    state.confirmedScore = candidateScore;
+    if (!scoreChanged) return;
+
+    const scoreFact = emitFact(state, frame, {
+      id: `fact:${context.fixtureId}:score`,
+      kind: 'score',
+      lifecycle: 'confirmed',
+      basis: 'direct',
+      participant: details.participant,
+      teamId: details.teamId,
+      value: { ...candidateScore },
+      occurrenceSeconds: details.occurrenceSeconds,
+      sourceSeqs: details.sourceSeqs,
+      provenance: provenance(record),
+    });
+    emitCue(state, frame, {
+      id: `cue:${context.fixtureId}:score`,
+      kind: 'score_commit',
+      updateMode: 'state_replace',
+      lifecycle: 'confirmed',
+      basis: 'direct',
+      participant: details.participant,
+      teamId: details.teamId,
+      value: { ...candidateScore },
+      occurrenceSeconds: details.occurrenceSeconds,
+      sourceSeqs: details.sourceSeqs,
+      factIds: [scoreFact.id],
+    });
+  }
 
   for (const record of normalized.ledger) {
     state.lastAppliedSeq = record.Seq;
@@ -478,6 +541,9 @@ export function replayMatchEngine(
         incident.revision += 1;
         incident.lastUpdatedSeq = record.Seq;
         incident.sourceSeqs.push(record.Seq);
+        if (incident.action === 'goal' || isScoredPenaltyIncident(incident)) {
+          state.provisionalScore = undefined;
+        }
         const fact = emitFact(state, frame, {
           id: `fact:${incident.key}`, kind: 'incident', lifecycle: 'retracted', basis: 'direct',
           participant: incident.participant, teamId: incident.teamId, player: incident.player,
@@ -529,40 +595,17 @@ export function replayMatchEngine(
         factIds: [fact.id],
       });
 
-      if (record.Action === 'goal') {
+      if (incident.action === 'goal' || isScoredPenaltyIncident(incident)) {
         const candidateScore = incident.score;
         if (record.Confirmed === false && candidateScore) state.provisionalScore = candidateScore;
         if (record.Confirmed === true && candidateScore) {
-          const scoreChanged = stable(state.confirmedScore) !== stable(candidateScore);
-          state.confirmedScore = candidateScore;
           state.provisionalScore = undefined;
-          if (scoreChanged) {
-            const scoreFact = emitFact(state, frame, {
-              id: `fact:${context.fixtureId}:score`,
-              kind: 'score',
-              lifecycle: 'confirmed',
-              basis: 'direct',
-              participant: incident.participant,
-              teamId: incident.teamId,
-              value: { ...candidateScore },
-              occurrenceSeconds: incident.occurrenceSeconds,
-              sourceSeqs: [...incident.sourceSeqs],
-              provenance: provenance(record),
-            });
-            emitCue(state, frame, {
-              id: `cue:${context.fixtureId}:score`,
-              kind: 'score_commit',
-              updateMode: 'state_replace',
-              lifecycle: 'confirmed',
-              basis: 'direct',
-              participant: incident.participant,
-              teamId: incident.teamId,
-              value: { ...candidateScore },
-              occurrenceSeconds: incident.occurrenceSeconds,
-              sourceSeqs: [...incident.sourceSeqs],
-              factIds: [scoreFact.id],
-            });
-          }
+          commitConfirmedScore(record, frame, candidateScore, {
+            participant: incident.participant,
+            teamId: incident.teamId,
+            occurrenceSeconds: incident.occurrenceSeconds,
+            sourceSeqs: [...incident.sourceSeqs],
+          });
         }
         if (incident.player && record.Confirmed === true) {
           emitCue(state, frame, {
@@ -581,7 +624,27 @@ export function replayMatchEngine(
           });
         }
       }
+      if (
+        incident.action === 'penalty_outcome'
+        && record.Confirmed === true
+        && !isScoredPenaltyIncident(incident)
+      ) {
+        state.provisionalScore = undefined;
+      }
       recomputePlayers(state, context);
+    }
+
+    // A scored penalty outcome is the only non-goal action authorized to commit
+    // direct score evidence. Other confirmed records can carry stale score
+    // snapshots, including an overturned VAR decision.
+    const directScore = scoreFrom(record, state.confirmedScore);
+    if (record.Confirmed === true && isScoredPenaltyOutcome(record) && directScore) {
+      commitConfirmedScore(record, frame, directScore, {
+        participant: actor,
+        teamId: teamIdFor(context, actor),
+        occurrenceSeconds: record.Clock?.Seconds,
+        sourceSeqs,
+      });
     }
 
     if (record.Action === 'game_finalised') {

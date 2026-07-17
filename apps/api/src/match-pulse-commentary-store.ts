@@ -989,12 +989,17 @@ function hasIdenticalGrounding(
 
 function groundingFingerprint(entry: MatchPulseCommentaryEntry): string {
   const {
+    batchId: _batchId,
     commentary: _commentary,
     voiceLine: _voiceLine,
     generation: _generation,
     enrichmentStatus: _enrichmentStatus,
     coveredFrameIds: _coveredFrameIds,
     enrichmentPromptVersion: _enrichmentPromptVersion,
+    // Batch ids and projection generations invalidate processing/transport
+    // cursors, not otherwise identical source grounding. Preserve completed
+    // enrichment when an engine-version rebuild reproduces the same evidence.
+    projectionGeneration: _projectionGeneration,
     ...grounding
   } = entry;
   return JSON.stringify(grounding);

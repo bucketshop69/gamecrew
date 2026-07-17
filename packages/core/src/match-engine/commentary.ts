@@ -11,6 +11,11 @@ import type {
 
 export const COMMENTARY_PLAN_VERSION = 3;
 
+// Beat identity follows source evidence, not a transport projection generation.
+// Keep 0 as the identity-schema segment so existing generation-0 persisted
+// entries retain their ids when the match engine is rebuilt under v2.
+const COMMENTARY_BEAT_ID_VERSION = 0;
+
 const routineKinds = new Set<SimulationCue['kind']>([
   'set_piece',
   'possession_change',
@@ -255,7 +260,7 @@ function buildBeat(
     id: [
       first.frame.fixtureId,
       'commentary',
-      options.projectionGeneration,
+      COMMENTARY_BEAT_ID_VERSION,
       kind,
       first.frame.seq,
       last.frame.seq,

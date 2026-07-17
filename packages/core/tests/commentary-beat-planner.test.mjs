@@ -75,8 +75,8 @@ test('emits corner and shot immediately with stable versioned ids and no overlap
   assert.equal(beats.length, 2);
   assert.deepEqual(beats.map((beat) => beat.kind), ['routine', 'routine']);
   assert.deepEqual(beats.map((beat) => beat.id), [
-    '18179759:commentary:4:routine:10:10:corner%3A1',
-    '18179759:commentary:4:routine:11:11:shot%3A2',
+    '18179759:commentary:0:routine:10:10:corner%3A1',
+    '18179759:commentary:0:routine:11:11:shot%3A2',
   ]);
   assert.deepEqual(beats.map((beat) => beat.plannerVersion), [3, 3]);
   assert.deepEqual(beats.map((beat) => beat.sourceFrameIds), [
@@ -105,8 +105,8 @@ test('splits same-frame card and corner cues into distinct immediate beats', () 
 
   assert.equal(beats.length, 2);
   assert.deepEqual(beats.map((beat) => beat.id), [
-    '18179759:commentary:4:routine:12:12:card%3Asame-frame',
-    '18179759:commentary:4:routine:12:12:corner%3Asame-frame',
+    '18179759:commentary:0:routine:12:12:card%3Asame-frame',
+    '18179759:commentary:0:routine:12:12:corner%3Asame-frame',
   ]);
   assert.deepEqual(beats.map((beat) => beat.cueIds), [
     ['card:same-frame'],
@@ -277,16 +277,20 @@ test('keeps a goal major isolated and retains full lifecycle evidence for enrich
     },
   };
 
-  const beats = planCommentaryBeats([
+  const inputFrames = [
     frame(50, 1000, [pendingGoal]),
     frame(51, 1000, [goal, score]),
     frame(53, 1000, [enrichedGoal]),
-  ], { projectionGeneration: 0, teams });
+  ];
+  const beats = planCommentaryBeats(inputFrames, { projectionGeneration: 0, teams });
+  const rebuilt = planCommentaryBeats(inputFrames, { projectionGeneration: 1, teams });
 
   assert.equal(beats.length, 1);
   assert.equal(beats[0].kind, 'major');
   assert.equal(beats[0].mustCover, true);
   assert.equal(beats[0].id, '18179759:commentary:0:major:51:51:goal%3A7+score');
+  assert.equal(rebuilt[0].id, beats[0].id, 'projection rebuilds retain source-grounded beat identity');
+  assert.equal(rebuilt[0].projectionGeneration, 1);
   assert.deepEqual(beats[0].sourceFrameIds, [
     '18179759:50',
     '18179759:51',

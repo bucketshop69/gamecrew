@@ -92,6 +92,7 @@ test('projects the persisted lifecycle ledger before publishing committed frames
     .map((record) => record.Seq), [772, 773, 774]);
   assert.equal(result.checkpoint.lastAppliedSeq, 885);
   assert.equal(result.checkpoint.stateRevision, 164);
+  assert.equal(result.checkpoint.engineVersion, 'match-engine-v2');
   assert.equal(result.checkpoint.state.phase, 'finalised');
   assert.deepEqual(result.checkpoint.state.confirmedScore,
     { participant1: 2, participant2: 0 });
@@ -192,6 +193,72 @@ test('projects through the shared SQLite ingestion-store contract', async () => 
     assert.equal(checkpoint?.stateHash, result.checkpoint.stateHash);
     assert.equal(checkpoint?.lastAppliedSeq, 885);
     assert.equal(storedFrames.length, 164);
+  } finally {
+    store.close();
+  }
+});
+
+test('a default engine-version upgrade rebuilds frames and advances the projection generation', async () => {
+  const store = new SqliteIngestionStore(':memory:');
+  const publications = [];
+  try {
+    const records = fixture.records.slice(0, 4);
+    await store.appendRawCandidates(records.map((record) => {
+      const payloadJson = JSON.stringify(record);
+      return {
+        fixtureId: String(fixture.fixture.fixtureId),
+        seq: record.Seq,
+        payloadHash: createHash('sha256').update(payloadJson).digest('hex'),
+        source: 'historical',
+        receivedAt: '2026-07-11T00:00:00.000Z',
+        payloadJson,
+      };
+    }));
+    await new MatchEngineProjector(store, {
+      engineVersion: 'match-engine-v1',
+      now: () => new Date('2026-07-11T00:00:00.000Z'),
+    }).project(fixture.fixture.fixtureId, context);
+
+    const upgraded = await new MatchEngineProjector(store, {
+      now: () => new Date('2026-07-11T00:01:00.000Z'),
+      publisher: {
+        publish: (_fixtureId, frames, options) => publications.push({ frames, options }),
+      },
+    }).project(fixture.fixture.fixtureId, context);
+
+    assert.equal(upgraded.checkpoint.engineVersion, 'match-engine-v2');
+    assert.equal(upgraded.checkpoint.projectionGeneration, 1);
+    assert.equal(upgraded.committedFrames.length, records.length);
+    assert.equal(publications.length, 1);
+    assert.equal(publications[0].options.replaceExisting, true);
+    assert.equal(publications[0].options.projectionGeneration, 1);
+    assert.equal((await store.getCheckpoint(String(fixture.fixture.fixtureId)))?.engineVersion,
+      'match-engine-v2');
+  } finally {
+    store.close();
+  }
+});
+
+test('an empty engine-version upgrade still publishes a generation reset', async () => {
+  const store = new SqliteIngestionStore(':memory:');
+  const publications = [];
+  try {
+    await new MatchEngineProjector(store, {
+      engineVersion: 'match-engine-v1',
+    }).project(fixture.fixture.fixtureId, context);
+
+    const upgraded = await new MatchEngineProjector(store, {
+      publisher: {
+        publish: (_fixtureId, frames, options) => publications.push({ frames, options }),
+      },
+    }).project(fixture.fixture.fixtureId, context);
+
+    assert.equal(upgraded.checkpoint.projectionGeneration, 1);
+    assert.equal(upgraded.committedFrames.length, 0);
+    assert.equal(publications.length, 1);
+    assert.deepEqual(publications[0].frames, []);
+    assert.equal(publications[0].options.replaceExisting, true);
+    assert.equal(publications[0].options.projectionGeneration, 1);
   } finally {
     store.close();
   }

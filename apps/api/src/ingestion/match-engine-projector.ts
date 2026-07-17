@@ -95,7 +95,9 @@ export class MatchEngineProjector {
     private readonly store: ProjectorStore,
     options: MatchEngineProjectorOptions = {},
   ) {
-    this.engineVersion = options.engineVersion ?? 'match-engine-v1';
+    // Bump whenever canonical frame semantics change so durable fixtures are
+    // rebuilt from their raw TxLINE ledger instead of serving stale frames.
+    this.engineVersion = options.engineVersion ?? 'match-engine-v2';
     this.now = options.now ?? (() => new Date());
     this.publisher = options.publisher;
   }
@@ -126,9 +128,10 @@ export class MatchEngineProjector {
     context: MatchEngineContext,
     options: ProjectMatchOptions,
   ): Promise<MatchEngineProjectionResult> {
-    const [candidates, previousCheckpoint] = await Promise.all([
+    const [candidates, previousCheckpoint, latestCheckpoint] = await Promise.all([
       this.store.listRawCandidates(fixtureId),
       this.store.getCheckpoint(fixtureId, this.engineVersion),
+      this.store.getCheckpoint(fixtureId),
     ]);
     const timelineCandidates = candidates.filter((candidate) => candidate.source !== 'snapshot');
     const records = timelineCandidates
@@ -157,9 +160,17 @@ export class MatchEngineProjector {
     const replacesEarlierConflict = Boolean(previousCheckpoint && [...sequenceCounts].some(
       ([seq, count]) => count > 1 && seq <= previousCheckpoint.lastAppliedSeq,
     ) && conflictChanged);
-    const replacesEarlierProjection = Boolean(previousCheckpoint && (
+    const replacesEngineVersion = Boolean(
+      !previousCheckpoint
+      && latestCheckpoint
+      && latestCheckpoint.engineVersion !== this.engineVersion,
+    );
+    const replacesEarlierProjection = replacesEngineVersion || Boolean(previousCheckpoint && (
       replacesEarlierConflict || options.forceReplace
     ));
+    const projectionGeneration = replacesEngineVersion
+      ? latestCheckpoint!.projectionGeneration + 1
+      : (previousCheckpoint?.projectionGeneration ?? 0) + (replacesEarlierProjection ? 1 : 0);
     const checkpoint: MatchEngineProjectionCheckpoint = {
       fixtureId,
       lastAppliedSeq: replay.state.lastAppliedSeq,
@@ -167,11 +178,14 @@ export class MatchEngineProjector {
       engineVersion: this.engineVersion,
       stateHash,
       conflictHash,
-      projectionGeneration: (previousCheckpoint?.projectionGeneration ?? 0)
-        + (replacesEarlierProjection ? 1 : 0),
+      projectionGeneration,
       phase: replay.state.phase,
       ...(replay.state.phase === 'finalised'
-        ? { finalisedAt: previousCheckpoint?.finalisedAt ?? this.now().toISOString() }
+        ? {
+            finalisedAt: previousCheckpoint?.finalisedAt
+              ?? (replacesEngineVersion ? latestCheckpoint?.finalisedAt : undefined)
+              ?? this.now().toISOString(),
+          }
         : {}),
       state: replay.state,
       updatedAt: this.now().toISOString(),
@@ -217,8 +231,10 @@ export class MatchEngineProjector {
           afterRevision,
           this.engineVersion,
         )).map(unwrapFrame);
-    const generationChanged = previousCheckpoint
-      && previousCheckpoint.projectionGeneration !== checkpoint.projectionGeneration;
+    const generationChanged = replacesEngineVersion || Boolean(
+      previousCheckpoint
+      && previousCheckpoint.projectionGeneration !== checkpoint.projectionGeneration,
+    );
     if (committedFrames.length > 0 || generationChanged) {
       this.publisher?.publish(fixtureId, committedFrames, {
         replaceExisting: replacesEarlierProjection,

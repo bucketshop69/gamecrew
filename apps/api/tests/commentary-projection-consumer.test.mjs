@@ -159,6 +159,41 @@ test('reconciliation preserves an enriched entry when its deterministic beat id 
   }
 });
 
+test('engine-version generation changes preserve enrichment with identical grounding', async () => {
+  const store = new SqliteMatchPulseCommentaryStore(':memory:');
+  const entry = {
+    id: 'beat-versioned', fixtureId, batchId: 'engine:0:1-1', fromSeq: 1, toSeq: 1,
+    period: 'first_half', clock: { label: "1'" }, kind: 'corner', sourceEvents: [],
+    commentary: 'Fallback.', intensity: 'building', momentumSide: 'home',
+    confidence: 'source_backed', generation: 'rule_based', fallbackCommentary: 'Fallback.',
+    enrichmentStatus: 'pending', projectionGeneration: 0,
+    sourceFrameIds: ['frame-1'], cueIds: ['corner-1'], factIds: ['fact-1'],
+  };
+  try {
+    await store.commitEngineProjection(fixtureId, 0, 1, [entry], { replace: true });
+    await store.upsertEntries([{
+      ...entry,
+      commentary: 'The enriched line survives the engine rebuild.',
+      generation: 'llm',
+      enrichmentStatus: 'complete',
+      coveredFrameIds: ['frame-1'],
+    }]);
+    await store.commitEngineProjection(fixtureId, 1, 1, [{
+      ...entry,
+      batchId: 'engine:1:1-1',
+      projectionGeneration: 1,
+    }], { replace: true });
+
+    const [persisted] = await store.listEntries(fixtureId);
+    assert.equal(persisted.projectionGeneration, 1);
+    assert.equal(persisted.commentary, 'The enriched line survives the engine rebuild.');
+    assert.equal(persisted.generation, 'llm');
+    assert.equal(persisted.enrichmentStatus, 'complete');
+  } finally {
+    store.close();
+  }
+});
+
 test('reconciliation resets stale enrichment when a reused id has different grounding', async () => {
   const store = new SqliteMatchPulseCommentaryStore(':memory:');
   const entry = {

@@ -19,6 +19,9 @@ export interface ApiConfig {
   economySqlitePath: string;
   economyPayerPath: string;
   solanaRpcUrl: string;
+  commentaryAudioSqlitePath: string;
+  xaiApiKey?: string;
+  xaiTtsBaseUrl?: string;
 }
 
 export function loadConfig(): ApiConfig {
@@ -61,6 +64,11 @@ export function loadConfig(): ApiConfig {
       env.ECONOMY_PAYER_PATH ??
       resolve(process.cwd(), '.economy-payer.json'),
     solanaRpcUrl: process.env.SOLANA_RPC_URL ?? env.SOLANA_RPC_URL ?? 'https://api.devnet.solana.com',
+    commentaryAudioSqlitePath: process.env.COMMENTARY_AUDIO_SQLITE_PATH ??
+      env.COMMENTARY_AUDIO_SQLITE_PATH ??
+      resolve(process.cwd(), '.data/commentary-audio.sqlite'),
+    xaiApiKey: process.env.XAI_API_KEY ?? env.XAI_API_KEY,
+    xaiTtsBaseUrl: normalizeOptionalUrl(process.env.XAI_TTS_BASE_URL ?? env.XAI_TTS_BASE_URL),
   };
 }
 

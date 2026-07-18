@@ -11,6 +11,7 @@ import { createTxlineService } from './txline-service.js';
 import type { IngestionRuntime } from './ingestion/ingestion-runtime.js';
 import { ResponseCache } from './response-cache.js';
 import type { EconomyRuntime } from './economy/economy-runtime.js';
+import { createCommentaryAudioRoutes, type CommentaryAudioRoutesStore } from './tts/commentary-audio-routes.js';
 
 const DEFAULT_FRAMES_PAGE_LIMIT = 500;
 const MAX_FRAMES_PAGE_LIMIT = 2_000;
@@ -24,7 +25,12 @@ interface FramesPage {
   hasMore: boolean;
 }
 
-export function createApp(config: ApiConfig, ingestion?: IngestionRuntime, economy?: EconomyRuntime) {
+export function createApp(
+  config: ApiConfig,
+  ingestion?: IngestionRuntime,
+  economy?: EconomyRuntime,
+  commentaryAudio?: CommentaryAudioRoutesStore,
+) {
   const app = new Hono();
   const txline = createTxlineService(config);
   const engineCache = new ResponseCache<unknown>({
@@ -33,6 +39,10 @@ export function createApp(config: ApiConfig, ingestion?: IngestionRuntime, econo
   });
 
   app.use('*', cors());
+
+  if (commentaryAudio) {
+    app.route('/', createCommentaryAudioRoutes(commentaryAudio));
+  }
 
   app.get('/health', (context) =>
     context.json({

@@ -3,11 +3,13 @@ import { createApp } from './app.js';
 import { loadConfig } from './config.js';
 import { createIngestionRuntime } from './ingestion/ingestion-runtime.js';
 import { createEconomyRuntime } from './economy/economy-runtime.js';
+import { SqliteCommentaryAudioStore } from './tts/commentary-audio-store.js';
 
 const config = loadConfig();
 const ingestion = createIngestionRuntime(config);
 const economy = createEconomyRuntime(config);
-const app = createApp(config, ingestion, economy);
+const commentaryAudio = new SqliteCommentaryAudioStore(config.commentaryAudioSqlitePath);
+const app = createApp(config, ingestion, economy, commentaryAudio);
 void ingestion.restore();
 
 const server = serve(
@@ -28,6 +30,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
       .then(() => {
         ingestion.close();
         economy.close();
+        commentaryAudio.close();
       })
       .catch((error) => {
         console.error(error);

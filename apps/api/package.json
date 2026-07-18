@@ -14,6 +14,8 @@
     "commentary:materialize": "tsx src/materialize-match-pulse.ts",
     "commentary:requeue": "tsx src/requeue-match-pulse-commentary.ts",
     "economy:mint-smoke": "tsx src/economy-mint-smoke.ts",
+    "tts:generate": "tsx src/generate-commentary-tts.ts",
+    "tts:smoke": "tsx src/tts-smoke.ts",
     "match-pulse:live-test": "tsx src/live-match-pulse-test.ts",
     "match-pulse:replay": "tsx src/replay-match-pulse.ts",
     "start": "tsx src/server.ts",

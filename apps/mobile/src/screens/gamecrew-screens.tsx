@@ -40,11 +40,18 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useGameCrewMatches } from '../hooks/use-gamecrew-matches';
 import { useMatchPulse } from '../hooks/use-match-pulse';
 import { useEconomy, useLeaderboard } from '../state/use-economy';
+import { usePlaybackEngine } from '../state/use-playback-engine';
 import { useWallet } from '../state/use-wallet';
 import { EconomyLeaderboardSheet } from './economy-leaderboard-sheet';
 import { EconomyPileSheet } from './economy-pile-sheet';
 import { PrivyLoginBridge } from './economy-privy-login-bridge';
 import { GameViewDebugToggle } from './game-view-debug-panel';
+import { GameViewCheckpointRail } from './game-view/game-view-checkpoint-rail';
+import {
+  buildGameViewCheckpointRail,
+  findGameViewCheckpointCommentaryEntryId,
+  resolveGameViewCheckpointReplayStartIndex,
+} from './game-view/game-view-checkpoint-logic';
 import { GameViewScreen, type GameViewPresentationState } from './game-view/game-view-screen';
 import { GiftRevealTakeover } from './game-view-takeovers/gift-reveal-takeover';
 import { GlobalChatComposer } from './global-chat-composer';
@@ -85,11 +92,19 @@ interface PendingHomeJump {
   timeoutId?: ReturnType<typeof setTimeout>;
 }
 
+interface PendingPulseJump {
+  index: number;
+  retryCount: number;
+}
+
 const HOME_HEADER_HEIGHT = 44;
 const HOME_CAROUSEL_CHROME_HEIGHT = 24;
 const HOME_CONTEXT_CONTROL_CLEARANCE = 72;
 const HOME_JUMP_FALLBACK_MS = 900;
 const HOME_RECENT_SECTION_TOP_PADDING = 48;
+const PULSE_JUMP_RETRY_MS = 80;
+const PULSE_JUMP_MAX_RETRIES = 4;
+const PULSE_ROW_FALLBACK_HEIGHT = 112;
 
 export function HomeScreen({ onOpenMatch }: { onOpenMatch: (match: GameCrewMatch) => void }) {
   const insets = useSafeAreaInsets();
@@ -808,6 +823,7 @@ export function MatchDetailScreen({
     match.txline.fixtureId,
     match.status === 'live',
   );
+  const playback = usePlaybackEngine(match.txline.fixtureId, match.status === 'live');
   const economy = useEconomy(match.txline.fixtureId, match.status === 'live');
   const wallet = useWallet();
   const leaderboard = useLeaderboard(match.txline.fixtureId, match.status === 'live', economy.streamEvents);
@@ -852,6 +868,14 @@ export function MatchDetailScreen({
   }, [leaderboard.rows]);
 
   const pulseItems = getPulseFeedItems(pulseLoadState.entries);
+  const pulseListRef = useRef<FlatList<PulseFeedItem> | null>(null);
+  const pendingPulseJumpRef = useRef<PendingPulseJump | null>(null);
+  const pulseJumpRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [highlightedPulseId, setHighlightedPulseId] = useState<string | undefined>();
+  const checkpointRail = useMemo(
+    () => buildGameViewCheckpointRail(playback.snapshot.timeline),
+    [playback.snapshot.timeline],
+  );
   const visibleGamePresentation = activeMode === 'game' ? gamePresentation : null;
   const chatListRef = useRef<FlatList<GlobalChatRow> | null>(null);
   const chatRows = useMemo(
@@ -884,6 +908,61 @@ export function MatchDetailScreen({
     () => poolChipText(economy.poolSeed, getEconomyItemDefinition),
     [economy.poolSeed],
   );
+  const jumpToPulseIndex = useCallback((index: number) => {
+    if (pulseJumpRetryTimerRef.current) {
+      clearTimeout(pulseJumpRetryTimerRef.current);
+      pulseJumpRetryTimerRef.current = null;
+    }
+    pendingPulseJumpRef.current = { index, retryCount: 0 };
+    pulseListRef.current?.scrollToIndex({ animated: true, index, viewPosition: 0.35 });
+  }, []);
+  const handlePulseJumpFailure = useCallback(({
+    averageItemLength,
+    index,
+  }: {
+    averageItemLength: number;
+    index: number;
+  }) => {
+    const pendingJump = pendingPulseJumpRef.current;
+    if (!pendingJump || pendingJump.index !== index) return;
+
+    const estimatedRowHeight = averageItemLength > 0
+      ? averageItemLength
+      : PULSE_ROW_FALLBACK_HEIGHT;
+    pulseListRef.current?.scrollToOffset({
+      animated: false,
+      offset: Math.max(0, estimatedRowHeight * index),
+    });
+
+    if (pendingJump.retryCount >= PULSE_JUMP_MAX_RETRIES) return;
+    pendingJump.retryCount += 1;
+    if (pulseJumpRetryTimerRef.current) clearTimeout(pulseJumpRetryTimerRef.current);
+    pulseJumpRetryTimerRef.current = setTimeout(() => {
+      pulseJumpRetryTimerRef.current = null;
+      if (pendingPulseJumpRef.current?.index !== index) return;
+      pulseListRef.current?.scrollToIndex({ animated: true, index, viewPosition: 0.35 });
+    }, PULSE_JUMP_RETRY_MS);
+  }, []);
+  useEffect(() => () => {
+    if (pulseJumpRetryTimerRef.current) clearTimeout(pulseJumpRetryTimerRef.current);
+  }, []);
+  const handleCheckpointSelect = useCallback((sceneIndex: number) => {
+    playback.controls.startReplayAt(resolveGameViewCheckpointReplayStartIndex(sceneIndex));
+    if (activeMode !== 'pulse') return;
+
+    const commentaryId = findGameViewCheckpointCommentaryEntryId(
+      playback.snapshot.timeline,
+      sceneIndex,
+      pulseLoadState.entries,
+    );
+    if (!commentaryId) return;
+
+    setHighlightedPulseId(commentaryId);
+    const itemIndex = pulseItems.findIndex((item) => item.id === commentaryId);
+    if (itemIndex >= 0) {
+      jumpToPulseIndex(itemIndex);
+    }
+  }, [activeMode, jumpToPulseIndex, playback, pulseItems, pulseLoadState.entries]);
   const pulseEmptyState = pulseLoadState.status === 'loading' ? (
     <PulseStatePanel title="Loading Match Pulse" body="Loading the saved match story." />
   ) : pulseLoadState.status === 'error' ? (
@@ -941,63 +1020,6 @@ export function MatchDetailScreen({
           />
         </View>
 
-        <View style={styles.detailTabs} accessibilityRole="tablist">
-          <Pressable
-            accessibilityLabel="Show Match Pulse"
-            accessibilityRole="tab"
-            accessibilityState={{ selected: activeMode === 'pulse' }}
-            onPress={() => setActiveMode('pulse')}
-            style={({ pressed }) => [
-              styles.detailTab,
-              activeMode === 'pulse' && styles.detailTabSelected,
-              pressed && styles.detailTabPressed,
-            ]}
-          >
-            <Text style={activeMode === 'pulse'
-              ? styles.detailTabSelectedText
-              : styles.detailTabText}
-            >
-              Match Pulse
-            </Text>
-          </Pressable>
-          <Pressable
-            accessibilityLabel="Show Game View"
-            accessibilityRole="tab"
-            accessibilityState={{ selected: activeMode === 'game' }}
-            onPress={() => setActiveMode('game')}
-            style={({ pressed }) => [
-              styles.detailTab,
-              activeMode === 'game' && styles.detailTabSelected,
-              pressed && styles.detailTabPressed,
-            ]}
-          >
-            <Text style={activeMode === 'game'
-              ? styles.detailTabSelectedText
-              : styles.detailTabText}
-            >
-              Game View
-            </Text>
-          </Pressable>
-          <Pressable
-            accessibilityLabel="Show Global Chat"
-            accessibilityRole="tab"
-            accessibilityState={{ selected: activeMode === 'chat' }}
-            onPress={() => setActiveMode('chat')}
-            style={({ pressed }) => [
-              styles.detailTab,
-              activeMode === 'chat' && styles.detailTabSelected,
-              pressed && styles.detailTabPressed,
-            ]}
-          >
-            <Text style={activeMode === 'chat'
-              ? styles.detailTabSelectedText
-              : styles.detailTabText}
-            >
-              Chat
-            </Text>
-          </Pressable>
-        </View>
-
         {activeMode === 'chat' ? (
           <View style={styles.chatHeaderRow}>
             <Text style={styles.chatCoolnessLabel}>Coolness {economy.coolness}</Text>
@@ -1025,6 +1047,7 @@ export function MatchDetailScreen({
       {activeMode === 'pulse' ? (
         <FlatList
           data={pulseItems}
+          ref={pulseListRef}
           style={styles.pulseScroll}
           contentContainerStyle={styles.pulseStack}
           contentInsetAdjustmentBehavior="automatic"
@@ -1040,8 +1063,11 @@ export function MatchDetailScreen({
             />
           ) : null}
           maxToRenderPerBatch={12}
+          onScrollToIndexFailed={handlePulseJumpFailure}
           removeClippedSubviews={Platform.OS === 'android'}
-          renderItem={({ item }) => <PulseMomentRow item={item} />}
+          renderItem={({ item }) => (
+            <PulseMomentRow highlighted={item.id === highlightedPulseId} item={item} />
+          )}
           windowSize={9}
         />
       ) : activeMode === 'game' ? (
@@ -1051,6 +1077,7 @@ export function MatchDetailScreen({
             commentaryProjectionGeneration={pulseLoadState.projectionGeneration}
             match={match}
             onPresentationChange={setGamePresentation}
+            playback={playback}
           />
           {__DEV__ ? (
             <GameViewDebugToggle fixtureId={match.txline.fixtureId} isLive={match.status === 'live'} />
@@ -1071,6 +1098,47 @@ export function MatchDetailScreen({
           <GlobalChatComposer onSend={economy.sendMessage} />
         </>
       )}
+
+      {activeMode !== 'chat' ? (
+        <View style={styles.checkpointDock}>
+          <GameViewCheckpointRail
+            currentClockSeconds={playback.snapshot.currentScene?.clockSeconds}
+            model={checkpointRail}
+            onSelect={handleCheckpointSelect}
+            playheadIndex={playback.snapshot.playheadIndex}
+          />
+        </View>
+      ) : null}
+
+      <View style={styles.detailBottomNavigation}>
+        <View accessibilityRole="tablist" style={styles.detailTabs}>
+          {([
+            { accessibilityLabel: 'Show Match Pulse', label: 'Match Pulse', mode: 'pulse' },
+            { accessibilityLabel: 'Show Game View', label: 'Game View', mode: 'game' },
+            { accessibilityLabel: 'Show Global Chat', label: 'Chat', mode: 'chat' },
+          ] as const).map((tab) => {
+            const selected = activeMode === tab.mode;
+            return (
+              <Pressable
+                accessibilityLabel={tab.accessibilityLabel}
+                accessibilityRole="tab"
+                accessibilityState={{ selected }}
+                key={tab.mode}
+                onPress={() => setActiveMode(tab.mode)}
+                style={({ pressed }) => [
+                  styles.detailTab,
+                  selected && styles.detailTabSelected,
+                  pressed && styles.detailTabPressed,
+                ]}
+              >
+                <Text style={selected ? styles.detailTabSelectedText : styles.detailTabText}>
+                  {tab.label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </View>
 
       {/* PrivyLoginBridge is only ever mounted when Privy is configured --
           calling its hooks unconditionally would throw with no PrivyProvider
@@ -1141,9 +1209,19 @@ export function MatchDetailStateScreen({
   );
 }
 
-function PulseMomentRow({ item }: { item: PulseFeedItem }) {
+function PulseMomentRow({
+  highlighted,
+  item,
+}: {
+  highlighted: boolean;
+  item: PulseFeedItem;
+}) {
   return (
-    <View style={[styles.pulseMoment, getPulseToneStyle(item.tone)]}>
+    <View style={[
+      styles.pulseMoment,
+      getPulseToneStyle(item.tone),
+      highlighted && styles.pulseMomentCheckpoint,
+    ]}>
       <Text style={styles.pulseMinute} selectable>
         {item.minute}
       </Text>
@@ -1914,6 +1992,19 @@ const styles = StyleSheet.create({
     paddingTop: tokens.spacing.sm,
     zIndex: 10,
   },
+  checkpointDock: {
+    backgroundColor: tokens.shell.background,
+    borderTopColor: tokens.shell.divider,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: tokens.spacing.md,
+  },
+  detailBottomNavigation: {
+    backgroundColor: tokens.shell.background,
+    paddingBottom: tokens.spacing.sm,
+    paddingHorizontal: tokens.spacing.lg,
+    paddingTop: tokens.spacing.sm,
+    zIndex: 20,
+  },
   pulseScroll: {
     flex: 1,
   },
@@ -2152,6 +2243,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: tokens.spacing.md,
     padding: tokens.spacing.md,
+  },
+  pulseMomentCheckpoint: {
+    borderColor: '#F6C453',
+    borderWidth: 1,
   },
   pulseMomentQuiet: {
     backgroundColor: tokens.shell.surface,

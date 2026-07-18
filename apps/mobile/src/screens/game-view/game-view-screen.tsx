@@ -8,7 +8,8 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AccessibilityInfo, StyleSheet, View } from 'react-native';
 
-import { usePlaybackEngine } from '../../state/use-playback-engine';
+import type { PlaybackSnapshot } from '../../state/playback-engine';
+import type { PlaybackEngineControls } from '../../state/use-playback-engine';
 import { findNearestPriorStageableScene } from '../game-view-players/cluster-choreography-logic';
 import {
   activeGoalSequenceBeatIndex,
@@ -69,16 +70,18 @@ export function GameViewScreen({
   commentaryProjectionGeneration,
   match,
   onPresentationChange,
+  playback,
 }: {
   commentaryEntries?: readonly MatchPulseCommentaryEntry[];
   commentaryProjectionGeneration?: number;
   match: GameCrewMatch;
   onPresentationChange?: (state: GameViewPresentationState | null) => void;
+  playback: { controls: PlaybackEngineControls; snapshot: PlaybackSnapshot };
 }) {
   const reduceMotion = useReduceMotionPreference();
   const [soundEnabled, setSoundEnabled] = useGameViewSoundPreference();
   const isLive = isLiveMatchStatus(match.status);
-  const { snapshot, controls } = usePlaybackEngine(match.txline.fixtureId, isLive);
+  const { snapshot, controls } = playback;
 
   const desiredMode = selectPlaybackModeForMatchStatus(match.status);
   const startedReplayRef = useRef(false);
@@ -104,6 +107,13 @@ export function GameViewScreen({
       return;
     }
     if (startedReplayRef.current) return;
+    // A shared checkpoint selected from Match Pulse may already have put the
+    // engine into replay before Game View mounts. Preserve that chosen moment
+    // rather than restarting from kickoff.
+    if (snapshot.mode === 'replay') {
+      startedReplayRef.current = true;
+      return;
+    }
     // Paginated backfill can expose a partial timeline while the session is
     // still loading. Starting here would replay that prefix and miss the
     // eventual full-match compression; wait for loading to settle instead.
@@ -114,6 +124,7 @@ export function GameViewScreen({
   }, [
     controls,
     desiredMode,
+    snapshot.mode,
     snapshot.sessionStatus,
     snapshot.timeline.length,
   ]);

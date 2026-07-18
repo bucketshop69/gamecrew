@@ -16,6 +16,9 @@ export interface ApiConfig {
   txlineApiToken: string;
   txlineBaseUrl: string;
   txlineFinalisationCorrectionMs: number;
+  economySqlitePath: string;
+  economyPayerPath: string;
+  solanaRpcUrl: string;
 }
 
 export function loadConfig(): ApiConfig {
@@ -51,6 +54,13 @@ export function loadConfig(): ApiConfig {
         ?? env.TXLINE_FINALISATION_CORRECTION_MS,
       15 * 60_000,
     ),
+    economySqlitePath: process.env.ECONOMY_SQLITE_PATH ??
+      env.ECONOMY_SQLITE_PATH ??
+      resolve(process.cwd(), '.data/economy.sqlite'),
+    economyPayerPath: process.env.ECONOMY_PAYER_PATH ??
+      env.ECONOMY_PAYER_PATH ??
+      resolve(process.cwd(), '.economy-payer.json'),
+    solanaRpcUrl: process.env.SOLANA_RPC_URL ?? env.SOLANA_RPC_URL ?? 'https://api.devnet.solana.com',
   };
 }
 

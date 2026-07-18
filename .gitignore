@@ -41,5 +41,8 @@ artifacts/
 .env.*
 !.env.example
 
+# Solana economy mint payer keypair (never commit)
+apps/api/.economy-payer.json
+
 # TypeScript
 *.tsbuildinfo

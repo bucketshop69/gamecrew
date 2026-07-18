@@ -25,7 +25,9 @@
     },
     "plugins": [
       "expo-router",
-      "expo-audio"
+      "expo-audio",
+      "expo-secure-store",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true

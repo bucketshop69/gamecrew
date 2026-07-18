@@ -8,6 +8,20 @@ export {
   DEFAULT_REPLAY_MS_PER_MATCH_SECOND,
   LIVE_PLAYHEAD_BUFFER_MS,
 } from './game-view';
+export {
+  buildEconomyTimeline,
+  buildLeaderboard,
+  computeGiftPoolSeed,
+  createEconomyRng,
+  deriveSimulatedRoomMembers,
+  foldEconomyBalances,
+  getEconomyItemDefinition,
+  ECONOMY_ITEM_CATALOGUE,
+  ECONOMY_FIXED_STAKE_COOLNESS,
+  ECONOMY_WIN_COOLNESS_GAIN,
+  ECONOMY_LOSS_COOLNESS_DIP,
+  ECONOMY_STARTING_COOLNESS,
+} from './economy';
 export type {
   BeatNarrative,
   BeatNarrativeDiscipline,
@@ -31,6 +45,24 @@ export type {
   GameViewTimelineOptions,
   GameViewZone,
 } from './game-view';
+export type {
+  BuildLeaderboardOptions,
+  EconomyBalances,
+  EconomyBetPredicate,
+  EconomyBetPrompt,
+  EconomyBetTakenAction,
+  EconomyEvent,
+  EconomyEventKind,
+  EconomyGiftClaimedAction,
+  EconomyItemDefinition,
+  EconomyItemDelta,
+  EconomyItemId,
+  EconomyTimelineOptions,
+  EconomyUserAction,
+  LeaderboardRow,
+  SimulatedRoomMember,
+  SimulatedRoomMemberOutcome,
+} from './economy';
 export type {
   CanonicalIncident,
   CanonicalMatchState,

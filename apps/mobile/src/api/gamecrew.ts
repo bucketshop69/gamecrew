@@ -151,3 +151,65 @@ export function isAbortError(error: unknown): boolean {
     (error as { name?: unknown }).name === 'AbortError'
   );
 }
+
+// -- Playful Economy: Solana claim flow (V1, Privy-shaped) ------------------
+// See docs/prds/playful_economy.md, docs/plans/playful-economy-v1.md ("On-chain
+// claim"). Endpoints are a FROZEN contract owned by the backend; shapes
+// mirror the wire responses exactly (camelCase, as sent). V1 supersedes the
+// POC's server-provisioned custodial wallet (`POST /economy/users`,
+// `GET /economy/users/:userId`) -- the wallet address now arrives from Privy
+// social login, client-side, so there is no user-provisioning endpoint: the
+// wallet address itself is the identity key for claims.
+
+export type EconomyClaimStatus = 'pending' | 'minted' | 'failed';
+
+export interface EconomyClaimResponse {
+  claimId: string;
+  status: EconomyClaimStatus;
+  mintAddress?: string;
+  txSignature?: string;
+  explorerUrl?: string;
+}
+
+export interface CreateEconomyClaimInput {
+  walletAddress: string;
+  fixtureId: string;
+  itemId: string;
+  quantity: number;
+  sourceEventId: string;
+}
+
+/** POST /economy/claims -- idempotent on (walletAddress, sourceEventId). Returns 202 with the initial 'pending' claim. */
+export async function createEconomyClaim(
+  input: CreateEconomyClaimInput,
+  { signal }: { signal?: AbortSignal } = {},
+): Promise<EconomyClaimResponse> {
+  const response = await fetch(`${gameCrewApiUrl}/economy/claims`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+    signal,
+  });
+  return readGameCrewResponse<EconomyClaimResponse>(response);
+}
+
+/** GET /economy/claims/:claimId -- current status of a previously-created claim. */
+export async function fetchEconomyClaim(
+  claimId: string,
+  { signal }: { signal?: AbortSignal } = {},
+): Promise<EconomyClaimResponse> {
+  const response = await fetch(`${gameCrewApiUrl}/economy/claims/${encodeURIComponent(claimId)}`, { signal });
+  return readGameCrewResponse<EconomyClaimResponse>(response);
+}
+
+/** GET /economy/wallets/:walletAddress/claims -- every claim ever made by this wallet (each in the same shape as EconomyClaimResponse). Used to resolve claim state for a wallet that was set on a fresh session (e.g. Privy resolving the same social account on a new device). */
+export async function fetchEconomyWalletClaims(
+  walletAddress: string,
+  { signal }: { signal?: AbortSignal } = {},
+): Promise<readonly EconomyClaimResponse[]> {
+  const response = await fetch(
+    `${gameCrewApiUrl}/economy/wallets/${encodeURIComponent(walletAddress)}/claims`,
+    { signal },
+  );
+  return readGameCrewResponse<readonly EconomyClaimResponse[]>(response);
+}

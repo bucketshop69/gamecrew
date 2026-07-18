@@ -10,6 +10,7 @@ import type { ApiConfig } from './config.js';
 import { createTxlineService } from './txline-service.js';
 import type { IngestionRuntime } from './ingestion/ingestion-runtime.js';
 import { ResponseCache } from './response-cache.js';
+import type { EconomyRuntime } from './economy/economy-runtime.js';
 
 const DEFAULT_FRAMES_PAGE_LIMIT = 500;
 const MAX_FRAMES_PAGE_LIMIT = 2_000;
@@ -23,7 +24,7 @@ interface FramesPage {
   hasMore: boolean;
 }
 
-export function createApp(config: ApiConfig, ingestion?: IngestionRuntime) {
+export function createApp(config: ApiConfig, ingestion?: IngestionRuntime, economy?: EconomyRuntime) {
   const app = new Hono();
   const txline = createTxlineService(config);
   const engineCache = new ResponseCache<unknown>({
@@ -178,6 +179,48 @@ export function createApp(config: ApiConfig, ingestion?: IngestionRuntime) {
     return context.json(result);
   });
 
+  app.post('/economy/claims', async (context) => {
+    if (!economy) return context.json({ error: 'Economy runtime is unavailable.' }, 503);
+    const body = await parseJsonBody(context.req.raw);
+    if (!body) return context.json({ error: 'Invalid JSON body.' }, 400);
+
+    const walletAddress = requireNonEmptyString(body.walletAddress);
+    const fixtureId = requireNonEmptyString(body.fixtureId);
+    const itemId = requireNonEmptyString(body.itemId);
+    const sourceEventId = requireNonEmptyString(body.sourceEventId);
+    const quantity = requirePositiveInteger(body.quantity);
+    const minute = optionalNonNegativeInteger(body.minute);
+    if (!walletAddress || !fixtureId || !itemId || !sourceEventId || quantity === undefined) {
+      return context.json({
+        error: 'walletAddress, fixtureId, itemId, sourceEventId, and a positive integer quantity are required.',
+      }, 400);
+    }
+
+    const claim = await economy.createClaim({
+      walletAddress,
+      fixtureId,
+      itemId,
+      quantity,
+      ...(minute === undefined ? {} : { minute }),
+      sourceEventId,
+    });
+    return context.json({ claimId: claim.claimId, status: claim.status }, 202);
+  });
+
+  app.get('/economy/claims/:claimId', async (context) => {
+    if (!economy) return context.json({ error: 'Economy runtime is unavailable.' }, 503);
+    const claim = await economy.getClaim(context.req.param('claimId'));
+    if (!claim) return context.json({ error: 'Claim not found.' }, 404);
+    return context.json(claim);
+  });
+
+  app.get('/economy/wallets/:walletAddress/claims', async (context) => {
+    if (!economy) return context.json({ error: 'Economy runtime is unavailable.' }, 503);
+    const walletAddress = context.req.param('walletAddress');
+    const claims = await economy.listClaimsForWallet(walletAddress);
+    return context.json({ walletAddress, claims });
+  });
+
   app.notFound((context) => context.json({ error: 'Not found' }, 404));
 
   app.onError((error, context) =>
@@ -264,4 +307,25 @@ function parseFramesLimit(value?: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_FRAMES_PAGE_LIMIT;
   return Math.min(Math.floor(parsed), MAX_FRAMES_PAGE_LIMIT);
+}
+
+async function parseJsonBody(request: Request): Promise<Record<string, unknown> | undefined> {
+  try {
+    const parsed = await request.json();
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function requireNonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+function requirePositiveInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+function optionalNonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
 }

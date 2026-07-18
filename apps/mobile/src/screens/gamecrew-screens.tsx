@@ -1,7 +1,11 @@
 import {
+  ECONOMY_FIXED_STAKE_COOLNESS,
+  type EconomyItemId,
   type GameCrewMatch,
+  type LeaderboardRow,
   type MatchPulseCommentaryEntry,
   gameCrewTokens,
+  getEconomyItemDefinition,
   getMatchTitle,
 } from '@gamecrew/core';
 import { StatusBar } from 'expo-status-bar';
@@ -19,6 +23,7 @@ import {
   Animated,
   findNodeHandle,
   FlatList,
+  Keyboard,
   type LayoutChangeEvent,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -34,18 +39,38 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { useGameCrewMatches } from '../hooks/use-gamecrew-matches';
 import { useMatchPulse } from '../hooks/use-match-pulse';
+import { useEconomy, useLeaderboard } from '../state/use-economy';
+import { useWallet } from '../state/use-wallet';
+import { EconomyLeaderboardSheet } from './economy-leaderboard-sheet';
+import { EconomyPileSheet } from './economy-pile-sheet';
+import { PrivyLoginBridge } from './economy-privy-login-bridge';
 import { GameViewDebugToggle } from './game-view-debug-panel';
 import { GameViewScreen, type GameViewPresentationState } from './game-view/game-view-screen';
+import { GiftRevealTakeover } from './game-view-takeovers/gift-reveal-takeover';
+import { GlobalChatComposer } from './global-chat-composer';
+import { GlobalChatFeed, type ChatTeamIdentity } from './global-chat-feed';
+import {
+  buildGlobalChatStreamRows,
+  buildPileRows,
+  latestGiftRevealItems,
+  poolChipText,
+  type GlobalChatRow,
+} from './global-chat-logic';
 import {
   partitionHomeMatches,
   resolveHomeSection,
   type HomeSection,
 } from './home-screen-state';
 
+/** Set at build time (EXPO_PUBLIC_PRIVY_APP_ID/CLIENT_ID) -- mirrors app/_layout.tsx's gate exactly, so the claim UI's "unavailable" state and the actual PrivyProvider mount agree on whether Privy is configured. */
+const PRIVY_AVAILABLE = Boolean(
+  process.env.EXPO_PUBLIC_PRIVY_APP_ID && process.env.EXPO_PUBLIC_PRIVY_CLIENT_ID,
+);
+
 const tokens = gameCrewTokens;
 
 type PulseTone = 'major' | 'danger' | 'building' | 'quiet';
-type MatchDetailMode = 'pulse' | 'game';
+type MatchDetailMode = 'pulse' | 'game' | 'chat';
 
 interface PulseFeedItem {
   id: string;
@@ -772,12 +797,93 @@ export function MatchDetailScreen({
 }) {
   const [activeMode, setActiveMode] = useState<MatchDetailMode>('pulse');
   const [gamePresentation, setGamePresentation] = useState<GameViewPresentationState | null>(null);
+  const [pileSheetVisible, setPileSheetVisible] = useState(false);
+  const [leaderboardVisible, setLeaderboardVisible] = useState(false);
+  // UX review should-fix ("Leaderboard snapshot-at-open"): the sheet must
+  // render the leaderboard as of the moment it was opened, not live re-sort
+  // while the user is reading it -- captured once, on the same tap that
+  // opens the sheet, rather than fed continuously from `leaderboard.rows`.
+  const [leaderboardSnapshot, setLeaderboardSnapshot] = useState<readonly LeaderboardRow[]>([]);
   const { pulseLoadState, reload } = useMatchPulse(
     match.txline.fixtureId,
     match.status === 'live',
   );
+  const economy = useEconomy(match.txline.fixtureId, match.status === 'live');
+  const wallet = useWallet();
+  const leaderboard = useLeaderboard(match.txline.fixtureId, match.status === 'live', economy.streamEvents);
+  const handleClaimItem = useCallback(
+    (itemId: EconomyItemId, quantity: number) => {
+      wallet.claimItem({
+        fixtureId: match.txline.fixtureId,
+        itemId,
+        quantity,
+        sourceEventId: `pile:${itemId}`,
+      });
+    },
+    [match.txline.fixtureId, wallet],
+  );
+
+  // Privy login bridge: onReady hands this ref the real login(provider)
+  // function once PrivyLoginBridge mounts (only when PRIVY_AVAILABLE) -- see
+  // economy-privy-login-bridge.tsx's doc comment for why this indirection
+  // exists (hooks can't be called conditionally, but a component can be
+  // conditionally mounted).
+  const privyLoginRef = useRef<((provider: 'google' | 'apple') => Promise<string | undefined>) | null>(null);
+  const handlePrivyReady = useCallback((login: (provider: 'google' | 'apple') => Promise<string | undefined>) => {
+    privyLoginRef.current = login;
+  }, []);
+  const handleStartLogin = useCallback(
+    async (provider: 'google' | 'apple'): Promise<boolean> => {
+      const login = privyLoginRef.current;
+      if (!login) return false;
+      const address = await login(provider);
+      if (!address) return false;
+      wallet.setWalletAddress(address);
+      return true;
+    },
+    [wallet],
+  );
+  const handleCancelLogin = useCallback(() => {
+    wallet.cancelLogin();
+  }, [wallet]);
+  const handleOpenLeaderboard = useCallback(() => {
+    setLeaderboardSnapshot(leaderboard.rows);
+    setLeaderboardVisible(true);
+  }, [leaderboard.rows]);
+
   const pulseItems = getPulseFeedItems(pulseLoadState.entries);
   const visibleGamePresentation = activeMode === 'game' ? gamePresentation : null;
+  const chatListRef = useRef<FlatList<GlobalChatRow> | null>(null);
+  const chatRows = useMemo(
+    () => buildGlobalChatStreamRows(economy.streamRows, economy.openPrompts, economy.pile, getEconomyItemDefinition),
+    [economy.streamRows, economy.openPrompts, economy.pile],
+  );
+  // Team identity for the who-scores-next team-pick card (QA HIGH fix): a
+  // single representative color per team, sourced directly from the match's
+  // own team colors -- MatchDetailScreen is a match-owned surface, so team
+  // color is allowed here (unlike the rest of the chat tab's monochrome
+  // chrome), used sparingly as a border accent only (see global-chat-feed.tsx's
+  // TeamPickButtons doc comment).
+  const chatHomeTeam: ChatTeamIdentity = useMemo(
+    () => ({ name: match.homeTeam.name, color: match.homeTeam.colors.primary, participant: 1 }),
+    [match.homeTeam.name, match.homeTeam.colors.primary],
+  );
+  const chatAwayTeam: ChatTeamIdentity = useMemo(
+    () => ({ name: match.awayTeam.name, color: match.awayTeam.colors.primary, participant: 2 }),
+    [match.awayTeam.name, match.awayTeam.colors.primary],
+  );
+  const pileRows = useMemo(
+    () => buildPileRows(economy.pile, getEconomyItemDefinition),
+    [economy.pile],
+  );
+  const giftRevealItems = useMemo(
+    () => latestGiftRevealItems(economy.streamEvents, getEconomyItemDefinition),
+    [economy.streamEvents],
+  );
+  const poolChipLabel = useMemo(
+    () => poolChipText(economy.poolSeed, getEconomyItemDefinition),
+    [economy.poolSeed],
+  );
   const pulseEmptyState = pulseLoadState.status === 'loading' ? (
     <PulseStatePanel title="Loading Match Pulse" body="Loading the saved match story." />
   ) : pulseLoadState.status === 'error' ? (
@@ -872,7 +978,48 @@ export function MatchDetailScreen({
               Game View
             </Text>
           </Pressable>
+          <Pressable
+            accessibilityLabel="Show Global Chat"
+            accessibilityRole="tab"
+            accessibilityState={{ selected: activeMode === 'chat' }}
+            onPress={() => setActiveMode('chat')}
+            style={({ pressed }) => [
+              styles.detailTab,
+              activeMode === 'chat' && styles.detailTabSelected,
+              pressed && styles.detailTabPressed,
+            ]}
+          >
+            <Text style={activeMode === 'chat'
+              ? styles.detailTabSelectedText
+              : styles.detailTabText}
+            >
+              Chat
+            </Text>
+          </Pressable>
         </View>
+
+        {activeMode === 'chat' ? (
+          <View style={styles.chatHeaderRow}>
+            <Text style={styles.chatCoolnessLabel}>Coolness {economy.coolness}</Text>
+            <Text numberOfLines={1} style={styles.poolChipText}>{poolChipLabel}</Text>
+            <Pressable
+              accessibilityLabel="Open the board"
+              accessibilityRole="button"
+              onPress={handleOpenLeaderboard}
+              style={styles.pileButton}
+            >
+              <Text style={styles.pileButtonText}>Board</Text>
+            </Pressable>
+            <Pressable
+              accessibilityLabel="Open your stash"
+              accessibilityRole="button"
+              onPress={() => setPileSheetVisible(true)}
+              style={styles.pileButton}
+            >
+              <Text style={styles.pileButtonText}>Stash</Text>
+            </Pressable>
+          </View>
+        ) : null}
       </View>
 
       {activeMode === 'pulse' ? (
@@ -897,7 +1044,7 @@ export function MatchDetailScreen({
           renderItem={({ item }) => <PulseMomentRow item={item} />}
           windowSize={9}
         />
-      ) : (
+      ) : activeMode === 'game' ? (
         <View style={styles.gameViewContent}>
           <GameViewScreen
             commentaryEntries={pulseLoadState.entries}
@@ -909,7 +1056,55 @@ export function MatchDetailScreen({
             <GameViewDebugToggle fixtureId={match.txline.fixtureId} isLive={match.status === 'live'} />
           ) : null}
         </View>
+      ) : (
+        <>
+          <GlobalChatFeed
+            awayTeam={chatAwayTeam}
+            emptyLabel="The room is quiet -- check back once the match gets going."
+            homeTeam={chatHomeTeam}
+            listRef={chatListRef}
+            onScrollBeginDrag={Keyboard.dismiss}
+            onStake={economy.takeBet}
+            rows={chatRows}
+            stakeCoolness={ECONOMY_FIXED_STAKE_COOLNESS}
+          />
+          <GlobalChatComposer onSend={economy.sendMessage} />
+        </>
       )}
+
+      {/* PrivyLoginBridge is only ever mounted when Privy is configured --
+          calling its hooks unconditionally would throw with no PrivyProvider
+          in the tree (see app/_layout.tsx and economy-privy-login-bridge.tsx). */}
+      {PRIVY_AVAILABLE ? <PrivyLoginBridge onReady={handlePrivyReady} /> : null}
+
+      {economy.pendingGift ? (
+        <GiftRevealTakeover
+          items={giftRevealItems}
+          onClaim={economy.claimGift}
+          onDismiss={economy.claimGift}
+        />
+      ) : null}
+
+      <EconomyPileSheet
+        claims={wallet.claims}
+        coolness={economy.coolness}
+        onCancelLogin={handleCancelLogin}
+        onClaimItem={handleClaimItem}
+        onClose={() => setPileSheetVisible(false)}
+        onStartLogin={handleStartLogin}
+        pileRows={pileRows}
+        privyAvailable={PRIVY_AVAILABLE}
+        visible={pileSheetVisible}
+        walletAddress={wallet.walletAddress}
+        walletStatus={wallet.walletStatus}
+      />
+
+      <EconomyLeaderboardSheet
+        onClose={() => setLeaderboardVisible(false)}
+        rows={leaderboardSnapshot}
+        status="ready"
+        visible={leaderboardVisible}
+      />
     </SafeAreaView>
   );
 }
@@ -1879,6 +2074,39 @@ const styles = StyleSheet.create({
     fontSize: tokens.typography.size.label,
     fontWeight: tokens.typography.weight.bold,
     lineHeight: tokens.typography.lineHeight.caption,
+  },
+  chatHeaderRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: tokens.spacing.sm,
+    justifyContent: 'space-between',
+    marginTop: tokens.spacing.sm,
+  },
+  chatCoolnessLabel: {
+    color: tokens.shell.textMuted,
+    fontSize: tokens.typography.size.label,
+    fontVariant: ['tabular-nums'],
+    fontWeight: tokens.typography.weight.bold,
+  },
+  poolChipText: {
+    color: tokens.shell.textMuted,
+    flex: 1,
+    fontSize: tokens.typography.size.label,
+    fontWeight: tokens.typography.weight.bold,
+    textAlign: 'right',
+  },
+  pileButton: {
+    borderColor: tokens.shell.divider,
+    borderRadius: tokens.radii.pill,
+    borderWidth: 1,
+    flexShrink: 0,
+    paddingHorizontal: tokens.spacing.md,
+    paddingVertical: tokens.spacing.xs,
+  },
+  pileButtonText: {
+    color: tokens.shell.text,
+    fontSize: tokens.typography.size.caption,
+    fontWeight: tokens.typography.weight.bold,
   },
   pulseStack: {
     gap: tokens.spacing.sm,

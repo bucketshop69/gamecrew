@@ -229,6 +229,7 @@ test('resolveSetPieceVariant passes through known variants', () => {
   assert.equal(resolveSetPieceVariant('throw_in'), 'throw_in');
   assert.equal(resolveSetPieceVariant('penalty'), 'penalty');
   assert.equal(resolveSetPieceVariant('free_kick'), 'free_kick');
+  assert.equal(resolveSetPieceVariant('goal_kick'), 'goal_kick');
 });
 
 test('resolveSetPieceVariant defaults to free_kick for missing/unrecognized input', () => {
@@ -238,6 +239,7 @@ test('resolveSetPieceVariant defaults to free_kick for missing/unrecognized inpu
 
 test('setPieceLabel returns display copy for each variant', () => {
   assert.equal(setPieceLabel('corner'), 'CORNER');
+  assert.equal(setPieceLabel('goal_kick'), 'GOAL KICK');
   assert.equal(setPieceLabel('free_kick'), 'FREE KICK');
   assert.equal(setPieceLabel('throw_in'), 'THROW-IN');
   assert.equal(setPieceLabel('penalty'), 'PENALTY');
@@ -288,12 +290,14 @@ test('resolveTakeoverComponentKind maps every takeover-eligible scene kind', () 
   assert.equal(resolveTakeoverComponentKind('goal_retracted'), 'goal_retracted');
   assert.equal(resolveTakeoverComponentKind('phase_break'), 'phase_break');
   assert.equal(resolveTakeoverComponentKind('restart'), 'restart');
+  assert.equal(resolveTakeoverComponentKind('substitution'), 'substitution');
+  assert.equal(resolveTakeoverComponentKind('injury'), 'injury');
+  assert.equal(resolveTakeoverComponentKind('additional_time'), 'additional_time');
 });
 
 test('resolveTakeoverComponentKind returns none for non-takeover scene kinds', () => {
   assert.equal(resolveTakeoverComponentKind('ambient'), 'none');
   assert.equal(resolveTakeoverComponentKind('shot'), 'none');
-  assert.equal(resolveTakeoverComponentKind('substitution'), 'none');
 });
 
 // ---------------------------------------------------------------------------

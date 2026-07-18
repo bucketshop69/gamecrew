@@ -29,8 +29,9 @@ export function VarTakeover({
   scene,
 }: TakeoverBaseProps & { scene: GameViewScene }) {
   const team = teamForParticipant(scene.participant, homeTeam, awayTeam);
+  const decision = resolveVarDecision(scene);
   const announcement = [
-    'VAR review in progress.',
+    decision.announcement,
     team ? `Incident involving ${team.name}.` : undefined,
   ].filter(Boolean).join(' ');
 
@@ -39,12 +40,32 @@ export function VarTakeover({
 
   return (
     <TakeoverShell accessibilityLabel={announcement} backgroundColor={tokens.shell.surface}>
-      <PulsingBadge reduceMotion={reduceMotion} />
+      <PulsingBadge reduceMotion={reduceMotion || decision.settled} />
       {team ? <TakeoverEyebrow style={styles.eyebrow}>{team.name}</TakeoverEyebrow> : null}
       <TakeoverHeadline style={styles.headline}>VAR</TakeoverHeadline>
-      <TakeoverSubline style={styles.subline}>Under review</TakeoverSubline>
+      {scene.sourceType ? <TakeoverEyebrow style={styles.type}>{scene.sourceType}</TakeoverEyebrow> : null}
+      <TakeoverSubline style={styles.subline}>{decision.label}</TakeoverSubline>
     </TakeoverShell>
   );
+}
+
+function resolveVarDecision(scene: GameViewScene): { label: string; announcement: string; settled: boolean } {
+  const outcome = scene.sourceOutcome?.trim();
+  if (!outcome && scene.lifecycle !== 'confirmed') {
+    return { label: 'Under review', announcement: 'VAR review in progress.', settled: false };
+  }
+  const normalized = outcome?.toLowerCase();
+  if (normalized === 'stands') {
+    return { label: 'Decision stands', announcement: 'VAR decision stands.', settled: true };
+  }
+  if (normalized === 'overturned') {
+    return { label: 'Decision overturned', announcement: 'VAR decision overturned.', settled: true };
+  }
+  return {
+    label: outcome ?? 'Review complete',
+    announcement: `VAR review complete${outcome ? `: ${outcome}` : ''}.`,
+    settled: true,
+  };
 }
 
 function PulsingBadge({ reduceMotion }: { reduceMotion: boolean }) {
@@ -96,4 +117,5 @@ const styles = StyleSheet.create({
   eyebrow: { color: tokens.shell.text },
   headline: { color: tokens.shell.text, fontSize: 44, letterSpacing: 3 },
   subline: { color: tokens.shell.textMuted },
+  type: { color: tokens.shell.textMuted, marginBottom: 0, marginTop: tokens.spacing.sm },
 });

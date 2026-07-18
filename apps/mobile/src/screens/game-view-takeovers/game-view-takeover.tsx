@@ -5,6 +5,7 @@ import type { CardVariant, SetPieceVariant } from './game-view-takeover-logic';
 import { resolveTakeoverComponentKind } from './game-view-takeover-logic';
 import { GoalRetractedTakeover } from './goal-retracted-takeover';
 import { GoalSequenceTakeover } from './goal-sequence-takeover';
+import { MatchMomentBanner } from './match-moment-banner';
 import { PhaseBreakTakeover } from './phase-break-takeover';
 import { RestartCard } from './restart-card';
 import { SetPieceVignette } from './set-piece-vignette';
@@ -123,6 +124,19 @@ export function GameViewTakeover({
           onComplete={onComplete}
           reduceMotion={reduceMotion}
           scene={scene}
+        />
+      );
+    case 'substitution':
+    case 'injury':
+    case 'additional_time':
+      return (
+        <MatchMomentBanner
+          awayTeam={awayTeam}
+          homeTeam={homeTeam}
+          onComplete={onComplete}
+          reduceMotion={reduceMotion}
+          scene={scene}
+          variant={componentKind}
         />
       );
     case 'none':

@@ -132,6 +132,59 @@ test('France-Morocco (18209181): 60th-minute French opener is not misclassified 
   assert.ok(!opener.scoreEvents?.includes('late_winner'), 'a goal roughly 14 minutes into the second half must never be classified late_winner');
 });
 
+test('France-Morocco (18209181): source outcomes, injuries, added time, and goal kicks survive scene projection', () => {
+  const scenes = buildGameViewTimeline(loadFrames('18209181'));
+  const outcomes = new Set(scenes.filter((scene) => scene.kind === 'shot').map((scene) => scene.sourceOutcome).filter(Boolean));
+
+  assert.ok(outcomes.has('Blocked'));
+  assert.ok(outcomes.has('OffTarget'));
+  assert.ok(outcomes.has('OnTarget'));
+  assert.ok(scenes.some((scene) => scene.kind === 'injury' && scene.player));
+  assert.ok(scenes.some((scene) => scene.kind === 'additional_time'));
+  assert.ok(scenes.some((scene) => scene.kind === 'set_piece' && scene.sourceAction === 'goal_kick'));
+});
+
+test('Mexico-Ecuador (18179759): confirmed red-card player count persists into later scenes', () => {
+  const scenes = buildGameViewTimeline(loadFrames('18179759'));
+  const redCardIndex = scenes.findIndex((scene) => scene.kind === 'card' && scene.sourceAction === 'red_card' && scene.lifecycle === 'confirmed');
+
+  assert.ok(redCardIndex >= 0);
+  assert.deepEqual(scenes[redCardIndex].playerCounts, { participant1: 11, participant2: 10 });
+  for (const later of scenes.slice(redCardIndex + 1)) {
+    assert.deepEqual(later.playerCounts, { participant1: 11, participant2: 10 });
+  }
+});
+
+test('France-Morocco (18209181): source-backed shot, VAR, injury, added-time, and goal-kick detail survives the director', () => {
+  const scenes = buildGameViewTimeline(loadFrames('18209181'));
+
+  assert.deepEqual(
+    [...new Set(scenes.filter((scene) => scene.kind === 'shot').map((scene) => scene.sourceOutcome).filter(Boolean))].sort(),
+    ['Blocked', 'OffTarget', 'OnTarget'],
+  );
+  assert.ok(
+    scenes.some((scene) => scene.kind === 'var_review' && scene.sourceType === 'Penalty' && scene.sourceOutcome === 'Stands'),
+    'the settled penalty VAR decision must not remain a generic review',
+  );
+  assert.ok(scenes.some((scene) => scene.kind === 'injury'), 'fixture injury cues must reach Game View');
+  assert.ok(scenes.some((scene) => scene.kind === 'additional_time'), 'fixture added-time cue must reach Game View');
+  assert.ok(
+    scenes.some((scene) => scene.kind === 'set_piece' && scene.sourceAction === 'goal_kick'),
+    'goal kicks remain distinct set pieces',
+  );
+});
+
+test('Mexico-Ecuador (18179759): the straight red produces a persistent 10-v-11 scene state', () => {
+  const scenes = buildGameViewTimeline(loadFrames('18179759'));
+  const redIndex = scenes.findIndex((scene) => scene.kind === 'card' && scene.sourceAction === 'red_card');
+  assert.ok(redIndex >= 0, 'fixture contains its straight red');
+  assert.deepEqual(scenes[redIndex].playerCounts, { participant1: 11, participant2: 10 });
+  assert.ok(
+    scenes.slice(redIndex + 1).every((scene) => scene.playerCounts?.participant2 === 10),
+    'the dismissed side must stay at ten for the remainder of the replay',
+  );
+});
+
 const REPLAY_FIXED_KINDS = new Set(['goal_sequence', 'goal_retracted', 'card', 'var_review', 'phase_break']);
 
 test('replay pacing: major moments keep their durationHint, flexible scenes compress, offsets tile without gaps', () => {

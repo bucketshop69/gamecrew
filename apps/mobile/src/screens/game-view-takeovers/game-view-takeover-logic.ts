@@ -207,13 +207,14 @@ export function resolveCardVariant(variant: CardVariant | undefined): CardVarian
 // Set-piece variant resolution
 // ---------------------------------------------------------------------------
 
-export type SetPieceVariant = 'corner' | 'free_kick' | 'throw_in' | 'penalty';
+export type SetPieceVariant = 'corner' | 'free_kick' | 'throw_in' | 'penalty' | 'goal_kick';
 
 const SET_PIECE_LABELS: Record<SetPieceVariant, string> = {
   corner: 'CORNER',
   free_kick: 'FREE KICK',
   throw_in: 'THROW-IN',
   penalty: 'PENALTY',
+  goal_kick: 'GOAL KICK',
 };
 
 /**
@@ -223,7 +224,7 @@ const SET_PIECE_LABELS: Record<SetPieceVariant, string> = {
  * restart) rather than guessing a more specific type the data didn't confirm.
  */
 export function resolveSetPieceVariant(variant: SetPieceVariant | undefined): SetPieceVariant {
-  if (variant === 'corner' || variant === 'throw_in' || variant === 'penalty') return variant;
+  if (variant === 'corner' || variant === 'throw_in' || variant === 'penalty' || variant === 'goal_kick') return variant;
   return 'free_kick';
 }
 
@@ -283,6 +284,9 @@ export type GameViewTakeoverComponentKind =
   | 'goal_retracted'
   | 'phase_break'
   | 'restart'
+  | 'substitution'
+  | 'injury'
+  | 'additional_time'
   | 'none';
 
 /**
@@ -301,6 +305,9 @@ export function resolveTakeoverComponentKind(kind: GameViewSceneKind): GameViewT
     case 'goal_retracted': return 'goal_retracted';
     case 'phase_break': return 'phase_break';
     case 'restart': return 'restart';
+    case 'substitution': return 'substitution';
+    case 'injury': return 'injury';
+    case 'additional_time': return 'additional_time';
     default: return 'none';
   }
 }

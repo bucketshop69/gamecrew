@@ -97,6 +97,11 @@ export interface ClusterFigure {
   role: ClusterRole;
   participant: MatchEngineParticipant;
   color: string;
+  shirtColor?: string;
+  shortsColor?: string;
+  trimColor?: string;
+  /** The small action knot stays foregrounded; formation context deliberately recedes. */
+  focus: 'engaged' | 'formation';
   /** Board-fraction position: x across width, y down height, 0..1 with top-left origin (same space as the presence anchor). */
   x: number;
   y: number;
@@ -140,7 +145,18 @@ export interface StagedKeyframe {
   ball: ClusterBallState;
 }
 
-export type StagedClusterLabel = 'corner' | 'shot' | 'goal_celebration' | 'kickoff' | 'walk_off' | 'throw_in';
+export type StagedClusterLabel =
+  | 'corner'
+  | 'shot'
+  | 'shot_on_target'
+  | 'shot_off_target'
+  | 'shot_blocked'
+  | 'shot_woodwork'
+  | 'goal_celebration'
+  | 'kickoff'
+  | 'walk_off'
+  | 'throw_in'
+  | 'goal_kick';
 
 /** Fixed-beat staging for event scenes: the renderer tweens between keyframes. */
 export interface StagedClusterPlan {
@@ -333,19 +349,26 @@ function placeTeam(
   team: BoardTeamInfo,
   direction: BoardDirection,
   window: { back: number; front: number },
+  count = 11,
 ): ClusterFigure[] {
-  const slots = formationForParticipant(team.participant);
+  const slots = formationForParticipant(team.participant).slice(0, Math.min(11, Math.max(7, count)));
   return slots.map((slot) => {
     const depth = slot.key === 'gk'
       ? KEEPER_DEPTH
       : window.back + slot.depth * (window.front - window.back);
     const boardY = direction === 'up' ? 1 - depth : depth;
     const boardX = direction === 'up' ? slot.x : 1 - slot.x;
+    const role: ClusterRole = slot.key === 'gk'
+      ? 'keeper'
+      : /^(lb|rb|cb)/.test(slot.key) ? 'defender' : 'attacker';
+    const kit = role === 'keeper' ? team.kit?.keeper : team.kit?.outfield;
     return {
       key: `p${team.participant}-${slot.key}`,
-      role: slot.key === 'gk' ? 'keeper' as const : 'attacker' as const,
+      role,
       participant: team.participant,
-      color: team.color,
+      color: kit?.shirt ?? team.color,
+      ...(kit ? { shirtColor: kit.shirt, shortsColor: kit.shorts, trimColor: kit.trim } : {}),
+      focus: 'formation' as const,
       x: clampX(boardX),
       y: clampY(boardY),
       pose: 'idle' as const,
@@ -360,12 +383,30 @@ function placeFormations(
   defendingTeam: BoardTeamInfo,
   possessionDirection: BoardDirection,
   p: number,
+  playerCounts?: GameViewScene['playerCounts'],
 ): { possession: ClusterFigure[]; defending: ClusterFigure[] } {
   const defendingDirection: BoardDirection = possessionDirection === 'up' ? 'down' : 'up';
   return {
-    possession: placeTeam(possessionTeam, possessionDirection, possessionWindow(p)),
-    defending: placeTeam(defendingTeam, defendingDirection, defendingWindow(p)),
+    possession: placeTeam(
+      possessionTeam,
+      possessionDirection,
+      possessionWindow(p),
+      countForParticipant(playerCounts, possessionTeam.participant),
+    ),
+    defending: placeTeam(
+      defendingTeam,
+      defendingDirection,
+      defendingWindow(p),
+      countForParticipant(playerCounts, defendingTeam.participant),
+    ),
   };
+}
+
+function countForParticipant(
+  counts: GameViewScene['playerCounts'],
+  participant: MatchEngineParticipant,
+): number {
+  return participant === 1 ? counts?.participant1 ?? 11 : counts?.participant2 ?? 11;
 }
 
 /** Distance-sorted non-keeper figures, deterministic tie-break on key. */
@@ -384,7 +425,7 @@ function nearestOutfield(figures: readonly ClusterFigure[], x: number, y: number
 function override(
   figures: ClusterFigure[],
   key: string,
-  changes: Partial<Pick<ClusterFigure, 'x' | 'y' | 'pose' | 'facing'>>,
+  changes: Partial<Pick<ClusterFigure, 'x' | 'y' | 'pose' | 'facing' | 'focus'>>,
 ): void {
   const index = figures.findIndex((figure) => figure.key === key);
   if (index === -1) return;
@@ -448,7 +489,7 @@ function resolveAmbientPlan(
   const p = ZONE_BAND_POSITION[zone ?? 'neutral'] ?? ZONE_BAND_POSITION.neutral;
   const intensity = zoneIntensity(scene.zone, scene.pressure);
 
-  const { possession, defending } = placeFormations(team, opponent, direction, p);
+  const { possession, defending } = placeFormations(team, opponent, direction, p, scene.playerCounts);
 
   // The ball anchor: the true zone band, at a width keyed to team + zone
   // (real facts) so consecutive scenes with the same true state stage
@@ -464,6 +505,7 @@ function resolveAmbientPlan(
     override(possession, figure.key, {
       x: clampX(anchorX + offset.dx),
       y: clampY(anchorY + towardGoal(direction, offset.dGoal)),
+      focus: 'engaged',
     });
   });
 
@@ -473,6 +515,7 @@ function resolveAmbientPlan(
     override(defending, figure.key, {
       x: clampX(anchorX + offset.dx),
       y: clampY(anchorY + towardGoal(direction, offset.dGoal)),
+      ...(index === 0 ? { focus: 'engaged' as const } : {}),
     });
   });
 
@@ -548,11 +591,11 @@ function resolveCornerPlan(
 
   // A corner loads the box: attacking block pushed all the way up,
   // defending block camped at its own goal.
-  const { possession, defending } = placeFormations(team, opponent, direction, 0.94);
+  const { possession, defending } = placeFormations(team, opponent, direction, 0.94, scene.playerCounts);
 
   const attackersByFlag = nearestOutfield(possession, cornerX, cornerY);
   const taker = attackersByFlag[0]!;
-  override(possession, taker.key, { x: cornerX, y: cornerY });
+  override(possession, taker.key, { x: cornerX, y: cornerY, focus: 'engaged' });
 
   const runners = nearestOutfield(
     possession.filter((figure) => figure.key !== taker.key),
@@ -563,6 +606,7 @@ function resolveCornerPlan(
     override(possession, figure.key, {
       x: clampX(dropX + (index === 0 ? -0.09 : 0.1)),
       y: clampY(dropY + towardGoal(direction, index === 0 ? -0.03 : -0.055)),
+      focus: 'engaged',
     });
   });
 
@@ -571,6 +615,7 @@ function resolveCornerPlan(
     override(defending, marker.key, {
       x: clampX(dropX + 0.015),
       y: clampY(dropY + towardGoal(direction, 0.045)),
+      focus: 'engaged',
     });
   }
 
@@ -581,7 +626,7 @@ function resolveCornerPlan(
     if (figure.key === runners[0]?.key) return { ...figure, x: clampX(dropX - 0.02), y: clampY(dropY), pose: 'header' as const };
     if (figure.key === marker?.key) return { ...figure, x: clampX(dropX + 0.04), y: clampY(dropY + towardGoal(direction, 0.02)), pose: 'run_a' as const };
     if (figure.role === 'keeper' && figure.participant === opponent.participant) {
-      return { ...figure, x: clampX(0.5 + (side === 'left' ? -0.05 : 0.05)) };
+      return { ...figure, x: clampX(0.5 + (side === 'left' ? -0.05 : 0.05)), focus: 'engaged' as const };
     }
     return figure;
   });
@@ -643,7 +688,7 @@ function resolveThrowInPlan(
   const inward = side === 'left' ? 1 : -1;
   const lean = THROW_IN_BLOCK_LEAN * (side === 'left' ? -1 : 1);
 
-  const { possession, defending } = placeFormations(team, opponent, direction, p);
+  const { possession, defending } = placeFormations(team, opponent, direction, p, scene.playerCounts);
 
   // Both blocks lean toward the touchline the ball went out on.
   for (const figure of [...possession, ...defending]) {
@@ -658,6 +703,7 @@ function resolveThrowInPlan(
     y: lineY,
     pose: 'wall_stance',
     facing: side === 'left' ? 'right' : 'left',
+    focus: 'engaged',
   });
 
   const options = nearestOutfield(
@@ -669,6 +715,7 @@ function resolveThrowInPlan(
     override(possession, figure.key, {
       x: clampX(lineX + inward * (0.09 + index * 0.06)),
       y: clampY(lineY + (index === 0 ? -0.045 : 0.05)),
+      focus: 'engaged',
     });
   });
 
@@ -677,6 +724,7 @@ function resolveThrowInPlan(
     override(defending, marker.key, {
       x: clampX(lineX + inward * 0.12),
       y: clampY(lineY + 0.005),
+      focus: 'engaged',
     });
   }
 
@@ -710,6 +758,54 @@ function resolveThrowInPlan(
 }
 
 // ---------------------------------------------------------------------------
+// Goal-kick staging
+// ---------------------------------------------------------------------------
+
+function resolveGoalKickPlan(
+  scene: GameViewScene,
+  homeTeam: BoardTeamInfo,
+  awayTeam: BoardTeamInfo,
+  participant1Direction: BoardDirection,
+): ClusterPlan {
+  const team = teamForParticipant(scene.participant, homeTeam, awayTeam);
+  if (!team) return { kind: 'hold' };
+
+  const opponent = opponentOf(team, homeTeam, awayTeam);
+  const direction = participantDirection(scene.participant, participant1Direction) ?? participant1Direction;
+  const totalMs = stagedDurationMs(scene);
+  const { possession, defending } = placeFormations(team, opponent, direction, 0.16, scene.playerCounts);
+  const keeperKey = `p${team.participant}-gk`;
+  const keeper = possession.find((figure) => figure.key === keeperKey);
+  if (!keeper) return { kind: 'hold' };
+
+  const receiver = nearestOutfield(possession, keeper.x, keeper.y)[0];
+  override(possession, keeper.key, { pose: 'idle', focus: 'engaged' });
+  if (receiver) override(possession, receiver.key, { focus: 'engaged' });
+  const setupFigures = [...possession, ...defending];
+  const releaseFigures = setupFigures.map((figure) => (
+    figure.key === keeper.key ? { ...figure, pose: 'strike' as const } : figure
+  ));
+
+  return {
+    kind: 'staged',
+    label: 'goal_kick',
+    durationMs: totalMs,
+    teamName: team.name,
+    teamColor: team.color,
+    keyframes: [
+      { offsetMs: 0, figures: setupFigures, ball: { x: keeper.x, y: keeper.y, holderKey: keeper.key } },
+      {
+        offsetMs: Math.round(totalMs * 0.55),
+        figures: releaseFigures,
+        ball: receiver
+          ? { x: receiver.x, y: receiver.y, holderKey: receiver.key }
+          : { x: 0.5, y: direction === 'up' ? 0.75 : 0.25 },
+      },
+    ],
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Shot staging
 // ---------------------------------------------------------------------------
 
@@ -730,18 +826,20 @@ function resolveShotPlan(
   const p = ZONE_BAND_POSITION[zone] ?? ZONE_BAND_POSITION.danger;
   const shooterY = zoneBandPosition(zone, direction);
   const shooterX = clampX(0.42 + hashUnit(scene.id) * 0.16);
-  // Near or far post, deterministic per scene. The ball stops short of the
-  // goal line: the scene doesn't say saved-or-wide, only that no goal
-  // followed (a goal would be its own scene), so the staging stays
-  // ambiguous.
-  const targetX = pickSide(`${scene.id}-post`) === 'left' ? 0.43 : 0.57;
+  const outcome = scene.sourceOutcome?.toLowerCase();
+  const targetSide = pickSide(`${scene.id}-post`);
+  const targetX = outcome === 'offtarget'
+    ? targetSide === 'left' ? 0.3 : 0.7
+    : outcome === 'woodwork'
+      ? targetSide === 'left' ? 0.38 : 0.62
+      : targetSide === 'left' ? 0.43 : 0.57;
   const targetY = goalMouthY(direction) + towardGoal(direction, -0.025);
   const keeperDive: PlayerPose = targetX < 0.5 ? 'keeper_dive_left' : 'keeper_dive_right';
 
-  const { possession, defending } = placeFormations(team, opponent, direction, p);
+  const { possession, defending } = placeFormations(team, opponent, direction, p, scene.playerCounts);
 
   const shooter = nearestOutfield(possession, shooterX, shooterY)[0]!;
-  override(possession, shooter.key, { x: shooterX, y: clampY(shooterY) });
+  override(possession, shooter.key, { x: shooterX, y: clampY(shooterY), focus: 'engaged' });
 
   const closer = nearestOutfield(defending, shooterX, shooterY)[0];
   if (closer) {
@@ -749,6 +847,7 @@ function resolveShotPlan(
       x: clampX(shooterX - 0.06),
       y: clampY(shooterY + towardGoal(direction, 0.06)),
       pose: 'run_a',
+      focus: 'engaged',
     });
   }
 
@@ -757,7 +856,9 @@ function resolveShotPlan(
 
   const strikeFigures = setupFigures.map((figure) => {
     if (figure.key === shooter.key) return { ...figure, pose: 'strike' as const };
-    if (figure.key === keeperKey) return { ...figure, pose: keeperDive, x: clampX(targetX) };
+    if (figure.key === keeperKey && outcome !== 'offtarget' && outcome !== 'blocked') {
+      return { ...figure, pose: keeperDive, x: clampX(targetX), focus: 'engaged' as const };
+    }
     return figure;
   });
 
@@ -768,14 +869,34 @@ function resolveShotPlan(
 
   return {
     kind: 'staged',
-    label: 'shot',
+    label: outcome === 'ontarget'
+      ? 'shot_on_target'
+      : outcome === 'offtarget'
+        ? 'shot_off_target'
+        : outcome === 'blocked'
+          ? 'shot_blocked'
+          : outcome === 'woodwork'
+            ? 'shot_woodwork'
+            : 'shot',
     durationMs: totalMs,
     teamName: team.name,
     teamColor: team.color,
     keyframes: [
       { offsetMs: 0, figures: setupFigures, ball: { x: shooterX, y: clampY(shooterY), holderKey: shooter.key } },
-      { offsetMs: Math.round(totalMs * 0.4), figures: strikeFigures, ball: { x: clampX(targetX), y: clampY(targetY) } },
-      { offsetMs: Math.round(totalMs * 0.78), figures: settleFigures, ball: { x: clampX(targetX + jitter(`${scene.id}-parry`, 0.06)), y: clampY(targetY + towardGoal(direction, -0.03)) } },
+      {
+        offsetMs: Math.round(totalMs * 0.4),
+        figures: strikeFigures,
+        ball: outcome === 'blocked' && closer
+          ? { x: closer.x, y: closer.y }
+          : { x: clampX(targetX), y: clampY(targetY) },
+      },
+      {
+        offsetMs: Math.round(totalMs * 0.78),
+        figures: settleFigures,
+        ball: outcome === 'blocked' && closer
+          ? { x: clampX(closer.x + jitter(`${scene.id}-block`, 0.04)), y: clampY(closer.y + towardGoal(direction, -0.02)) }
+          : { x: clampX(targetX + jitter(`${scene.id}-settle`, 0.04)), y: clampY(targetY + towardGoal(direction, -0.03)) },
+      },
     ],
   };
 }
@@ -812,7 +933,7 @@ function resolveGoalCelebrationPlan(
 
   // The goal just went in at the attacked end: scoring block is fully up,
   // beaten side camped deep.
-  const { possession, defending } = placeFormations(team, opponent, direction, 0.94);
+  const { possession, defending } = placeFormations(team, opponent, direction, 0.94, scene.playerCounts);
 
   const celebrants = nearestOutfield(possession, 0.5, goalY).slice(0, 3);
   const startFigures = [...possession, ...defending].map((figure) => {
@@ -823,6 +944,7 @@ function resolveGoalCelebrationPlan(
       x: clampX(0.5 + (rank - 1) * 0.13),
       y: clampY(goalY + towardGoal(direction, -(0.07 + rank * 0.03))),
       pose: rank === 0 ? 'celebrate' as const : 'run_a' as const,
+      focus: 'engaged' as const,
     };
   });
 
@@ -877,14 +999,15 @@ function resolveKickoffPlan(
   awayTeam: BoardTeamInfo,
   participant1Direction: BoardDirection,
   durationMs: number,
+  playerCounts?: GameViewScene['playerCounts'],
 ): ClusterPlan {
   const kickoffWindow = { back: 0.08, front: 0.44 };
   const homeDirection = participantDirection(homeTeam.participant, participant1Direction) ?? participant1Direction;
   const awayDirection: BoardDirection = homeDirection === 'up' ? 'down' : 'up';
 
   const figures = [
-    ...placeTeam(homeTeam, homeDirection, kickoffWindow),
-    ...placeTeam(awayTeam, awayDirection, kickoffWindow),
+    ...placeTeam(homeTeam, homeDirection, kickoffWindow, countForParticipant(playerCounts, homeTeam.participant)),
+    ...placeTeam(awayTeam, awayDirection, kickoffWindow, countForParticipant(playerCounts, awayTeam.participant)),
   ];
 
   return {
@@ -939,6 +1062,7 @@ function resolveWalkOffPlan(
   homeTeam: BoardTeamInfo,
   awayTeam: BoardTeamInfo,
   durationMs: number,
+  playerCounts?: GameViewScene['playerCounts'],
 ): ClusterPlan {
   const figures: ClusterFigure[] = [];
 
@@ -946,13 +1070,22 @@ function resolveWalkOffPlan(
     const isHome = team.participant === homeTeam.participant;
     const benchX = isHome ? 0.075 : 0.925;
     const inward = isHome ? 1 : -1;
-    const slots = formationForParticipant(team.participant);
+    const slots = formationForParticipant(team.participant).slice(
+      0,
+      countForParticipant(playerCounts, team.participant),
+    );
     slots.forEach((slot, index) => {
+      const role: ClusterRole = slot.key === 'gk'
+        ? 'keeper'
+        : /^(lb|rb|cb)/.test(slot.key) ? 'defender' : 'attacker';
+      const kit = role === 'keeper' ? team.kit?.keeper : team.kit?.outfield;
       figures.push({
         key: `p${team.participant}-${slot.key}`,
-        role: slot.key === 'gk' ? 'keeper' : 'attacker',
+        role,
         participant: team.participant,
-        color: team.color,
+        color: kit?.shirt ?? team.color,
+        ...(kit ? { shirtColor: kit.shirt, shortsColor: kit.shorts, trimColor: kit.trim } : {}),
+        focus: 'engaged',
         x: clampX(benchX + (index % 2) * 0.035 * inward),
         y: clampY(0.36 + Math.floor(index / 2) * 0.045),
         pose: 'idle',
@@ -978,10 +1111,10 @@ function resolvePhaseBreakPlan(
   participant1Direction: BoardDirection,
 ): ClusterPlan {
   if (scene.phase && ASSEMBLE_PHASES.has(scene.phase)) {
-    return resolveKickoffPlan(homeTeam, awayTeam, participant1Direction, stagedDurationMs(scene));
+    return resolveKickoffPlan(homeTeam, awayTeam, participant1Direction, stagedDurationMs(scene), scene.playerCounts);
   }
   if (scene.phase && WALK_OFF_PHASES.has(scene.phase)) {
-    return resolveWalkOffPlan(homeTeam, awayTeam, stagedDurationMs(scene));
+    return resolveWalkOffPlan(homeTeam, awayTeam, stagedDurationMs(scene), scene.playerCounts);
   }
   return { kind: 'hold' };
 }
@@ -1022,6 +1155,9 @@ export function resolveClusterPlan(
       if (scene.sourceAction === 'throw_in') {
         return resolveThrowInPlan(scene, homeTeam, awayTeam, participant1Direction);
       }
+      if (scene.sourceAction === 'goal_kick') {
+        return resolveGoalKickPlan(scene, homeTeam, awayTeam, participant1Direction);
+      }
       return { kind: 'hold' };
     case 'shot':
       return resolveShotPlan(scene, homeTeam, awayTeam, participant1Direction);
@@ -1038,6 +1174,7 @@ export function resolveClusterPlan(
         awayTeam,
         participant1Direction,
         stagedDurationMs(scene),
+        scene.playerCounts,
       );
     case 'phase_break':
       // The break IS the picture: assemble for a kickoff, walk off to the
@@ -1050,18 +1187,27 @@ export function resolveClusterPlan(
   }
 }
 
-/** Returns a complete 22-figure frame only for plans that actually stage the pitch. */
+/** Returns a complete source-count frame only for plans that actually stage both sides. */
 function frameFromStageablePlan(plan: ClusterPlan): StagedKeyframe | undefined {
   if (plan.kind === 'ambient') {
-    if (plan.figures.length !== 22) return undefined;
+    if (!hasBothTeamsAndKeepers(plan.figures)) return undefined;
     return { offsetMs: 0, figures: plan.figures, ball: plan.ball };
   }
   if (plan.kind === 'staged') {
     const frame = plan.keyframes[plan.keyframes.length - 1];
-    if (!frame || frame.figures.length !== 22) return undefined;
+    if (!frame || !hasBothTeamsAndKeepers(frame.figures)) return undefined;
     return frame;
   }
   return undefined;
+}
+
+function hasBothTeamsAndKeepers(figures: readonly ClusterFigure[]): boolean {
+  const participant1 = figures.filter((figure) => figure.participant === 1);
+  const participant2 = figures.filter((figure) => figure.participant === 2);
+  return participant1.length >= 7
+    && participant2.length >= 7
+    && participant1.some((figure) => figure.role === 'keeper')
+    && participant2.some((figure) => figure.role === 'keeper');
 }
 
 /**
@@ -1141,8 +1287,18 @@ export function resolveHoldBootstrapPlan(
   return {
     source: 'neutral',
     figures: [
-      ...placeTeam(homeTeam, homeDirection, neutralWindow),
-      ...placeTeam(awayTeam, awayDirection, neutralWindow),
+      ...placeTeam(
+        homeTeam,
+        homeDirection,
+        neutralWindow,
+        countForParticipant(seedScene?.playerCounts, homeTeam.participant),
+      ),
+      ...placeTeam(
+        awayTeam,
+        awayDirection,
+        neutralWindow,
+        countForParticipant(seedScene?.playerCounts, awayTeam.participant),
+      ),
     ],
     ball: { x: 0.5, y: 0.5, visible: false },
   };

@@ -25,6 +25,7 @@ export function mapTxlineFixtureToGameCrewMatch(
       fixtureId: String(fixture.FixtureId),
       scoreSnapshotId: getScoreId(latestStats),
       source: 'live',
+      participant1IsHome: fixture.Participant1IsHome,
     },
     filter,
     status,

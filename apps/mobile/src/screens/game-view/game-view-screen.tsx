@@ -32,12 +32,13 @@ import {
   mapSourceActionToCardVariant,
   mapSourceActionToSetPieceVariant,
   resolveGameViewLoadState,
+  resolveMatchParticipants,
   resolvePresentationScene,
   resolveScoreRailScore,
   selectPlaybackModeForMatchStatus,
   shouldSetPieceUseFullVignette,
 } from './game-view-screen-logic';
-import { DEFAULT_AWAY_COLOR, DEFAULT_HOME_COLOR, getTeamColor } from './game-view-team-colors';
+import { resolveGameViewTeamKits } from './game-view-team-kits';
 import { useGameViewSoundscape } from './use-game-view-soundscape';
 
 export type { GameViewPresentationState } from './game-view-screen-logic';
@@ -117,22 +118,35 @@ export function GameViewScreen({
     snapshot.timeline.length,
   ]);
 
+  const participants = useMemo(
+    () => resolveMatchParticipants(match.txline.participant1IsHome),
+    [match.txline.participant1IsHome],
+  );
+  const teamKits = useMemo(
+    () => resolveGameViewTeamKits(
+      { ...match.homeTeam, flagBands: match.homeTeam.flag.bands },
+      { ...match.awayTeam, flagBands: match.awayTeam.flag.bands },
+    ),
+    [match.awayTeam, match.homeTeam],
+  );
   const homeTeam = useMemo(
     () => ({
       name: match.homeTeam.name,
-      color: getTeamColor(match.homeTeam.flag.bands, DEFAULT_HOME_COLOR),
-      participant: 1 as const,
+      color: teamKits.home.outfield.shirt,
+      participant: participants.home,
+      kit: teamKits.home,
     }),
-    [match.homeTeam.flag.bands, match.homeTeam.name],
+    [match.homeTeam.name, participants.home, teamKits.home],
   );
 
   const awayTeam = useMemo(
     () => ({
       name: match.awayTeam.name,
-      color: getTeamColor(match.awayTeam.flag.bands, DEFAULT_AWAY_COLOR, homeTeam.color),
-      participant: 2 as const,
+      color: teamKits.away.outfield.shirt,
+      participant: participants.away,
+      kit: teamKits.away,
     }),
-    [homeTeam.color, match.awayTeam.flag.bands, match.awayTeam.name],
+    [match.awayTeam.name, participants.away, teamKits.away],
   );
 
   const currentScene = snapshot.currentScene;
@@ -226,11 +240,11 @@ export function GameViewScreen({
       clockLabel: formatClockLabel(currentScene.clockSeconds),
       phaseLabel: formatPhaseLabel(currentScene.phase, isLive),
       score: {
-        home: railScore?.participant1 ?? 0,
-        away: railScore?.participant2 ?? 0,
+        home: participants.home === 1 ? railScore?.participant1 ?? 0 : railScore?.participant2 ?? 0,
+        away: participants.away === 1 ? railScore?.participant1 ?? 0 : railScore?.participant2 ?? 0,
       },
     });
-  }, [activeBeatIndex, currentScene, isLive, onPresentationChange, previousScoreRef]);
+  }, [activeBeatIndex, currentScene, isLive, onPresentationChange, participants, previousScoreRef]);
 
   useEffect(() => () => onPresentationChange?.(null), [onPresentationChange]);
 

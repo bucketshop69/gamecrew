@@ -36,7 +36,7 @@ export function resolveGameViewSoundPlan(
       return resolveSetPieceSoundPlan(scene.sourceAction);
 
     case 'shot':
-      return soundPlan('danger', ['ball_strike', 'crowd_swell']);
+      return resolveShotSoundPlan(scene.sourceOutcome);
 
     case 'goal_sequence':
       if (goalBeat === 'celebration') {
@@ -60,7 +60,13 @@ export function resolveGameViewSoundPlan(
       return soundPlan('quiet');
 
     case 'substitution':
-      return soundPlan('quiet');
+      return soundPlan('building');
+
+    case 'injury':
+      return soundPlan('quiet', ['referee_whistle']);
+
+    case 'additional_time':
+      return soundPlan('building');
   }
 }
 
@@ -131,12 +137,21 @@ function resolveSetPieceSoundPlan(sourceAction: string | undefined): GameViewSou
       return soundPlan('danger', ['referee_whistle', 'crowd_swell']);
     case 'throw_in':
       return soundPlan('building');
+    case 'goal_kick':
+      return soundPlan('building', ['ball_strike']);
     default:
       // An unknown set-piece label is not permission to guess a whistle or
       // kick. It still lifts the bed slightly because the scene itself is a
       // grounded stoppage near the action.
       return soundPlan('building');
   }
+}
+
+function resolveShotSoundPlan(sourceOutcome: string | undefined): GameViewSoundPlan {
+  if (sourceOutcome?.toLowerCase() === 'blocked') {
+    return soundPlan('danger', ['ball_strike']);
+  }
+  return soundPlan('danger', ['ball_strike', 'crowd_swell']);
 }
 
 function soundPlan(

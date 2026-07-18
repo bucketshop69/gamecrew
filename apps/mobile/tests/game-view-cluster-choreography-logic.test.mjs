@@ -135,6 +135,32 @@ test('ambient: figure colors follow their team', () => {
   }
 });
 
+test('ambient: engaged players are foregrounded while both formation blocks recede', () => {
+  const plan = resolveClusterPlan(scene({ zone: 'danger', pressure: 'danger' }), HOME, AWAY, 'up');
+  assert.equal(plan.kind, 'ambient');
+  const focused = plan.figures.filter((figure) => figure.focus === 'engaged');
+  const formation = plan.figures.filter((figure) => figure.focus === 'formation');
+
+  assert.ok(focused.length >= 4 && focused.length <= 5, `expected a readable action knot, got ${focused.length}`);
+  assert.equal(focused.filter((figure) => figure.participant === 1).length, 3);
+  assert.equal(focused.filter((figure) => figure.participant === 2).length, 1);
+  assert.equal(focused.length + formation.length, plan.figures.length);
+});
+
+test('ambient: a post-red-card scene stages ten against eleven instead of restoring 22', () => {
+  const plan = resolveClusterPlan(scene({
+    participant: 2,
+    playerCounts: { participant1: 11, participant2: 10 },
+  }), HOME, AWAY, 'up');
+
+  assert.equal(plan.kind, 'ambient');
+  assert.equal(countByParticipant(plan.figures, 1), 11);
+  assert.equal(countByParticipant(plan.figures, 2), 10);
+  assert.equal(plan.figures.length, 21);
+  assert.ok(keeperOf(plan.figures, 1));
+  assert.ok(keeperOf(plan.figures, 2));
+});
+
 test('depth windows: possession block pushes up with progress, defending block sits goal-side', () => {
   // Monotonic: deeper progress -> both windows shift toward the attacked goal.
   assert.ok(possessionWindow(0.94).front > possessionWindow(0.16).front);
@@ -336,6 +362,38 @@ test('shot: strike toward the goal mouth, keeper dives, ball never crosses the l
   const shooter = strike.figures.find((figure) => figure.key === plan.keyframes[0].ball.holderKey);
   assert.equal(shooter.pose, 'strike');
   assert.equal(shooter.participant, 1);
+});
+
+test('shot outcomes stage distinct save, miss, block, and woodwork pictures', () => {
+  const onTarget = resolveClusterPlan(scene({ kind: 'shot', sourceOutcome: 'OnTarget' }), HOME, AWAY, 'up');
+  const offTarget = resolveClusterPlan(scene({ kind: 'shot', sourceOutcome: 'OffTarget' }), HOME, AWAY, 'up');
+  const blocked = resolveClusterPlan(scene({ kind: 'shot', sourceOutcome: 'Blocked' }), HOME, AWAY, 'up');
+  const woodwork = resolveClusterPlan(scene({ kind: 'shot', sourceOutcome: 'Woodwork' }), HOME, AWAY, 'up');
+
+  assert.equal(onTarget.label, 'shot_on_target');
+  assert.equal(offTarget.label, 'shot_off_target');
+  assert.equal(blocked.label, 'shot_blocked');
+  assert.equal(woodwork.label, 'shot_woodwork');
+
+  const offTargetKeeper = keeperOf(offTarget.keyframes[1].figures, 2);
+  const blockedKeeper = keeperOf(blocked.keyframes[1].figures, 2);
+  assert.equal(offTargetKeeper.pose, 'idle', 'a miss must not be illustrated as a save');
+  assert.equal(blockedKeeper.pose, 'idle', 'a block must happen before the keeper');
+  assert.ok(
+    offTarget.keyframes[1].ball.x < 0.38 || offTarget.keyframes[1].ball.x > 0.62,
+    'a miss finishes outside the goal mouth',
+  );
+});
+
+test('goal kick: keeper restarts from the six-yard area to a grounded teammate', () => {
+  const plan = resolveClusterPlan(scene({ kind: 'set_piece', sourceAction: 'goal_kick', participant: 2, zone: 'safe' }), HOME, AWAY, 'up');
+  assert.equal(plan.kind, 'staged');
+  assert.equal(plan.label, 'goal_kick');
+  const setup = plan.keyframes[0];
+  const release = plan.keyframes[1];
+  assert.equal(setup.ball.holderKey, 'p2-gk');
+  assert.ok(release.ball.holderKey?.startsWith('p2-'));
+  assert.notEqual(release.ball.holderKey, setup.ball.holderKey);
 });
 
 // ---------------------------------------------------------------------------

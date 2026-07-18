@@ -4,6 +4,8 @@ import type {
   MatchEngineParticipant,
 } from '@gamecrew/core';
 
+import type { GameViewTeamKit } from './game-view-team-kits';
+
 /**
  * Pure logic for the Game View ambient board renderer (work item B1 of
  * docs/issues/game-view-board-and-presentation.md). Extracted from the
@@ -225,6 +227,7 @@ export interface BoardTeamInfo {
   name: string;
   color: string;
   participant: MatchEngineParticipant;
+  kit?: GameViewTeamKit;
 }
 
 export interface BoardPresenceState {

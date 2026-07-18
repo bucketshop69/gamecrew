@@ -327,6 +327,8 @@ export interface TxlineFixtureReference {
   scoreSnapshotId?: string;
   historicalSnapshotId?: string;
   source?: 'live' | 'sample';
+  /** TxLINE's explicit participant-to-side mapping; clients must not guess it. */
+  participant1IsHome?: boolean;
 }
 
 export interface GameCrewMatch {

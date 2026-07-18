@@ -71,6 +71,36 @@ test('shot, referee, and restart scenes receive restrained grounded effects', ()
   ]);
 });
 
+test('shot reactions follow the source outcome instead of treating every attempt as a save', () => {
+  assert.deepEqual(resolveGameViewSoundPlan(scene({ kind: 'shot', sourceOutcome: 'Blocked' }), undefined), {
+    ambientLevel: 'danger',
+    effects: ['ball_strike'],
+  });
+  assert.deepEqual(resolveGameViewSoundPlan(scene({ kind: 'shot', sourceOutcome: 'OffTarget' }), undefined), {
+    ambientLevel: 'danger',
+    effects: ['ball_strike', 'crowd_swell'],
+  });
+  assert.deepEqual(resolveGameViewSoundPlan(scene({ kind: 'shot', sourceOutcome: 'Woodwork' }), undefined), {
+    ambientLevel: 'danger',
+    effects: ['ball_strike', 'crowd_swell'],
+  });
+});
+
+test('injury and added-time moments stay restrained while substitutions lift the bed', () => {
+  assert.deepEqual(resolveGameViewSoundPlan(scene({ kind: 'injury' }), undefined), {
+    ambientLevel: 'quiet',
+    effects: ['referee_whistle'],
+  });
+  assert.deepEqual(resolveGameViewSoundPlan(scene({ kind: 'additional_time' }), undefined), {
+    ambientLevel: 'building',
+    effects: [],
+  });
+  assert.deepEqual(resolveGameViewSoundPlan(scene({ kind: 'substitution' }), undefined), {
+    ambientLevel: 'building',
+    effects: [],
+  });
+});
+
 test('goal sound advances from tension swell to one confirmation roar', () => {
   const goal = scene({ kind: 'goal_sequence' });
   const tension = resolveGameViewSoundPlan(goal, 'tension');

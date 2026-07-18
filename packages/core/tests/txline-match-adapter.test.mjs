@@ -107,6 +107,8 @@ test('live adapter lists the complete TxLINE lookback and reuses only archival s
     assert.equal(first[0].status, 'replayable');
     assert.deepEqual(first[0].score, { home: 2, away: 1 });
     assert.deepEqual(first[1].score, { home: 1, away: 3 });
+    assert.equal(first[0].txline.participant1IsHome, true);
+    assert.equal(first[1].txline.participant1IsHome, false, 'the client must not have to guess participant-to-home mapping');
     assert.equal(first[2].status, 'live');
     assert.equal(second[2].status, 'replayable');
   } finally {

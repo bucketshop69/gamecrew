@@ -23,9 +23,11 @@ export type {
   GameViewGoalBeat,
   GameViewGoalBeatKind,
   GameViewPlaybackTiming,
+  GameViewPlayerCounts,
   GameViewReplayPacingOptions,
   GameViewScene,
   GameViewSceneKind,
+  GameViewSubstitutionDetail,
   GameViewTimelineOptions,
   GameViewZone,
 } from './game-view';

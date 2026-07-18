@@ -184,6 +184,9 @@ const TAKEOVER_SCENE_KINDS: ReadonlySet<GameViewSceneKind> = new Set([
   'goal_retracted',
   'phase_break',
   'restart',
+  'substitution',
+  'injury',
+  'additional_time',
 ]);
 
 /** Whether a scene kind should render as a takeover (dispatcher + overlay slot) rather than the ambient board alone. */
@@ -227,7 +230,14 @@ export function shouldTakeoverOnCompleteAdvancePlayback(_mode: PlaybackMode): fa
 // ---------------------------------------------------------------------------
 
 export type ScreenCardVariant = 'yellow' | 'red';
-export type ScreenSetPieceVariant = 'corner' | 'free_kick' | 'throw_in' | 'penalty';
+export type ScreenSetPieceVariant = 'corner' | 'free_kick' | 'throw_in' | 'penalty' | 'goal_kick';
+
+/** Uses TxLINE's explicit side mapping, with participant 1 as the legacy-safe fallback. */
+export function resolveMatchParticipants(
+  participant1IsHome: boolean | undefined,
+): { home: 1 | 2; away: 1 | 2 } {
+  return participant1IsHome === false ? { home: 2, away: 1 } : { home: 1, away: 2 };
+}
 
 /**
  * Maps a `card` scene's raw `sourceAction` (copied verbatim from the source
@@ -258,6 +268,7 @@ export function mapSourceActionToSetPieceVariant(
     case 'free_kick':
     case 'throw_in':
     case 'penalty':
+    case 'goal_kick':
       return sourceAction;
     default:
       return undefined;

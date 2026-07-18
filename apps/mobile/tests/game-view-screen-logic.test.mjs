@@ -6,6 +6,7 @@ import {
   isTakeoverSceneKind,
   mapSourceActionToCardVariant,
   mapSourceActionToSetPieceVariant,
+  resolveMatchParticipants,
   resolveGameViewLoadState,
   resolvePresentationScene,
   resolveScoreRailScore,
@@ -141,6 +142,9 @@ test('isTakeoverSceneKind: true for every scene kind the takeover dispatcher ren
     'goal_retracted',
     'phase_break',
     'restart',
+    'substitution',
+    'injury',
+    'additional_time',
   ]) {
     assert.equal(isTakeoverSceneKind(kind), true, `expected ${kind} to be a takeover kind`);
   }
@@ -149,7 +153,6 @@ test('isTakeoverSceneKind: true for every scene kind the takeover dispatcher ren
 test('isTakeoverSceneKind: false for ambient board scene kinds and undefined', () => {
   assert.equal(isTakeoverSceneKind('ambient'), false);
   assert.equal(isTakeoverSceneKind('shot'), false);
-  assert.equal(isTakeoverSceneKind('substitution'), false);
   assert.equal(isTakeoverSceneKind(undefined), false);
 });
 
@@ -181,11 +184,18 @@ test('mapSourceActionToSetPieceVariant maps every known set-piece action', () =>
   assert.equal(mapSourceActionToSetPieceVariant('free_kick'), 'free_kick');
   assert.equal(mapSourceActionToSetPieceVariant('throw_in'), 'throw_in');
   assert.equal(mapSourceActionToSetPieceVariant('penalty'), 'penalty');
+  assert.equal(mapSourceActionToSetPieceVariant('goal_kick'), 'goal_kick');
 });
 
 test('mapSourceActionToSetPieceVariant returns undefined for unrecognized or missing sourceAction', () => {
   assert.equal(mapSourceActionToSetPieceVariant(undefined), undefined);
-  assert.equal(mapSourceActionToSetPieceVariant('goal_kick'), undefined);
+  assert.equal(mapSourceActionToSetPieceVariant('mystery'), undefined);
+});
+
+test('resolveMatchParticipants follows TxLINE home mapping and keeps the legacy fallback', () => {
+  assert.deepEqual(resolveMatchParticipants(true), { home: 1, away: 2 });
+  assert.deepEqual(resolveMatchParticipants(false), { home: 2, away: 1 });
+  assert.deepEqual(resolveMatchParticipants(undefined), { home: 1, away: 2 });
 });
 
 // ---------------------------------------------------------------------------

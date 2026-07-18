@@ -1,5 +1,5 @@
-import { useEffect, useRef } from 'react';
-import { Animated, Easing, StyleSheet, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { StyleSheet, View } from 'react-native';
 
 import {
   mirrorLimbTransform,
@@ -34,6 +34,9 @@ export interface GameViewStickPlayerProps {
   mirrored?: boolean;
   animateRunCycle?: boolean;
   reduceMotion?: boolean;
+  shirtColor?: string;
+  shortsColor?: string;
+  trimColor?: string;
 }
 
 const RUN_CYCLE_FRAME_MS = 220;
@@ -45,8 +48,11 @@ export function GameViewStickPlayer({
   mirrored,
   pose,
   reduceMotion = false,
+  shirtColor,
+  shortsColor,
   size,
   teamColor,
+  trimColor,
 }: GameViewStickPlayerProps) {
   const width = size * STICK_WIDTH_RATIO;
   const isRunPose = pose === 'run_a' || pose === 'run_b';
@@ -104,31 +110,37 @@ export function GameViewStickPlayer({
         ]}
       >
         <StickFigureLayer
-          color={FIGURE_KEYLINE_COLOR}
+          armColor={FIGURE_KEYLINE_COLOR}
+          headColor={FIGURE_KEYLINE_COLOR}
           headSize={headSize + keylineDelta}
           headSizeDelta={keylineDelta}
           leftArm={leftArm}
           leftLeg={leftLeg}
+          legColor={FIGURE_KEYLINE_COLOR}
           limbLength={limbLength}
           lineThickness={lineThickness + keylineDelta}
           rightArm={rightArm}
           rightLeg={rightLeg}
           size={size}
           torsoLength={torsoLength}
+          torsoColor={FIGURE_KEYLINE_COLOR}
           width={width}
         />
         <StickFigureLayer
-          color={teamColor}
+          armColor={shirtColor ?? teamColor}
+          headColor={trimColor ?? shirtColor ?? teamColor}
           headSize={headSize}
           headSizeDelta={0}
           leftArm={leftArm}
           leftLeg={leftLeg}
+          legColor={shortsColor ?? teamColor}
           limbLength={limbLength}
           lineThickness={lineThickness}
           rightArm={rightArm}
           rightLeg={rightLeg}
           size={size}
           torsoLength={torsoLength}
+          torsoColor={shirtColor ?? teamColor}
           width={width}
         />
       </View>
@@ -142,37 +154,43 @@ export function GameViewStickPlayer({
  * relying on shadow APIs that render differently on Android and web.
  */
 function StickFigureLayer({
-  color,
+  armColor,
+  headColor,
   headSize,
   headSizeDelta,
   leftArm,
   leftLeg,
+  legColor,
   limbLength,
   lineThickness,
   rightArm,
   rightLeg,
   size,
   torsoLength,
+  torsoColor,
   width,
 }: {
-  color: string;
+  armColor: string;
+  headColor: string;
   headSize: number;
   headSizeDelta: number;
   leftArm: LimbTransform;
   leftLeg: LimbTransform;
+  legColor: string;
   limbLength: number;
   lineThickness: number;
   rightArm: LimbTransform;
   rightLeg: LimbTransform;
   size: number;
   torsoLength: number;
+  torsoColor: string;
   width: number;
 }) {
   return (
     <View style={[styles.figureLayer, { height: size, width }]}>
       <View
         style={{
-          backgroundColor: color,
+          backgroundColor: headColor,
           borderRadius: headSize / 2,
           height: headSize,
           width: headSize,
@@ -180,18 +198,18 @@ function StickFigureLayer({
       />
       <View
         style={{
-          backgroundColor: color,
+          backgroundColor: torsoColor,
           height: torsoLength,
           marginTop: -1 - headSizeDelta,
           width: lineThickness,
         }}
       >
-        <StickLimb color={color} length={limbLength} slot="arm" side="left" thickness={lineThickness} transform={leftArm} />
-        <StickLimb color={color} length={limbLength} slot="arm" side="right" thickness={lineThickness} transform={rightArm} />
+        <StickLimb color={armColor} length={limbLength} slot="arm" side="left" thickness={lineThickness} transform={leftArm} />
+        <StickLimb color={armColor} length={limbLength} slot="arm" side="right" thickness={lineThickness} transform={rightArm} />
       </View>
       <View style={styles.legRow}>
-        <StickLimb color={color} length={limbLength} slot="leg" side="left" thickness={lineThickness} transform={leftLeg} />
-        <StickLimb color={color} length={limbLength} slot="leg" side="right" thickness={lineThickness} transform={rightLeg} />
+        <StickLimb color={legColor} length={limbLength} slot="leg" side="left" thickness={lineThickness} transform={leftLeg} />
+        <StickLimb color={legColor} length={limbLength} slot="leg" side="right" thickness={lineThickness} transform={rightLeg} />
       </View>
     </View>
   );
@@ -245,37 +263,19 @@ function StickLimb({
 
 /** Same two-frame run alternation as GameViewPlayer's, kept private to avoid coupling the two figure styles. */
 function useStickRunFrame(enabled: boolean, fallbackPose: PlayerPose): PlayerPose {
-  const clock = useRef(new Animated.Value(0)).current;
-  const frameRef = useRef<PlayerPose>(fallbackPose);
-  const listenerFrameRef = useRef<PlayerPose>(fallbackPose);
+  const [elapsedMs, setElapsedMs] = useState(0);
 
   useEffect(() => {
-    if (!enabled) return undefined;
-
-    const listenerId = clock.addListener(({ value }) => {
-      listenerFrameRef.current = runCycleFrame(value, RUN_CYCLE_FRAME_MS);
-    });
-    const loop = Animated.loop(
-      Animated.timing(clock, {
-        duration: RUN_CYCLE_FRAME_MS * 2,
-        easing: Easing.linear,
-        isInteraction: false,
-        toValue: RUN_CYCLE_FRAME_MS * 2,
-        useNativeDriver: false,
-      }),
-    );
-    loop.start();
-
-    return () => {
-      loop.stop();
-      clock.removeListener(listenerId);
-      clock.setValue(0);
-    };
-  }, [clock, enabled]);
+    if (!enabled) {
+      setElapsedMs(0);
+      return undefined;
+    }
+    const handle = setInterval(() => setElapsedMs((value) => value + RUN_CYCLE_FRAME_MS), RUN_CYCLE_FRAME_MS);
+    return () => clearInterval(handle);
+  }, [enabled]);
 
   if (!enabled) return fallbackPose;
-  frameRef.current = listenerFrameRef.current;
-  return frameRef.current;
+  return runCycleFrame(elapsedMs, RUN_CYCLE_FRAME_MS);
 }
 
 const styles = StyleSheet.create({

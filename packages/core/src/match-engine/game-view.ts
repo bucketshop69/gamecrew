@@ -22,6 +22,8 @@ export type GameViewSceneKind =
   | 'goal_retracted'
   | 'card'
   | 'substitution'
+  | 'injury'
+  | 'additional_time'
   | 'var_review'
   | 'phase_break'
   | 'restart';
@@ -62,6 +64,17 @@ export interface GameViewDurationHint {
   maxMs: number;
 }
 
+/** Source-grounded number of active figures to stage for each participant. */
+export interface GameViewPlayerCounts {
+  participant1: number;
+  participant2: number;
+}
+
+export interface GameViewSubstitutionDetail {
+  playerInId?: number | string;
+  playerOutId?: number | string;
+}
+
 export interface GameViewScene {
   id: string;
   fixtureId: number | string;
@@ -87,6 +100,16 @@ export interface GameViewScene {
    * Copied verbatim from the cue value; absent when the source omits it.
    */
   sourceAction?: string;
+  /** Verbatim source classification such as StraightRed or Penalty. */
+  sourceType?: string;
+  /** Verbatim source result such as OnTarget, Blocked, Stands, or NotReturning. */
+  sourceOutcome?: string;
+  /** Source player identifiers for a substitution; names are never inferred. */
+  substitution?: GameViewSubstitutionDetail;
+  /** Announced added minutes when the source provides them. */
+  additionalTimeMinutes?: number;
+  /** Persistent active-player counts after all confirmed dismissals so far. */
+  playerCounts?: GameViewPlayerCounts;
   /** Only present on goal_sequence scenes. See `GameViewGoalBeatKind` doc. */
   beats?: readonly GameViewGoalBeat[];
   /** Only present on goal_sequence celebration takeovers. */
@@ -169,7 +192,7 @@ const REPLAY_AMBIENT_BUCKET_SECONDS = 120;
 /** Scene kinds that a replay summary never drops. */
 const REPLAY_PROTECTED_KINDS: ReadonlySet<GameViewSceneKind> = new Set([
   'goal_sequence', 'goal_retracted', 'card', 'var_review', 'substitution',
-  'phase_break', 'shot', 'restart',
+  'injury', 'additional_time', 'phase_break', 'shot', 'restart',
 ]);
 /** Default "real pace" ambient playback rate: 1 match-minute per 1.5 playback-seconds. */
 export const DEFAULT_REPLAY_MS_PER_MATCH_SECOND = 25;
@@ -203,6 +226,8 @@ const DEFAULT_DURATION: Record<GameViewSceneKind, GameViewDurationHint> = {
   goal_retracted: { minMs: 4000, maxMs: 8000 },
   card: { minMs: 4000, maxMs: 6000 },
   substitution: { minMs: 3000, maxMs: 5000 },
+  injury: { minMs: 3000, maxMs: 5000 },
+  additional_time: { minMs: 2500, maxMs: 4000 },
   var_review: { minMs: 4000, maxMs: 8000 },
   phase_break: { minMs: 4000, maxMs: 8000 },
   restart: { minMs: 2000, maxMs: 4000 },
@@ -219,6 +244,8 @@ const TAKEOVER_PRIORITY: Record<Exclude<GameViewSceneKind, 'ambient'>, number> =
   var_review: 90,
   card: 80, // red vs yellow severity is applied within this tier, see cardPriority().
   substitution: 60,
+  injury: 59,
+  additional_time: 31,
   set_piece: 50,
   shot: 40,
   phase_break: 30,
@@ -271,6 +298,7 @@ interface AmbientAccumulator {
   scoreAtMoment?: MatchEngineScore;
   clockSeconds?: number;
   phase?: MatchEnginePhase;
+  playerCounts: GameViewPlayerCounts;
 }
 
 function freezeAmbient(accumulator: AmbientAccumulator): GameViewScene {
@@ -293,6 +321,7 @@ function freezeAmbient(accumulator: AmbientAccumulator): GameViewScene {
     scoreAtMoment: accumulator.scoreAtMoment,
     clockSeconds: accumulator.clockSeconds,
     phase: accumulator.phase,
+    playerCounts: { ...accumulator.playerCounts },
     durationHint: DEFAULT_DURATION.ambient,
   };
 }
@@ -323,6 +352,8 @@ interface DirectorState {
    * can stage the dead ball where play actually was instead of guessing.
    */
   lastZone?: GameViewZone;
+  playerCounts: GameViewPlayerCounts;
+  confirmedDismissals: Map<string, MatchEngineParticipant>;
 }
 
 /**
@@ -361,6 +392,41 @@ function scoreValue(cue: SimulationCue | undefined): MatchEngineScore | undefine
   const value = cue?.value as { participant1?: unknown; participant2?: unknown } | undefined;
   if (typeof value?.participant1 !== 'number' || typeof value?.participant2 !== 'number') return undefined;
   return { participant1: value.participant1, participant2: value.participant2 };
+}
+
+function sourceString(value: Record<string, unknown>, key: string): string | undefined {
+  const candidate = value[key];
+  return typeof candidate === 'string' && candidate.length > 0 ? candidate : undefined;
+}
+
+function sourceId(value: Record<string, unknown>, key: string): number | string | undefined {
+  const candidate = value[key];
+  return typeof candidate === 'number' || typeof candidate === 'string' ? candidate : undefined;
+}
+
+function sourceMinutes(value: Record<string, unknown>): number | undefined {
+  const candidate = value.Minutes ?? value.minutes;
+  return typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 0
+    ? candidate
+    : undefined;
+}
+
+function applyConfirmedDismissal(state: DirectorState, cue: SimulationCue): void {
+  if (
+    cue.kind !== 'card'
+    || cue.lifecycle !== 'confirmed'
+    || cue.value.action !== 'red_card'
+    || state.confirmedDismissals.has(cue.id)
+  ) return;
+
+  if (cue.participant === 1) {
+    state.playerCounts.participant1 = Math.max(7, state.playerCounts.participant1 - 1);
+  } else if (cue.participant === 2) {
+    state.playerCounts.participant2 = Math.max(7, state.playerCounts.participant2 - 1);
+  } else {
+    return;
+  }
+  state.confirmedDismissals.set(cue.id, cue.participant);
 }
 
 function closeAmbient(state: DirectorState) {
@@ -413,6 +479,7 @@ function extendOrOpenAmbient(
     scoreAtMoment: state.latestScore,
     clockSeconds: frame.matchClockSeconds,
     phase: state.phase,
+    playerCounts: { ...state.playerCounts },
   };
 }
 
@@ -430,6 +497,7 @@ function baseTakeoverFields(
     scoreAtMoment: state.latestScore,
     clockSeconds: frame.matchClockSeconds,
     phase: state.phase,
+    playerCounts: { ...state.playerCounts },
   };
 }
 
@@ -464,7 +532,11 @@ function handleSetPiece(state: DirectorState, frame: SemanticFrame, cue: Simulat
 function handleShot(state: DirectorState, frame: SemanticFrame, cue: SimulationCue) {
   closeAmbient(state);
   const existing = mergeIncidentScene(state, frame, cue, 'shot');
-  if (existing) return;
+  if (existing) {
+    existing.sourceOutcome = sourceString(cue.value, 'Outcome') ?? existing.sourceOutcome;
+    existing.sourceType = sourceString(cue.value, 'Type') ?? existing.sourceType;
+    return;
+  }
   const scene: GameViewScene = {
     ...baseTakeoverFields(state, frame, [frame.id], [cue.id]),
     id: sceneId(state.fixtureId, 'shot', [frame.id], [cue.id]),
@@ -473,6 +545,8 @@ function handleShot(state: DirectorState, frame: SemanticFrame, cue: SimulationC
     teamId: cue.teamId,
     player: cue.player,
     lifecycle: cue.lifecycle,
+    sourceOutcome: sourceString(cue.value, 'Outcome'),
+    sourceType: sourceString(cue.value, 'Type'),
     durationHint: DEFAULT_DURATION.shot,
   };
   rememberIncidentScene(state, cue, scene);
@@ -481,9 +555,13 @@ function handleShot(state: DirectorState, frame: SemanticFrame, cue: SimulationC
 
 function handleCard(state: DirectorState, frame: SemanticFrame, cue: SimulationCue) {
   closeAmbient(state);
+  applyConfirmedDismissal(state, cue);
   const existing = mergeIncidentScene(state, frame, cue, 'card');
   if (existing) {
     if (typeof cue.value.action === 'string') existing.sourceAction = cue.value.action;
+    existing.sourceType = sourceString(cue.value, 'Type') ?? existing.sourceType;
+    existing.sourceOutcome = sourceString(cue.value, 'Outcome') ?? existing.sourceOutcome;
+    existing.playerCounts = { ...state.playerCounts };
     return;
   }
   const scene: GameViewScene = {
@@ -495,6 +573,8 @@ function handleCard(state: DirectorState, frame: SemanticFrame, cue: SimulationC
     player: cue.player,
     lifecycle: cue.lifecycle,
     ...(typeof cue.value.action === 'string' ? { sourceAction: cue.value.action } : {}),
+    sourceType: sourceString(cue.value, 'Type'),
+    sourceOutcome: sourceString(cue.value, 'Outcome'),
     durationHint: DEFAULT_DURATION.card,
   };
   rememberIncidentScene(state, cue, scene);
@@ -504,7 +584,15 @@ function handleCard(state: DirectorState, frame: SemanticFrame, cue: SimulationC
 function handleSubstitution(state: DirectorState, frame: SemanticFrame, cue: SimulationCue) {
   closeAmbient(state);
   const existing = mergeIncidentScene(state, frame, cue, 'substitution');
-  if (existing) return;
+  const playerInId = sourceId(cue.value, 'PlayerInId');
+  const playerOutId = sourceId(cue.value, 'PlayerOutId');
+  const substitution = playerInId !== undefined || playerOutId !== undefined
+    ? { playerInId, playerOutId }
+    : undefined;
+  if (existing) {
+    existing.substitution = substitution ?? existing.substitution;
+    return;
+  }
   const scene: GameViewScene = {
     ...baseTakeoverFields(state, frame, [frame.id], [cue.id]),
     id: sceneId(state.fixtureId, 'substitution', [frame.id], [cue.id]),
@@ -513,6 +601,7 @@ function handleSubstitution(state: DirectorState, frame: SemanticFrame, cue: Sim
     teamId: cue.teamId,
     player: cue.player,
     lifecycle: cue.lifecycle,
+    substitution,
     durationHint: DEFAULT_DURATION.substitution,
   };
   rememberIncidentScene(state, cue, scene);
@@ -522,7 +611,11 @@ function handleSubstitution(state: DirectorState, frame: SemanticFrame, cue: Sim
 function handleVar(state: DirectorState, frame: SemanticFrame, cue: SimulationCue) {
   closeAmbient(state);
   const existing = mergeIncidentScene(state, frame, cue, 'var_review');
-  if (existing) return;
+  if (existing) {
+    existing.sourceType = sourceString(cue.value, 'Type') ?? existing.sourceType;
+    existing.sourceOutcome = sourceString(cue.value, 'Outcome') ?? existing.sourceOutcome;
+    return;
+  }
   const scene: GameViewScene = {
     ...baseTakeoverFields(state, frame, [frame.id], [cue.id]),
     id: sceneId(state.fixtureId, 'var_review', [frame.id], [cue.id]),
@@ -530,7 +623,51 @@ function handleVar(state: DirectorState, frame: SemanticFrame, cue: SimulationCu
     participant: cue.participant,
     teamId: cue.teamId,
     lifecycle: cue.lifecycle,
+    sourceType: sourceString(cue.value, 'Type'),
+    sourceOutcome: sourceString(cue.value, 'Outcome'),
     durationHint: DEFAULT_DURATION.var_review,
+  };
+  rememberIncidentScene(state, cue, scene);
+  state.scenes.push(scene);
+}
+
+function handleInjury(state: DirectorState, frame: SemanticFrame, cue: SimulationCue) {
+  closeAmbient(state);
+  const existing = mergeIncidentScene(state, frame, cue, 'injury');
+  if (existing) {
+    existing.sourceOutcome = sourceString(cue.value, 'Outcome') ?? existing.sourceOutcome;
+    return;
+  }
+  const scene: GameViewScene = {
+    ...baseTakeoverFields(state, frame, [frame.id], [cue.id]),
+    id: sceneId(state.fixtureId, 'injury', [frame.id], [cue.id]),
+    kind: 'injury',
+    participant: cue.participant,
+    teamId: cue.teamId,
+    player: cue.player,
+    lifecycle: cue.lifecycle,
+    sourceOutcome: sourceString(cue.value, 'Outcome'),
+    durationHint: DEFAULT_DURATION.injury,
+  };
+  rememberIncidentScene(state, cue, scene);
+  state.scenes.push(scene);
+}
+
+function handleAdditionalTime(state: DirectorState, frame: SemanticFrame, cue: SimulationCue) {
+  closeAmbient(state);
+  const minutes = sourceMinutes(cue.value);
+  const existing = mergeIncidentScene(state, frame, cue, 'additional_time');
+  if (existing) {
+    existing.additionalTimeMinutes = minutes ?? existing.additionalTimeMinutes;
+    return;
+  }
+  const scene: GameViewScene = {
+    ...baseTakeoverFields(state, frame, [frame.id], [cue.id]),
+    id: sceneId(state.fixtureId, 'additional_time', [frame.id], [cue.id]),
+    kind: 'additional_time',
+    lifecycle: cue.lifecycle,
+    additionalTimeMinutes: minutes,
+    durationHint: DEFAULT_DURATION.additional_time,
   };
   rememberIncidentScene(state, cue, scene);
   state.scenes.push(scene);
@@ -555,6 +692,7 @@ function mergeIncidentScene(
   existing.scoreAtMoment = state.latestScore ?? existing.scoreAtMoment;
   existing.clockSeconds = frame.matchClockSeconds ?? existing.clockSeconds;
   existing.phase = state.phase ?? existing.phase;
+  existing.playerCounts = { ...state.playerCounts };
   return existing;
 }
 
@@ -808,6 +946,14 @@ function handleIncidentRetracted(state: DirectorState, frame: SemanticFrame, cue
     || pendingGoal !== undefined
     || state.confirmedGoalScenes.has(cue.id);
   if (!isGoalRetraction) {
+    const dismissedParticipant = state.confirmedDismissals.get(cue.id);
+    if (dismissedParticipant === 1) {
+      state.playerCounts.participant1 = Math.min(11, state.playerCounts.participant1 + 1);
+      state.confirmedDismissals.delete(cue.id);
+    } else if (dismissedParticipant === 2) {
+      state.playerCounts.participant2 = Math.min(11, state.playerCounts.participant2 + 1);
+      state.confirmedDismissals.delete(cue.id);
+    }
     // A complete replay must not stage a minor incident the source later
     // withdrew. Remove the provisional scene rather than silently showing a
     // corner/throw-in that final truth says did not stand.
@@ -839,7 +985,7 @@ function handleIncidentRetracted(state: DirectorState, frame: SemanticFrame, cue
   state.scenes.push(scene);
 }
 
-/** Cue kinds this director acts on. Anything else (e.g. player_highlight, injury, additional_time, possible_event) is ignored gracefully. */
+/** Cue kinds this director acts on. Anything else (e.g. player_highlight or possible_event) is ignored gracefully. */
 function isRelevantCue(cue: SimulationCue): boolean {
   switch (cue.kind) {
     case 'possession_change':
@@ -853,6 +999,8 @@ function isRelevantCue(cue: SimulationCue): boolean {
     case 'restart':
     case 'card':
     case 'substitution':
+    case 'injury':
+    case 'additional_time':
     case 'var':
     case 'incident_retracted':
     case 'phase_change':
@@ -890,6 +1038,8 @@ export function buildGameViewTimeline(
     incidentScenes: new Map(),
     pendingGoalScenes: new Map(),
     confirmedGoalScenes: new Map(),
+    playerCounts: { participant1: 11, participant2: 11 },
+    confirmedDismissals: new Map(),
   };
 
   for (const frame of ordered) {
@@ -934,6 +1084,12 @@ export function buildGameViewTimeline(
           break;
         case 'substitution':
           handleSubstitution(state, frame, cue);
+          break;
+        case 'injury':
+          handleInjury(state, frame, cue);
+          break;
+        case 'additional_time':
+          handleAdditionalTime(state, frame, cue);
           break;
         case 'var':
           handleVar(state, frame, cue);
@@ -1122,6 +1278,8 @@ function kindForCue(cue: SimulationCue): GameViewSceneKind {
     case 'restart': return 'restart';
     case 'card': return 'card';
     case 'substitution': return 'substitution';
+    case 'injury': return 'injury';
+    case 'additional_time': return 'additional_time';
     case 'var': return 'var_review';
     case 'incident_retracted': return 'goal_retracted';
     case 'phase_change': return 'phase_break';

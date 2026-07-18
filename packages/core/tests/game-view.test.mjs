@@ -402,6 +402,59 @@ test('phase_change cues close ambient and produce a phase_break scene, tracking 
   assert.equal(scenes[2].phase, 'half_time', 'the phase captured by phase_change persists onto subsequent scenes');
 });
 
+test('preserves shot, VAR, and substitution source detail across incident revisions', () => {
+  const shotId = `cue:${FIXTURE_ID}:shot:detail`;
+  const varId = `cue:${FIXTURE_ID}:var:detail`;
+  const substitutionId = `cue:${FIXTURE_ID}:substitution:detail`;
+  const scenes = buildGameViewTimeline([
+    frame({ cues: [cue({ id: shotId, kind: 'shot_attempt', lifecycle: 'provisional', participant: 1, teamId: 'team-a', value: { action: 'shot' } })] }),
+    frame({ cues: [cue({ id: shotId, kind: 'shot_outcome', lifecycle: 'confirmed', participant: 1, teamId: 'team-a', value: { action: 'shot', Outcome: 'OffTarget' } })] }),
+    frame({ cues: [cue({ id: varId, kind: 'var', lifecycle: 'provisional', participant: 1, teamId: 'team-a', value: { action: 'var', Type: 'Penalty' } })] }),
+    frame({ cues: [cue({ id: varId, kind: 'var', lifecycle: 'confirmed', participant: 1, teamId: 'team-a', value: { action: 'var', Type: 'Penalty', Outcome: 'Stands' } })] }),
+    frame({ cues: [cue({ id: substitutionId, kind: 'substitution', lifecycle: 'confirmed', participant: 2, teamId: 'team-b', value: { action: 'substitution', PlayerInId: 202, PlayerOutId: 201 } })] }),
+  ]);
+
+  const shot = scenes.find((scene) => scene.kind === 'shot');
+  assert.equal(shot.lifecycle, 'confirmed');
+  assert.equal(shot.sourceOutcome, 'OffTarget');
+
+  const review = scenes.find((scene) => scene.kind === 'var_review');
+  assert.equal(review.lifecycle, 'confirmed');
+  assert.equal(review.sourceType, 'Penalty');
+  assert.equal(review.sourceOutcome, 'Stands');
+
+  const substitution = scenes.find((scene) => scene.kind === 'substitution');
+  assert.deepEqual(substitution.substitution, { playerInId: 202, playerOutId: 201 });
+});
+
+test('injury and additional-time cues become source-grounded moment scenes', () => {
+  const injured = player({ normativeId: 77, participant: 1, sourcePreferredName: 'Injured Player' });
+  const scenes = buildGameViewTimeline([
+    frame({ cues: [cue({ kind: 'injury', lifecycle: 'confirmed', participant: 1, teamId: 'team-a', player: injured, value: { action: 'injury', Outcome: 'NotReturning' } })] }),
+    frame({ cues: [cue({ kind: 'additional_time', lifecycle: 'confirmed', value: { action: 'additional_time', Minutes: 5 } })] }),
+  ]);
+
+  assert.deepEqual(scenes.map((scene) => scene.kind), ['injury', 'additional_time']);
+  assert.equal(scenes[0].player.sourcePreferredName, 'Injured Player');
+  assert.equal(scenes[0].sourceOutcome, 'NotReturning');
+  assert.equal(scenes[1].additionalTimeMinutes, 5);
+});
+
+test('a confirmed red card reduces persistent player counts exactly once', () => {
+  const cardId = `cue:${FIXTURE_ID}:red-card:detail`;
+  const scenes = buildGameViewTimeline([
+    frame({ cues: [cue({ id: cardId, kind: 'card', lifecycle: 'provisional', participant: 2, teamId: 'team-b', value: { action: 'red_card' } })] }),
+    frame({ cues: [cue({ id: cardId, kind: 'card', lifecycle: 'confirmed', participant: 2, teamId: 'team-b', value: { action: 'red_card', Type: 'StraightRed' } })] }),
+    frame({ cues: [cue({ kind: 'possession_change', participant: 1, teamId: 'team-a', pressure: 'neutral', probableZone: 'neutral' })] }),
+  ]);
+
+  const card = scenes.find((scene) => scene.kind === 'card');
+  const ambient = scenes.find((scene) => scene.kind === 'ambient');
+  assert.equal(card.sourceType, 'StraightRed');
+  assert.deepEqual(card.playerCounts, { participant1: 11, participant2: 10 });
+  assert.deepEqual(ambient.playerCounts, { participant1: 11, participant2: 10 });
+});
+
 test('produces the same scene sequence regardless of input frame order (sorted deterministically by seq)', () => {
   const frames = [
     frame({ seq: 10, cues: [cue({ kind: 'possession_change', participant: 1, teamId: 'team-a', pressure: 'safe', probableZone: 'safe' })] }),
@@ -602,8 +655,6 @@ test('every emitted scene carries at least one sourceFrameId', () => {
 test('ignores cue kinds outside the director taxonomy without throwing or emitting a scene for them', () => {
   const frames = [
     frame({ cues: [cue({ kind: 'player_highlight', participant: 1, teamId: 'team-a' })] }),
-    frame({ cues: [cue({ kind: 'injury', participant: 1, teamId: 'team-a' })] }),
-    frame({ cues: [cue({ kind: 'additional_time', value: { seconds: 120 } })] }),
     frame({ cues: [cue({ kind: 'possible_event', participant: 1, teamId: 'team-a' })] }),
     frame({ cues: [cue({ kind: 'incident', participant: 1, teamId: 'team-a' })] }),
     frame({ cues: [cue({ kind: 'shot_attempt', participant: 1, teamId: 'team-a' })] }),
@@ -615,8 +666,137 @@ test('ignores cue kinds outside the director taxonomy without throwing or emitti
   assert.equal(scenes[0].kind, 'shot');
 });
 
+test('preserves shot, VAR, and substitution source detail through incident revisions', () => {
+  const shotCueId = `cue:${FIXTURE_ID}:shot:detail`;
+  const varCueId = `cue:${FIXTURE_ID}:var:detail`;
+  const substitutionCueId = `cue:${FIXTURE_ID}:substitution:detail`;
+  const frames = [
+    frame({ cues: [cue({
+      id: shotCueId,
+      kind: 'shot_attempt',
+      lifecycle: 'provisional',
+      participant: 1,
+      teamId: 'team-a',
+      value: { action: 'shot' },
+    })] }),
+    frame({ cues: [cue({
+      id: shotCueId,
+      kind: 'shot_outcome',
+      lifecycle: 'confirmed',
+      participant: 1,
+      teamId: 'team-a',
+      value: { action: 'shot', Outcome: 'OffTarget' },
+    })] }),
+    frame({ cues: [cue({
+      id: varCueId,
+      kind: 'var',
+      lifecycle: 'provisional',
+      value: { action: 'var', Type: 'Penalty' },
+    })] }),
+    frame({ cues: [cue({
+      id: varCueId,
+      kind: 'var',
+      lifecycle: 'confirmed',
+      value: { action: 'var', Type: 'Penalty', Outcome: 'Stands' },
+    })] }),
+    frame({ cues: [cue({
+      id: substitutionCueId,
+      kind: 'substitution',
+      lifecycle: 'confirmed',
+      participant: 2,
+      teamId: 'team-b',
+      value: { action: 'substitution', PlayerInId: 202, PlayerOutId: 201 },
+    })] }),
+  ];
+
+  const scenes = buildGameViewTimeline(frames);
+  const shot = scenes.find((scene) => scene.kind === 'shot');
+  const review = scenes.find((scene) => scene.kind === 'var_review');
+  const substitution = scenes.find((scene) => scene.kind === 'substitution');
+
+  assert.equal(shot.sourceOutcome, 'OffTarget');
+  assert.equal(shot.lifecycle, 'confirmed');
+  assert.equal(review.sourceType, 'Penalty');
+  assert.equal(review.sourceOutcome, 'Stands');
+  assert.equal(review.lifecycle, 'confirmed');
+  assert.deepEqual(substitution.substitution, { playerInId: 202, playerOutId: 201 });
+});
+
+test('injury and additional-time cues become source-grounded scenes', () => {
+  const injuredPlayer = player({ normativeId: 77, participant: 1, sourcePreferredName: 'Injured Player' });
+  const frames = [
+    frame({ matchClockSeconds: 4491, cues: [cue({
+      kind: 'injury',
+      lifecycle: 'confirmed',
+      participant: 1,
+      teamId: 'team-a',
+      player: injuredPlayer,
+      value: { action: 'injury', Outcome: 'OnPitch' },
+    })] }),
+    frame({ matchClockSeconds: 5405, cues: [cue({
+      kind: 'additional_time',
+      lifecycle: 'confirmed',
+      value: { action: 'additional_time', Minutes: 5 },
+    })] }),
+  ];
+
+  const scenes = buildGameViewTimeline(frames);
+
+  assert.deepEqual(scenes.map((scene) => scene.kind), ['injury', 'additional_time']);
+  assert.equal(scenes[0].player.normativeId, 77);
+  assert.equal(scenes[0].sourceOutcome, 'OnPitch');
+  assert.equal(scenes[1].additionalTimeMinutes, 5);
+});
+
+test('a confirmed red card reduces that participant to ten for the card and every later scene', () => {
+  const redCueId = `cue:${FIXTURE_ID}:red-card:counts`;
+  const dismissedPlayer = player({ normativeId: 88, participant: 2, teamId: 'team-b', sourcePreferredName: 'Dismissed Player' });
+  const frames = [
+    frame({ cues: [cue({
+      kind: 'possession_change',
+      participant: 1,
+      teamId: 'team-a',
+      pressure: 'safe',
+      probableZone: 'safe',
+    })] }),
+    frame({ cues: [cue({
+      id: redCueId,
+      kind: 'card',
+      lifecycle: 'provisional',
+      participant: 2,
+      teamId: 'team-b',
+      player: dismissedPlayer,
+      value: { action: 'red_card', Type: 'StraightRed' },
+    })] }),
+    frame({ cues: [cue({
+      id: redCueId,
+      kind: 'card',
+      lifecycle: 'confirmed',
+      participant: 2,
+      teamId: 'team-b',
+      player: dismissedPlayer,
+      value: { action: 'red_card', Type: 'StraightRed' },
+    })] }),
+    frame({ cues: [cue({
+      kind: 'possession_change',
+      participant: 2,
+      teamId: 'team-b',
+      pressure: 'attack',
+      probableZone: 'attack',
+    })] }),
+  ];
+
+  const scenes = buildGameViewTimeline(frames);
+  const card = scenes.find((scene) => scene.kind === 'card');
+  const laterAmbient = scenes.findLast((scene) => scene.kind === 'ambient');
+
+  assert.deepEqual(card.playerCounts, { participant1: 11, participant2: 10 });
+  assert.equal(card.sourceType, 'StraightRed');
+  assert.deepEqual(laterAmbient.playerCounts, { participant1: 11, participant2: 10 });
+});
+
 test('returns an empty timeline for no frames and for frames with no relevant cues', () => {
   assert.deepEqual(buildGameViewTimeline([]), []);
-  const noise = frame({ cues: [cue({ kind: 'injury', participant: 1, teamId: 'team-a' })] });
+  const noise = frame({ cues: [cue({ kind: 'player_highlight', participant: 1, teamId: 'team-a' })] });
   assert.deepEqual(buildGameViewTimeline([noise]), []);
 });

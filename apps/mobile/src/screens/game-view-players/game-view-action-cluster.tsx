@@ -17,6 +17,8 @@ import { GameViewBall } from './game-view-ball';
 import { GameViewStickPlayer, STICK_WIDTH_RATIO } from './game-view-stick-player';
 import type { PlayerPose } from './player-pose-logic';
 
+const BALL_RENDER_SIZE_PX = 12 * 0.9;
+const BALL_LATERAL_OFFSET_PX = -(STICK_FIGURE_SIZE_PX * 0.1);
 
 /**
  * The action cluster renderer (work item R4 of
@@ -90,6 +92,18 @@ export function GameViewActionCluster({
     () => posesForFigures(initialHoldFrame?.figures ?? []),
   );
   const [movingKeys, setMovingKeys] = useState<ReadonlySet<string>>(new Set());
+  const [runTick, setRunTick] = useState(0);
+
+  // One shared cadence keeps every moving figure in the same tactical-view
+  // rhythm and avoids starting a timer/animation loop per player.
+  useEffect(() => {
+    if (reduceMotion || movingKeys.size === 0) {
+      setRunTick(0);
+      return undefined;
+    }
+    const handle = setInterval(() => setRunTick((value) => value + 1), 220);
+    return () => clearInterval(handle);
+  }, [movingKeys.size, reduceMotion]);
 
   const animsRef = useRef(createSnappedFigureAnims(initialHoldFrame?.figures ?? []));
   const ballAnim = useRef({
@@ -256,6 +270,10 @@ export function GameViewActionCluster({
       {figures.map((figure) => {
         const anim = animsRef.current.get(figure.key);
         if (!anim) return null;
+        const moving = movingKeys.has(figure.key);
+        const renderedPose = moving
+          ? runTick % 2 === 0 ? 'run_a' : 'run_b'
+          : poses[figure.key] ?? figure.pose;
         return (
           <Animated.View
             key={figure.key}
@@ -270,14 +288,23 @@ export function GameViewActionCluster({
               },
             ]}
           >
-            <View style={styles.figureContent}>
+            <View
+              style={[
+                styles.figureContent,
+                figure.focus === 'engaged' ? styles.engagedFigure : styles.formationFigure,
+                moving && !reduceMotion ? { transform: [{ translateY: runTick % 2 === 0 ? -1 : 0 }] } : undefined,
+              ]}
+            >
               <GameViewStickPlayer
-                animateRunCycle={movingKeys.has(figure.key)}
+                animateRunCycle={false}
                 facing={figure.facing}
-                pose={poses[figure.key] ?? figure.pose}
+                pose={renderedPose}
                 reduceMotion={reduceMotion}
+                shirtColor={figure.shirtColor}
+                shortsColor={figure.shortsColor}
                 size={STICK_FIGURE_SIZE_PX}
                 teamColor={figure.color}
+                trimColor={figure.trimColor}
               />
             </View>
           </Animated.View>
@@ -298,7 +325,7 @@ export function GameViewActionCluster({
         ]}
       >
         <Animated.View style={[styles.ballContent, { transform: [{ scale: ballAnim.scale }] }]}>
-          <GameViewBall size={12} />
+          <GameViewBall size={BALL_RENDER_SIZE_PX} />
         </Animated.View>
       </Animated.View>
     </View>
@@ -696,6 +723,10 @@ function ballLegFor(label: Extract<ClusterPlan, { kind: 'staged' }>['label']): {
       // Lofted delivery: unhurried, rising then dropping.
       return { durationMs: 680, easing: Easing.inOut(Easing.quad), loft: true };
     case 'shot':
+    case 'shot_on_target':
+    case 'shot_off_target':
+    case 'shot_blocked':
+    case 'shot_woodwork':
       // A strike is fast and direct -- the one deliberately linear move.
       return { durationMs: 230, easing: Easing.linear, loft: false };
     default:
@@ -737,11 +768,18 @@ const styles = StyleSheet.create({
     marginLeft: -(STICK_FIGURE_SIZE_PX * STICK_WIDTH_RATIO) / 2,
     marginTop: -STICK_FIGURE_SIZE_PX / 2,
   },
+  engagedFigure: {
+    opacity: 1,
+  },
+  formationFigure: {
+    opacity: 0.58,
+  },
   ballSlot: {
     zIndex: 6,
   },
   ballContent: {
-    marginLeft: -6,
-    marginTop: -6,
+    left: BALL_LATERAL_OFFSET_PX,
+    marginLeft: -(BALL_RENDER_SIZE_PX / 2),
+    marginTop: -(BALL_RENDER_SIZE_PX / 2),
   },
 });

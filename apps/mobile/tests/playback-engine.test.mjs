@@ -271,6 +271,83 @@ test('startReplayAt enters replay at an explicit scene and continues on the norm
   engine.dispose();
 });
 
+test('startReplayAt with stopAtIndex plays a bounded clip then halts instead of continuing to the end', async () => {
+  const clock = createFakeClock();
+  const { handle } = createFakeSession(
+    baseSnapshot({
+      frames: [frame('f1', 1), frame('f2', 2), frame('f3', 3), frame('f4', 4)],
+      headRevision: 4,
+      status: 'complete',
+    }),
+  );
+  const engine = new PlaybackEngine(handle, {
+    director: (frames) => frames.map((item) => scene(item.id, undefined, 1000)),
+    clock,
+  });
+
+  engine.startReplayAt(1, { stopAtIndex: 2 });
+  assert.equal(engine.getSnapshot().rangeStopAtIndex, 2);
+  assert.equal(engine.getSnapshot().currentScene.id, 'f2');
+
+  await clock.flush(1000);
+  assert.equal(engine.getSnapshot().currentScene.id, 'f3', 'advances through the range as normal');
+  assert.equal(engine.getSnapshot().playheadIndex, 2);
+  assert.equal(engine.getSnapshot().mode, 'replay', 'mode stays replay, not paused, at the stop scene');
+
+  await clock.flush(5000);
+  assert.equal(engine.getSnapshot().currentScene.id, 'f3', 'halts at the stop scene rather than continuing to f4');
+  assert.equal(clock.pendingCount(), 0, 'no advance timer is left armed past the stop');
+
+  engine.dispose();
+});
+
+test('startReplayAt stopAtIndex before the start index clamps up to the start (never plays backwards)', () => {
+  const { director } = countingDirector();
+  const { handle } = createFakeSession(
+    baseSnapshot({
+      frames: [frame('f1', 1), frame('f2', 2), frame('f3', 3)],
+      headRevision: 3,
+      status: 'complete',
+    }),
+  );
+  const engine = new PlaybackEngine(handle, { director, clock: createFakeClock() });
+
+  engine.startReplayAt(2, { stopAtIndex: 0 });
+  assert.equal(engine.getSnapshot().rangeStopAtIndex, 2, 'stop clamps up to the start index');
+  assert.equal(engine.getSnapshot().playheadIndex, 2);
+
+  engine.dispose();
+});
+
+test('play() and scrubTo() clear a previously active range stop', async () => {
+  const clock = createFakeClock();
+  const { handle } = createFakeSession(
+    baseSnapshot({
+      frames: [frame('f1', 1), frame('f2', 2), frame('f3', 3)],
+      headRevision: 3,
+      status: 'complete',
+    }),
+  );
+  const engine = new PlaybackEngine(handle, {
+    director: (frames) => frames.map((item) => scene(item.id, undefined, 1000)),
+    clock,
+  });
+
+  engine.startReplayAt(0, { stopAtIndex: 1 });
+  assert.equal(engine.getSnapshot().rangeStopAtIndex, 1);
+
+  engine.scrubTo(2);
+  assert.equal(engine.getSnapshot().rangeStopAtIndex, undefined);
+
+  engine.startReplayAt(0, { stopAtIndex: 1 });
+  assert.equal(engine.getSnapshot().rangeStopAtIndex, 1);
+
+  engine.play();
+  assert.equal(engine.getSnapshot().rangeStopAtIndex, undefined);
+
+  engine.dispose();
+});
+
 test('replay plays from the start and advances on the fake clock per scene duration', async () => {
   const { director } = countingDirector();
   const clock = createFakeClock();

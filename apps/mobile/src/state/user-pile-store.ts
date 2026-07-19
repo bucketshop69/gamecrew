@@ -293,28 +293,53 @@ export class UserPileStore {
    * local-actions array on a returning user, incorrectly re-offering the
    * gift popup (PERS-007) because the persisted `gift_claimed` action
    * hadn't been restored yet when the engine first ran.
+   *
+   * Item 14 (fix round) root cause: this method's own `storage.getItem`
+   * reads are async, and `recordChatMessage`/`appendAction`/
+   * `cacheEventsForFixture` write straight into the same in-memory maps
+   * synchronously, with no coordination between the two. A message (e.g. a
+   * tapped reaction chip) sent in the narrow window between this method
+   * starting and its reads resolving used to be silently wiped the instant
+   * hydration's `.set()` landed -- the read had already been issued against
+   * a storage snapshot that didn't include the brand-new write, and this
+   * method blindly trusted that snapshot as authoritative regardless of
+   * what had changed in memory since. Concretely reproducible for a
+   * returning fixture (one with SOME already-persisted chat/actions/events,
+   * so the `rawX.length > 0` guards below don't just no-op) whenever a tap
+   * lands right as the chat sheet/economy hook mounts.
+   *
+   * Fixed by snapshotting, before the awaited reads, whether each map
+   * already had a local entry for this fixture -- if a write raced ahead
+   * and populated it in the meantime, that in-memory entry (which itself
+   * already reflects the full prior history plus the new write -- see each
+   * write method's read-modify-write shape) wins outright rather than being
+   * replaced by the now-stale persisted snapshot.
    */
   async hydrateFixture(fixtureId: string): Promise<void> {
+    const hadLocalActions = this.actionsByFixture.has(fixtureId);
+    const hadLocalEvents = this.eventsByFixture.has(fixtureId);
+    const hadLocalChat = this.chatMessagesByFixture.has(fixtureId);
+
     const [rawActions, rawEvents, rawChat] = await Promise.all([
       this.storage.getItem(ACTIONS_KEY_PREFIX + fixtureId),
       this.storage.getItem(EVENTS_KEY_PREFIX + fixtureId),
       this.storage.getItem(CHAT_KEY_PREFIX + fixtureId),
     ]);
-    if (typeof rawActions === 'string' && rawActions.length > 0) {
+    if (!hadLocalActions && typeof rawActions === 'string' && rawActions.length > 0) {
       try {
         this.actionsByFixture.set(fixtureId, JSON.parse(rawActions) as EconomyUserAction[]);
       } catch {
         // Corrupt/incompatible persisted payload: start this fixture clean rather than throw (PERS-003).
       }
     }
-    if (typeof rawEvents === 'string' && rawEvents.length > 0) {
+    if (!hadLocalEvents && typeof rawEvents === 'string' && rawEvents.length > 0) {
       try {
         this.eventsByFixture.set(fixtureId, JSON.parse(rawEvents) as EconomyEvent[]);
       } catch {
         // Corrupt/incompatible persisted payload: start this fixture clean rather than throw (PERS-003).
       }
     }
-    if (typeof rawChat === 'string' && rawChat.length > 0) {
+    if (!hadLocalChat && typeof rawChat === 'string' && rawChat.length > 0) {
       try {
         this.chatMessagesByFixture.set(fixtureId, JSON.parse(rawChat) as EconomyChatMessage[]);
       } catch {

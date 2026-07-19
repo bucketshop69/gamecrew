@@ -238,9 +238,9 @@ test('selectStatePanelCopy: loading copy matches the PRD exactly', () => {
   assert.deepEqual(selectStatePanelCopy('loading'), { title: 'Building Game View.' });
 });
 
-test('selectStatePanelCopy: empty copy matches the PRD exactly', () => {
+test('selectStatePanelCopy: empty copy names no internal system (fix round item 4)', () => {
   assert.deepEqual(selectStatePanelCopy('empty'), {
-    title: 'Game View will appear when TxLINE has enough match signal.',
+    title: 'Game View opens when the match starts.',
   });
 });
 

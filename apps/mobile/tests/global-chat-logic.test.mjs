@@ -5,10 +5,12 @@ import {
   buildGlobalChatRows,
   buildGlobalChatStreamRows,
   buildPileRows,
+  classifyPromptRowDisplay,
   itemClaimStatus,
   latestGiftRevealItems,
   pickAutoStakeItem,
   poolChipText,
+  promptRowCompactOutcomeText,
   promptTakenPillText,
   rarityPresentationTier,
 } from '../src/screens/global-chat-logic.ts';
@@ -258,6 +260,26 @@ test('buildGlobalChatRows: a prompt row starts open with state "open"', () => {
   assert.equal(rows[0].isOpen, true);
 });
 
+// Item 12 (fix round): a prompt row's stakeCoolness must be the real cost,
+// never a hardcoded 0 -- defaults to this module's own mirrored constant
+// (matching @gamecrew/core's ECONOMY_FIXED_STAKE_COOLNESS) when the caller
+// doesn't override it, and reflects an explicit override when one is given.
+test('buildGlobalChatRows: a prompt row carries the real (non-zero) default stake cost', () => {
+  const events = [baseEvent({ id: 'e1', kind: 'prompt_offered', promptId: 'p1', text: 'Make your call: a goal in the next 5 minutes?' })];
+  const openPrompts = [{ id: 'p1', fixtureId: 'fx-1', trigger: 'big_moment', predicate: 'goal_within_window', sourceFrameId: 'f1', copy: 'Make your call: a goal in the next 5 minutes?' }];
+  const rows = buildGlobalChatRows(events, openPrompts, [], lookupItem);
+  assert.equal(rows[0].kind, 'prompt');
+  assert.equal(rows[0].stakeCoolness, 10);
+});
+
+test('buildGlobalChatRows: a prompt row reflects an explicitly passed stake cost override', () => {
+  const events = [baseEvent({ id: 'e1', kind: 'prompt_offered', promptId: 'p1', text: 'Make your call: a goal in the next 5 minutes?' })];
+  const openPrompts = [{ id: 'p1', fixtureId: 'fx-1', trigger: 'big_moment', predicate: 'goal_within_window', sourceFrameId: 'f1', copy: 'Make your call: a goal in the next 5 minutes?' }];
+  const rows = buildGlobalChatRows(events, openPrompts, [], lookupItem, 25);
+  assert.equal(rows[0].kind, 'prompt');
+  assert.equal(rows[0].stakeCoolness, 25);
+});
+
 test('buildGlobalChatRows: bet_taken flips the existing prompt row in place to "taken" rather than adding a second prompt row', () => {
   const events = [
     baseEvent({ id: 'e1', kind: 'prompt_offered', promptId: 'p1', text: 'Make your call: who scores next?' }),
@@ -492,4 +514,53 @@ test('itemClaimStatus still resolves minted/failed/pending correctly alongside a
   ];
   assert.deepEqual(itemClaimStatus('lambo', claims), { kind: 'minted', explorerUrl: 'https://explorer.example/tx/abc' });
   assert.deepEqual(itemClaimStatus('bananas', claims), { kind: 'unclaimed' });
+});
+
+// ---------------------------------------------------------------------------
+// Closed-call collapse (item 16, fix round)
+// ---------------------------------------------------------------------------
+
+test('classifyPromptRowDisplay: open is the full card', () => {
+  assert.equal(classifyPromptRowDisplay({ state: 'open' }), 'card');
+});
+
+test('classifyPromptRowDisplay: taken and closed both collapse to compact', () => {
+  assert.equal(classifyPromptRowDisplay({ state: 'taken' }), 'compact');
+  assert.equal(classifyPromptRowDisplay({ state: 'closed' }), 'compact');
+});
+
+test('promptRowCompactOutcomeText: closed reads "Closed"', () => {
+  assert.equal(promptRowCompactOutcomeText({ state: 'closed' }, lookupItem), 'Closed');
+});
+
+test('promptRowCompactOutcomeText: taken reads the same taken-pill copy as the full card used to show', () => {
+  const text = promptRowCompactOutcomeText({ state: 'taken', takenItemId: 'bananas' }, lookupItem);
+  assert.equal(text, promptTakenPillText('bananas', lookupItem));
+});
+
+test('promptRowCompactOutcomeText: taken with a team name appends it, matching the full card\'s who-scores-next copy', () => {
+  const text = promptRowCompactOutcomeText({ state: 'taken', takenItemId: 'bananas' }, lookupItem, 'Argentina');
+  assert.equal(text, promptTakenPillText('bananas', lookupItem, 'Argentina'));
+  assert.ok(text.includes('Argentina'));
+});
+
+test('promptRowCompactOutcomeText: taken with no takenItemId falls back to "You called it" (defensive)', () => {
+  assert.equal(promptRowCompactOutcomeText({ state: 'taken' }, lookupItem), 'You called it');
+});
+
+test('a full prompt row built by buildGlobalChatRows classifies correctly through its full open -> taken lifecycle', () => {
+  const events = [
+    baseEvent({ id: 'e1', kind: 'prompt_offered', promptId: 'p1', text: 'Make your call: a goal in the next 5 minutes?' }),
+  ];
+  const openPrompts = [{ id: 'p1', fixtureId: 'fx-1', trigger: 'big_moment', predicate: 'goal_within_window', sourceFrameId: 'f1', copy: 'Make your call: a goal in the next 5 minutes?' }];
+  const openRow = buildGlobalChatRows(events, openPrompts, [], lookupItem).find((row) => row.kind === 'prompt');
+  assert.equal(classifyPromptRowDisplay(openRow), 'card');
+
+  const takenEvents = [...events, baseEvent({ id: 'e2', kind: 'bet_taken', promptId: 'p1', stakedItem: 'bananas' })];
+  const takenRow = buildGlobalChatRows(takenEvents, [], [], lookupItem).find((row) => row.kind === 'prompt');
+  assert.equal(classifyPromptRowDisplay(takenRow), 'compact');
+
+  const expiredEvents = [...events, baseEvent({ id: 'e3', kind: 'prompt_expired', promptId: 'p1' })];
+  const closedRow = buildGlobalChatRows(expiredEvents, [], [], lookupItem).find((row) => row.kind === 'prompt');
+  assert.equal(classifyPromptRowDisplay(closedRow), 'compact');
 });

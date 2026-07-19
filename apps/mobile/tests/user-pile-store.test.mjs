@@ -288,6 +288,76 @@ test('CHAT-011/PERS: chat messages persist across a fresh store instance over th
   assert.equal(messages[0].releasedEventCountAtSend, 0);
 });
 
+// ---------------------------------------------------------------------------
+// Item 14 (fix round) root cause: a hydrateFixture read racing a concurrent
+// local write must never clobber the write. Reproduces the exact shape of
+// the bug -- a returning fixture (already has SOME persisted chat history,
+// so hydrateFixture's own restore isn't just a no-op on empty storage) whose
+// hydrateFixture() call is still in flight when a message is sent.
+// ---------------------------------------------------------------------------
+
+/** Storage whose getItem only resolves once `release()` is called -- lets a test hold hydrateFixture's reads open while it performs a concurrent local write, deterministically reproducing the race window a real async AsyncStorage read leaves open. */
+function createDeferredStorage(seed = {}) {
+  const map = new Map(Object.entries(seed));
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  return {
+    storage: {
+      getItem: async (key) => {
+        await gate;
+        return map.has(key) ? map.get(key) : null;
+      },
+      setItem: (key, value) => {
+        map.set(key, value);
+      },
+    },
+    release: () => release(),
+  };
+}
+
+test('item 14: a chat message sent while hydrateFixture is still in flight survives, not clobbered once hydration resolves', async () => {
+  const { storage, release } = createDeferredStorage({
+    'gamecrew:economy:chat:fx-1': JSON.stringify([
+      { id: 'chat-old', fixtureId: 'fx-1', text: 'earlier in the match', sentAtMs: 500, releasedEventCountAtSend: 0 },
+    ]),
+  });
+  const store = new UserPileStore({ storage, generateChatMessageId: () => 'chat-reaction-1', foldBalances });
+
+  // Mirrors use-economy.ts's mount effect: hydrateFixture() is called and
+  // NOT yet awaited when the user's tap lands.
+  const hydratePromise = store.hydrateFixture('fx-1');
+
+  // The tapped reaction chip's send lands while the read above is still
+  // in flight (storage hasn't resolved yet).
+  const sent = store.recordChatMessage('fx-1', 'What a goal!', 1, 1000);
+  assert.notEqual(sent, undefined, 'the send itself succeeds synchronously, in memory');
+
+  // Now let hydrateFixture's storage read resolve.
+  release();
+  await hydratePromise;
+
+  const messages = store.getChatMessagesForFixture('fx-1');
+  assert.ok(
+    messages.some((m) => m.text === 'What a goal!'),
+    'the reaction sent mid-hydration must still be present after hydration resolves -- this is the exact bug: it used to be wiped by hydrateFixture\'s stale read',
+  );
+});
+
+test('item 14: hydrateFixture still restores normally when no concurrent write races it (baseline, unaffected by the fix)', async () => {
+  const { storage } = createFakeStorage({
+    'gamecrew:economy:chat:fx-1': JSON.stringify([
+      { id: 'chat-old', fixtureId: 'fx-1', text: 'earlier in the match', sentAtMs: 500, releasedEventCountAtSend: 0 },
+    ]),
+  });
+  const store = new UserPileStore({ storage, foldBalances });
+
+  await store.hydrateFixture('fx-1');
+
+  const messages = store.getChatMessagesForFixture('fx-1');
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].text, 'earlier in the match');
+});
+
 test('hydrateFixture tolerates corrupt persisted chat JSON without throwing (PERS-003 extended to chat)', async () => {
   const { storage, map } = createFakeStorage();
   map.set('gamecrew:economy:chat:fx-1', '{not valid json');

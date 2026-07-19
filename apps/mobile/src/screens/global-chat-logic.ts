@@ -38,6 +38,21 @@ export interface EconomyItemLookup {
   (itemId: EconomyItemId): { label: string; emoji: string; rarityTier: number };
 }
 
+/**
+ * Item 12 (fix round): mirrors `@gamecrew/core`'s `ECONOMY_FIXED_STAKE_COOLNESS`
+ * (the fixed single-tap stake amount, no picker in V1 -- see that constant's
+ * own doc comment in packages/core/src/match-engine/economy.ts). Kept as a
+ * local literal, not a runtime import, for the same reason `lookupItem` is
+ * injected rather than imported: this module stays free of any runtime
+ * `@gamecrew/core` dependency so the plain-Node test runner needs no
+ * bundler/loader resolution for a workspace package (see this file's header
+ * comment). `buildGlobalChatRows`/`buildGlobalChatStreamRows` accept the
+ * real cost as an optional override parameter defaulting to this value --
+ * `gamecrew-screens.tsx` passes the real imported constant explicitly, so
+ * this default only matters for a caller (or test) that omits it.
+ */
+const DEFAULT_STAKE_COOLNESS = 10;
+
 // ---------------------------------------------------------------------------
 // Row models
 // ---------------------------------------------------------------------------
@@ -253,6 +268,7 @@ function applyEventToRows(
   openPrompts: readonly EconomyBetPrompt[],
   stakeItemId: EconomyItemId,
   lookupItem: EconomyItemLookup,
+  stakeCoolness: number,
 ): void {
   const { rows, promptRowIndexById } = state;
   switch (event.kind) {
@@ -292,7 +308,7 @@ function applyEventToRows(
         // not expected to be exercised in practice).
         predicate: prompt?.predicate ?? event.betPredicate ?? 'goal_in_first_half',
         stakeItemId,
-        stakeCoolness: 0,
+        stakeCoolness,
         isOpen: openPromptIds.has(promptId),
         state: openPromptIds.has(promptId) ? 'open' : 'closed',
       });
@@ -375,13 +391,15 @@ export function buildGlobalChatRows(
   openPrompts: readonly EconomyBetPrompt[],
   pile: readonly { itemId: EconomyItemId; quantity: number }[],
   lookupItem: EconomyItemLookup,
+  /** Item 12: the real per-call stake cost (`ECONOMY_FIXED_STAKE_COOLNESS` from `@gamecrew/core`) -- defaults to this module's own mirrored constant when omitted. */
+  stakeCoolness: number = DEFAULT_STAKE_COOLNESS,
 ): readonly GlobalChatRow[] {
   const openPromptIds = new Set(openPrompts.map((prompt) => prompt.id));
   const stakeItemId = pickAutoStakeItem(pile);
   const state: RowBuilderState = { rows: [], promptRowIndexById: new Map() };
 
   for (const event of events) {
-    applyEventToRows(state, event, openPromptIds, openPrompts, stakeItemId, lookupItem);
+    applyEventToRows(state, event, openPromptIds, openPrompts, stakeItemId, lookupItem, stakeCoolness);
   }
 
   return state.rows;
@@ -403,6 +421,8 @@ export function buildGlobalChatStreamRows(
   openPrompts: readonly EconomyBetPrompt[],
   pile: readonly { itemId: EconomyItemId; quantity: number }[],
   lookupItem: EconomyItemLookup,
+  /** Item 12: the real per-call stake cost (`ECONOMY_FIXED_STAKE_COOLNESS` from `@gamecrew/core`) -- defaults to this module's own mirrored constant when omitted. */
+  stakeCoolness: number = DEFAULT_STAKE_COOLNESS,
 ): readonly GlobalChatRow[] {
   const openPromptIds = new Set(openPrompts.map((prompt) => prompt.id));
   const stakeItemId = pickAutoStakeItem(pile);
@@ -413,7 +433,7 @@ export function buildGlobalChatStreamRows(
       state.rows.push({ id: streamRow.message.id, kind: 'user_chat', text: streamRow.message.text });
       continue;
     }
-    applyEventToRows(state, streamRow.event, openPromptIds, openPrompts, stakeItemId, lookupItem);
+    applyEventToRows(state, streamRow.event, openPromptIds, openPrompts, stakeItemId, lookupItem, stakeCoolness);
   }
 
   return state.rows;
@@ -422,6 +442,54 @@ export function buildGlobalChatStreamRows(
 /** The taken-state pill copy for a `prompt` row (spec section 2: `You called it · {emoji} staked`), resolved at render time from the row's `takenItemId`. Exported so `global-chat-feed.tsx` doesn't need its own emoji lookup for this one string. */
 export function promptTakenPillText(takenItemId: EconomyItemId, lookupItem: EconomyItemLookup, teamName?: string): string {
   return takenPillText(takenItemId, lookupItem, teamName);
+}
+
+// ---------------------------------------------------------------------------
+// Closed-call collapse (item 16, fix round)
+// ---------------------------------------------------------------------------
+
+/**
+ * A `prompt`-kind row's display form (item 16): only a genuinely open,
+ * actionable call ('open' state -- the stake button or team-pick buttons
+ * are live) keeps the full card treatment. Anything no longer actionable
+ * ('taken' -- the user already staked, awaiting/already settled; 'closed'
+ * -- expired with no take) collapses to a single compact one-line row
+ * (question + outcome, no buttons, muted), matching the spec's framing that
+ * these were stacking into a noisy activity log as full cards even though
+ * neither has anything left for the user to do.
+ */
+export type PromptRowDisplayForm = 'card' | 'compact';
+
+/** Minimal shape this module's own `prompt`-kind `GlobalChatRow` variant already satisfies -- kept narrow (not importing `GlobalChatRow` itself) so this stays a plain function over just the fields it needs. */
+export interface PromptRowClassificationInput {
+  state: 'open' | 'taken' | 'closed';
+}
+
+export function classifyPromptRowDisplay(row: PromptRowClassificationInput): PromptRowDisplayForm {
+  return row.state === 'open' ? 'card' : 'compact';
+}
+
+/**
+ * The compact row's outcome text (the part after the question) for a
+ * collapsed `prompt` row: the same taken-pill copy for 'taken' ("You called
+ * it · {emoji} staked"), or a plain "Closed" for 'closed' -- unchanged copy
+ * from what each state already showed, just relocated onto the one-line
+ * row instead of inside a full card.
+ */
+export function promptRowCompactOutcomeText(
+  row: {
+    state: 'open' | 'taken' | 'closed';
+    takenItemId?: EconomyItemId;
+  },
+  lookupItem: EconomyItemLookup,
+  teamName?: string,
+): string {
+  if (row.state === 'taken') {
+    return row.takenItemId !== undefined
+      ? promptTakenPillText(row.takenItemId, lookupItem, teamName)
+      : 'You called it';
+  }
+  return 'Closed';
 }
 
 export interface GiftRevealItemRow {

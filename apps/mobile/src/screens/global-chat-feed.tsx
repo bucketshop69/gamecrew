@@ -1,11 +1,30 @@
 import { gameCrewTokens, type EconomyItemId, type MatchEngineParticipant } from '@gamecrew/core';
-import { useEffect, useRef } from 'react';
-import { FlatList, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  FlatList,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import Reanimated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 
 import { CelebrationParticleBurst } from './game-view-takeovers/celebration-particles';
 import { useReducedMotionPreference } from './game-view-takeovers/takeover-shared';
-import { promptTakenPillText, type GlobalChatRow } from './global-chat-logic';
+import {
+  isScrollAtBottom,
+  resolveNewMessagesPillVisible,
+  shouldAutoScrollOnContentChange,
+} from './global-chat-scroll-logic';
+import {
+  classifyPromptRowDisplay,
+  promptRowCompactOutcomeText,
+  promptTakenPillText,
+  type GlobalChatRow,
+} from './global-chat-logic';
 
 const tokens = gameCrewTokens;
 
@@ -55,10 +74,21 @@ function lookupStakeEmoji(itemId: EconomyItemId): { emoji: string; label: string
  * moments, Gift reveals, Call cards, social proof, settlement lines, the
  * user's own chat messages, and Gift Pool moments -- following the same
  * FlatList-of-rows shape the Match Pulse tab already uses in
- * gamecrew-screens.tsx (PulseMomentRow / getPulseFeedItems). Auto-scrolls to
- * the newest row whenever the row count grows (UX spec section 5: the same
- * `onContentSizeChange` mechanism covers the user's own sent messages too,
- * since they land in this same `rows` array).
+ * gamecrew-screens.tsx (PulseMomentRow / getPulseFeedItems).
+ *
+ * Round 5/item 2: scrolling now follows a "live chat" standard instead of
+ * unconditionally yanking to the end on every content-size change (which
+ * previously yanked the list even while the user was reading scrolled up,
+ * and made reaction sends visibly jump the feed). See
+ * global-chat-scroll-logic.ts for the pure decisions this wires up:
+ * - new content auto-scrolls only when the user was already at (or near)
+ *   the bottom;
+ * - the user's OWN sent message always scrolls to bottom -- signaled via
+ *   `lastOwnMessageId`, which the caller (match-chat-sheet.tsx's `onSend`
+ *   wiring) bumps to the row id of whatever `user_chat` row a send produces;
+ * - when scrolled up and new rows arrive, a floating "New messages" pill
+ *   appears over the feed's bottom edge; tapping it scrolls down, and it
+ *   hides again once at bottom.
  *
  * `onScrollBeginDrag` dismisses the keyboard on scroll-drag (spec section 5)
  * so browsing history doesn't fight an open keyboard from the composer below.
@@ -67,6 +97,7 @@ export function GlobalChatFeed({
   awayTeam,
   emptyLabel,
   homeTeam,
+  lastOwnMessageId,
   listRef,
   onScrollBeginDrag,
   onStake,
@@ -76,31 +107,102 @@ export function GlobalChatFeed({
   awayTeam: ChatTeamIdentity;
   emptyLabel: string;
   homeTeam: ChatTeamIdentity;
+  /** The row id of the most recently sent-by-the-user message, if any -- a change in this value always scrolls to bottom regardless of current scroll position (item 2). */
+  lastOwnMessageId?: string;
   listRef: React.RefObject<FlatList<GlobalChatRow> | null>;
   onScrollBeginDrag?: () => void;
   onStake: (promptId: string, itemId: EconomyItemId, pickedParticipant?: MatchEngineParticipant) => void;
   rows: readonly GlobalChatRow[];
   stakeCoolness: number;
 }) {
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const isAtBottomRef = useRef(true);
+  const previousRowCountRef = useRef<number | undefined>(undefined);
+  const previousLastOwnMessageIdRef = useRef<string | undefined>(undefined);
+  const [pillVisible, setPillVisible] = useState(false);
+
+  const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const atBottom = isScrollAtBottom({
+      contentOffsetY: contentOffset.y,
+      contentHeight: contentSize.height,
+      layoutHeight: layoutMeasurement.height,
+    });
+    isAtBottomRef.current = atBottom;
+    setIsAtBottom(atBottom);
+    if (atBottom) setPillVisible(false);
+  }, []);
+
+  const scrollToBottom = useCallback((animated: boolean) => {
+    listRef.current?.scrollToEnd({ animated });
+  }, [listRef]);
+
+  const handleContentSizeChange = useCallback(() => {
+    const previousRowCount = previousRowCountRef.current;
+    const nextRowCount = rows.length;
+    const wasAtBottom = isAtBottomRef.current;
+
+    const shouldScroll = shouldAutoScrollOnContentChange({
+      lastOwnMessageId,
+      nextRowCount,
+      previousLastOwnMessageId: previousLastOwnMessageIdRef.current,
+      previousRowCount,
+      wasAtBottom,
+    });
+    const pillShouldShow = resolveNewMessagesPillVisible({
+      isAtBottom: wasAtBottom,
+      nextRowCount,
+      previousRowCount,
+    }) && !shouldScroll;
+
+    previousRowCountRef.current = nextRowCount;
+    previousLastOwnMessageIdRef.current = lastOwnMessageId;
+
+    if (shouldScroll) {
+      scrollToBottom(previousRowCount !== undefined);
+      return;
+    }
+    if (pillShouldShow) setPillVisible(true);
+  }, [lastOwnMessageId, rows.length, scrollToBottom]);
+
+  const handlePillPress = useCallback(() => {
+    scrollToBottom(true);
+    setPillVisible(false);
+  }, [scrollToBottom]);
+
   return (
-    <FlatList
-      contentContainerStyle={styles.stack}
-      data={rows as GlobalChatRow[]}
-      initialNumToRender={16}
-      keyExtractor={(row) => row.id}
-      keyboardShouldPersistTaps="handled"
-      ListEmptyComponent={<Text style={styles.emptyText}>{emptyLabel}</Text>}
-      maxToRenderPerBatch={16}
-      onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
-      onScrollBeginDrag={onScrollBeginDrag}
-      ref={listRef}
-      removeClippedSubviews={Platform.OS === 'android'}
-      renderItem={({ item }) => (
-        <ChatRow awayTeam={awayTeam} homeTeam={homeTeam} onStake={onStake} row={item} stakeCoolness={stakeCoolness} />
-      )}
-      style={styles.list}
-      windowSize={9}
-    />
+    <View style={styles.feedRoot}>
+      <FlatList
+        contentContainerStyle={styles.stack}
+        data={rows as GlobalChatRow[]}
+        initialNumToRender={16}
+        keyExtractor={(row) => row.id}
+        keyboardShouldPersistTaps="handled"
+        ListEmptyComponent={<Text style={styles.emptyText}>{emptyLabel}</Text>}
+        maxToRenderPerBatch={16}
+        onContentSizeChange={handleContentSizeChange}
+        onScroll={handleScroll}
+        onScrollBeginDrag={onScrollBeginDrag}
+        ref={listRef}
+        removeClippedSubviews={Platform.OS === 'android'}
+        renderItem={({ item }) => (
+          <ChatRow awayTeam={awayTeam} homeTeam={homeTeam} onStake={onStake} row={item} stakeCoolness={stakeCoolness} />
+        )}
+        scrollEventThrottle={16}
+        style={styles.list}
+        windowSize={9}
+      />
+      {pillVisible && !isAtBottom ? (
+        <Pressable
+          accessibilityLabel="New messages, scroll to bottom"
+          accessibilityRole="button"
+          onPress={handlePillPress}
+          style={styles.newMessagesPill}
+        >
+          <Text style={styles.newMessagesPillText}>New messages ↓</Text>
+        </Pressable>
+      ) : null}
+    </View>
   );
 }
 
@@ -163,38 +265,46 @@ function ChatRow({
         : row.takenParticipant === awayTeam.participant
           ? awayTeam.name
           : undefined;
+
+      // Item 16 (fix round): a closed/resolved call ('taken' or 'closed' --
+      // nothing actionable left) collapses to a single compact one-line row
+      // instead of stacking as a full card into the feed's activity log;
+      // only a genuinely open, actionable call keeps the full card.
+      if (classifyPromptRowDisplay(row) === 'compact') {
+        return (
+          <View style={styles.promptCompactRow}>
+            <Text numberOfLines={1} style={styles.promptCompactCopy}>
+              {row.copy}
+            </Text>
+            <Text numberOfLines={1} style={styles.promptCompactOutcome}>
+              {promptRowCompactOutcomeText(row, lookupStakeEmoji, takenTeamName)}
+            </Text>
+          </View>
+        );
+      }
+
       return (
         <View style={styles.promptCard}>
           <Text style={styles.promptCopy}>{row.copy}</Text>
-          {row.state === 'open' ? (
-            isTeamPick ? (
-              <TeamPickButtons
-                awayTeam={awayTeam}
-                homeTeam={homeTeam}
-                onPick={(participant) => onStake(row.promptId, row.stakeItemId, participant)}
-                stakeCoolness={stakeCoolness}
-                stakeEmoji={STAKE_EMOJI[row.stakeItemId]}
-              />
-            ) : (
-              <Pressable
-                accessibilityLabel={`Stake ${STAKE_EMOJI[row.stakeItemId]} and ${stakeCoolness} coolness on: ${row.copy}`}
-                accessibilityRole="button"
-                onPress={() => onStake(row.promptId, row.stakeItemId)}
-                style={({ pressed }) => [styles.stakeButton, pressed && styles.stakeButtonPressed]}
-              >
-                <Text style={styles.stakeButtonText}>
-                  Stake {STAKE_EMOJI[row.stakeItemId]} · −{stakeCoolness} coolness
-                </Text>
-              </Pressable>
-            )
-          ) : row.state === 'taken' ? (
-            <View style={styles.takenPill}>
-              <Text style={styles.takenPillText}>
-                {row.takenItemId !== undefined ? promptTakenPillText(row.takenItemId, lookupStakeEmoji, takenTeamName) : 'You called it'}
-              </Text>
-            </View>
+          {isTeamPick ? (
+            <TeamPickButtons
+              awayTeam={awayTeam}
+              homeTeam={homeTeam}
+              onPick={(participant) => onStake(row.promptId, row.stakeItemId, participant)}
+              stakeCoolness={stakeCoolness}
+              stakeEmoji={STAKE_EMOJI[row.stakeItemId]}
+            />
           ) : (
-            <Text style={styles.promptClosedText}>Closed</Text>
+            <Pressable
+              accessibilityLabel={`Stake ${STAKE_EMOJI[row.stakeItemId]} and ${stakeCoolness} coolness on: ${row.copy}`}
+              accessibilityRole="button"
+              onPress={() => onStake(row.promptId, row.stakeItemId)}
+              style={({ pressed }) => [styles.stakeButton, pressed && styles.stakeButtonPressed]}
+            >
+              <Text style={styles.stakeButtonText}>
+                Stake {STAKE_EMOJI[row.stakeItemId]} · −{stakeCoolness} coolness
+              </Text>
+            </Pressable>
           )}
         </View>
       );
@@ -262,7 +372,12 @@ function TeamPickButtons({
           onPress={() => onPick(team.participant)}
           style={({ pressed }) => [styles.teamPickButton, { borderColor: team.color }, pressed && styles.stakeButtonPressed]}
         >
-          <Text numberOfLines={1} style={styles.teamPickButtonText}>{team.name}</Text>
+          {/* Item 12: the button shows its real cost, not just the team --
+              e.g. "France · 10 ⚡" -- sourced from the prompt's own
+              stakeCoolness (ECONOMY_FIXED_STAKE_COOLNESS), never hardcoded. */}
+          <Text numberOfLines={1} style={styles.teamPickButtonText}>
+            {team.name} · {stakeCoolness} {stakeEmoji}
+          </Text>
         </Pressable>
       ))}
     </View>
@@ -371,8 +486,29 @@ function PoolSplitRow({ row }: { row: GlobalChatRow & { kind: 'pool_split' } }) 
 }
 
 const styles = StyleSheet.create({
+  feedRoot: {
+    flex: 1,
+  },
   list: {
     flex: 1,
+  },
+  newMessagesPill: {
+    alignSelf: 'center',
+    backgroundColor: tokens.shell.text,
+    borderRadius: tokens.radii.pill,
+    bottom: tokens.spacing.md,
+    paddingHorizontal: tokens.spacing.lg,
+    paddingVertical: tokens.spacing.sm,
+    position: 'absolute',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+  },
+  newMessagesPillText: {
+    color: tokens.shell.inverseText,
+    fontSize: tokens.typography.size.label,
+    fontWeight: tokens.typography.weight.bold,
   },
   stack: {
     gap: tokens.spacing.sm,
@@ -472,24 +608,24 @@ const styles = StyleSheet.create({
     fontSize: tokens.typography.size.label,
     fontWeight: tokens.typography.weight.bold,
   },
-  takenPill: {
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    borderRadius: tokens.radii.pill,
-    minHeight: 40,
-    justifyContent: 'center',
-    paddingHorizontal: tokens.spacing.lg,
+  /** Item 16 (fix round): closed/resolved calls -- question + outcome on one muted line, no card shell, no buttons. */
+  promptCompactRow: {
+    alignItems: 'baseline',
+    flexDirection: 'row',
+    gap: tokens.spacing.sm,
+    paddingHorizontal: tokens.spacing.md,
+    paddingVertical: tokens.spacing.xs,
   },
-  takenPillText: {
+  promptCompactCopy: {
     color: tokens.shell.textDim,
-    fontSize: tokens.typography.size.label,
-    fontWeight: tokens.typography.weight.bold,
-  },
-  promptClosedText: {
-    color: tokens.shell.textDim,
+    flexShrink: 1,
     fontSize: tokens.typography.size.label,
     fontWeight: tokens.typography.weight.medium,
-    textTransform: 'uppercase',
+  },
+  promptCompactOutcome: {
+    color: tokens.shell.textMuted,
+    flexShrink: 0,
+    fontSize: tokens.typography.size.caption,
   },
   socialProofText: {
     color: tokens.shell.textMuted,

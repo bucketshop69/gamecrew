@@ -2,8 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  GAME_VIEW_AMBIENT_DUCK_FACTOR,
+  GAME_VIEW_AMBIENT_VOLUME,
   canPlayGameViewSoundEffect,
   gameViewSoundEventKey,
+  resolveGameViewAmbientDuckedVolume,
   resolveGameViewSoundPlan,
 } from '../src/screens/game-view/game-view-sound-logic.ts';
 
@@ -36,6 +39,31 @@ test('stale or absent truth collapses to a quiet bed with no event guess', () =>
     ambientLevel: 'quiet',
     effects: [],
   });
+});
+
+// ---------------------------------------------------------------------------
+// Playback-activity gate (fix round item 3: a parked finished match must be
+// FULLY SILENT, not just "quiet" -- see GameViewAmbientLevel's doc comment
+// on why 'silent' (volume 0) is distinct from 'quiet' (a low ambient hum).
+// ---------------------------------------------------------------------------
+
+test('playbackActive=false silences the plan outright, regardless of scene/goalBeat', () => {
+  assert.deepEqual(
+    resolveGameViewSoundPlan(scene({ kind: 'shot', sourceOutcome: 'Blocked' }), undefined, false, false),
+    { ambientLevel: 'silent', effects: [] },
+  );
+  assert.deepEqual(
+    resolveGameViewSoundPlan(scene({ kind: 'goal_sequence' }), 'celebration', false, false),
+    { ambientLevel: 'silent', effects: [] },
+  );
+  assert.equal(GAME_VIEW_AMBIENT_VOLUME.silent, 0);
+});
+
+test('playbackActive defaults to true -- every existing caller is unaffected', () => {
+  assert.deepEqual(
+    resolveGameViewSoundPlan(scene({ kind: 'shot', sourceOutcome: 'Blocked' }), undefined),
+    { ambientLevel: 'danger', effects: ['ball_strike'] },
+  );
 });
 
 test('set-piece punctuation is specific and unknown actions stay quiet', () => {
@@ -124,4 +152,18 @@ test('effect cooldowns suppress feed chatter but never suppress a later goal roa
   assert.equal(canPlayGameViewSoundEffect('crowd_swell', 100, 2_000), false);
   assert.equal(canPlayGameViewSoundEffect('crowd_swell', 100, 2_700), true);
   assert.equal(canPlayGameViewSoundEffect('goal_roar', 100, 100), true);
+});
+
+test('ambient volume ducks to the fixed factor while commentary voice is speaking', () => {
+  assert.equal(resolveGameViewAmbientDuckedVolume(0.12, true), 0.12 * GAME_VIEW_AMBIENT_DUCK_FACTOR);
+  assert.equal(GAME_VIEW_AMBIENT_DUCK_FACTOR, 0.35);
+});
+
+test('ambient volume is unchanged when commentary voice is not speaking', () => {
+  assert.equal(resolveGameViewAmbientDuckedVolume(0.12, false), 0.12);
+  assert.equal(resolveGameViewAmbientDuckedVolume(0, false), 0);
+});
+
+test('ducking a silent target stays silent', () => {
+  assert.equal(resolveGameViewAmbientDuckedVolume(0, true), 0);
 });

@@ -1,5 +1,6 @@
 import type { GameCrewMatchStatus, GameViewScene, GameViewSceneKind, MatchEngineScore } from '@gamecrew/core';
 
+import type { GameViewIntent } from '../match-transport-strip-logic';
 import type { MatchSessionStatus } from '../../state/match-session';
 import type { ActiveSceneWindow, PlaybackMode } from '../../state/playback-engine';
 import type { GameViewLoadStatus } from './game-view-board-logic';
@@ -131,6 +132,120 @@ export function selectPlaybackModeForMatchStatus(
 /** Whether `usePlaybackEngine`'s `isLive` polling flag should be set for a given match status. */
 export function isLiveMatchStatus(status: GameCrewMatchStatus): boolean {
   return status === 'live';
+}
+
+// ---------------------------------------------------------------------------
+// Completed-match end-state landing (item 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether Game View should land a fixture at its end state (full-time board,
+ * pitch idle behind it) instead of auto-kicking off the from-kickoff replay.
+ * Only a genuinely completed match (`finished`/`replayable` -- a match that
+ * has actually played out and has a settled final board to show) lands at
+ * full-time; `upcoming`/`hosted` fixtures have no completed match to land
+ * on, so they fall back to the pre-existing auto-replay-from-kickoff path
+ * (unchanged from before this item), and `live` fixtures are untouched
+ * entirely (see `selectPlaybackModeForMatchStatus`).
+ */
+export function shouldLandAtFullTime(status: GameCrewMatchStatus): boolean {
+  return status === 'finished' || status === 'replayable';
+}
+
+/**
+ * Round 5/item 5 (owner's repro: opening a finished match's details
+ * directly started playback from the beginning): whether the playback
+ * engine should be force-parked (paused) on landing at a fixture's full-time
+ * board, REGARDLESS of any pre-existing session/engine state the fixture's
+ * shared `MatchSession`/listening session might have carried in with it (a
+ * fresh mount's own `PlaybackEngine` always starts at `mode: 'live'`, but an
+ * adopted listening session or a carried-over checkpoint selection could in
+ * principle leave the engine actively ticking) -- `landsAtFullTime` alone
+ * is exactly the condition under which nothing should ever be advancing, so
+ * this parks whenever that's true and the engine reports itself as still
+ * running (`'live'` or `'replay'`). `'paused'`/`'scrubbing'` are left alone:
+ * they're already parked, and forcing a fresh `'paused'` over e.g. a
+ * checkpoint clip that already finished and settled would be a needless
+ * extra engine call, not a correctness fix.
+ */
+export function shouldForceParkForFullTimeLanding(
+  landsAtFullTime: boolean,
+  mode: PlaybackMode,
+): boolean {
+  return landsAtFullTime && (mode === 'live' || mode === 'replay');
+}
+
+// ---------------------------------------------------------------------------
+// Header truth while the full-time board is parked (fix round item 1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Owner's repro: jump to a checkpoint clip, let it end and settle back to
+ * the full-time board -- the match-detail header (gamecrew-screens.tsx's
+ * `DetailTeamScore`/`DetailMatchClock`) kept showing the parked clip's last
+ * reported clock/score ("86:42 SECOND HALF") instead of "FT" and the final
+ * score. Root cause: `GameViewScreen`'s `onPresentationChange` callback only
+ * clears (`null`) when the current scene itself goes away or the screen
+ * unmounts -- settling `gameViewIntent` back to 'idle' does not touch it, so
+ * whatever presentation the parked engine last reported (the clip's final
+ * scene, still sitting on the timeline) lingers in the header's state.
+ *
+ * Rather than trying to thread a clear-on-settle call through every place
+ * `gameViewIntent` can flip to 'idle', this function gives the header a
+ * single source of truth: for a genuinely completed match
+ * (`shouldLandAtFullTime`) whenever the full-time board is the thing
+ * actually showing (`gameViewIntent === 'idle'`), the header must show the
+ * match's own final truth regardless of what `gamePresentation` last
+ * reported -- the FT board and the header must never be able to disagree.
+ */
+export function shouldHeaderShowFullTimeTruth(
+  matchStatus: GameCrewMatchStatus,
+  gameViewIntent: GameViewIntent,
+): boolean {
+  return shouldLandAtFullTime(matchStatus) && gameViewIntent === 'idle';
+}
+
+// ---------------------------------------------------------------------------
+// Playback-activity sound gate (fix round item 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * The owner's sound model: a parked finished match (full-time board idle,
+ * nothing playing) must be FULLY SILENT -- no ambient, no effects, no voice
+ * -- regardless of the sound toggle. Sound plays only while playback is
+ * genuinely active: a checkpoint clip, highlights, the full replay, or a
+ * LIVE match.
+ *
+ * - `live` matches are always active -- there is no "parked" state for a
+ *   live fixture (the full-time board never renders for one, see
+ *   `shouldLandAtFullTime`), so sound behaves exactly as it always has.
+ * - A completed match (`finished`/`replayable`) is active only while
+ *   `gameViewIntent` is `clip`/`highlights`/`full` (the engine is actively
+ *   advancing through a checkpoint/highlights sequence/full replay) AND the
+ *   engine itself is genuinely advancing rather than parked mid-playback --
+ *   `mode === 'paused'` (the transport strip's explicit pause, tracked
+ *   engine-side too) or `'scrubbing'` reports inactive. This deliberately
+ *   treats "paused mid-replay" the same as "idle/parked": silence is the
+ *   simplest, safest default for anything not actively playing, and matches
+ *   the spec's own suggestion ("paused mid-replay -> silent ambient is
+ *   acceptable and simplest").
+ * - `upcoming`/`hosted` fixtures aren't part of the owner's finished-match
+ *   repro; they fall back to the completed-match rule above via the same
+ *   `gameViewIntent`/`mode` check (in practice they auto-start `full` replay
+ *   immediately, so this only matters for the same instant a live match's
+ *   idle-mode window would).
+ */
+export function resolveGameViewPlaybackActive(input: {
+  gameViewIntent: GameViewIntent;
+  matchStatus: GameCrewMatchStatus;
+  playbackMode: PlaybackMode;
+}): boolean {
+  const { gameViewIntent, matchStatus, playbackMode } = input;
+
+  if (matchStatus === 'live') return true;
+
+  if (gameViewIntent === 'idle') return false;
+  return playbackMode === 'replay' || playbackMode === 'live';
 }
 
 // ---------------------------------------------------------------------------

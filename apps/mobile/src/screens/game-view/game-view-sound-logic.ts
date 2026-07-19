@@ -1,6 +1,13 @@
 import type { GameViewScene } from '@gamecrew/core';
 
-export type GameViewAmbientLevel = 'quiet' | 'building' | 'danger';
+/**
+ * Fix round item 3: 'silent' is distinct from 'quiet' -- 'quiet' still plays
+ * a low ambient hum (a legitimate atmosphere choice for stale/absent-scene
+ * moments during otherwise-active playback), while 'silent' is true zero
+ * volume, reserved for the playback-activity gate (a parked finished match
+ * must have NOTHING playing, not even a low hum).
+ */
+export type GameViewAmbientLevel = 'silent' | 'quiet' | 'building' | 'danger';
 
 export type GameViewSoundEffect =
   | 'referee_whistle'
@@ -20,12 +27,26 @@ export interface GameViewSoundPlan {
  * second event detector. This pure plan deliberately stays small: continuous
  * crowd energy follows grounded pressure, while punctuating effects attach
  * only to scene kinds/actions the match engine has actually emitted.
+ *
+ * Fix round item 3 (the owner's sound model): a parked finished match (the
+ * full-time board idle, nothing playing) must be FULLY SILENT regardless of
+ * the sound toggle -- re-entering a finished match with sound remembered ON
+ * must never start the stadium ambient hum under a static board. `playbackActive`
+ * carries that gate: false zeroes the plan to silence (no ambient, no
+ * effects) no matter what the scene/goalBeat would otherwise resolve to.
+ * Callers derive it from {matchStatus, playbackMode, gameViewIntent} -- see
+ * `resolveGameViewPlaybackActive` below -- live matches are always active;
+ * a finished match is only active while a checkpoint clip, highlights, or
+ * the full replay is actually advancing. Defaults to `true` so every other
+ * existing caller (live matches, in-progress replay) is unaffected.
  */
 export function resolveGameViewSoundPlan(
   scene: GameViewScene | null | undefined,
   goalBeat: GameViewSoundGoalBeat,
   isStale = false,
+  playbackActive = true,
 ): GameViewSoundPlan {
+  if (!playbackActive) return soundPlan('silent');
   if (!scene || isStale) return soundPlan('quiet');
 
   switch (scene.kind) {
@@ -101,6 +122,7 @@ export function canPlayGameViewSoundEffect(
 }
 
 export const GAME_VIEW_AMBIENT_VOLUME: Readonly<Record<GameViewAmbientLevel, number>> = {
+  silent: 0,
   quiet: 0.055,
   building: 0.085,
   danger: 0.12,
@@ -119,6 +141,21 @@ const EFFECT_COOLDOWN_MS: Readonly<Record<GameViewSoundEffect, number>> = {
   crowd_swell: 2_600,
   goal_roar: 0,
 };
+
+/** Fraction of the planned ambient volume that survives while commentary voice is speaking. */
+export const GAME_VIEW_AMBIENT_DUCK_FACTOR = 0.35;
+
+/**
+ * Applies the voice-ducking factor to a planned ambient volume. Kept as a
+ * pure function of (target, isSpeaking) so the native adapter can compute a
+ * duck-aware fade target without owning any ducking policy itself.
+ */
+export function resolveGameViewAmbientDuckedVolume(
+  targetVolume: number,
+  isSpeaking: boolean,
+): number {
+  return isSpeaking ? targetVolume * GAME_VIEW_AMBIENT_DUCK_FACTOR : targetVolume;
+}
 
 function resolvePressureAmbientLevel(scene: GameViewScene): GameViewAmbientLevel {
   const pressure = scene.pressure ?? scene.zone;

@@ -42,6 +42,17 @@ export interface PlaybackSnapshot {
   headRevision: number;
   projectionGeneration: number;
   frameCount: number;
+  /**
+   * Set only while a bounded replay range (`startReplayAt`'s `stopAtIndex`
+   * option) is active: the scene index this range will stop *at* -- the
+   * engine plays through that scene's own window and then halts (mode stays
+   * `'replay'`, the advance timer is not rescheduled) instead of continuing
+   * to the next scene. Consumers (e.g. the checkpoint-clip / highlights
+   * sequencer) watch for `playheadIndex === rangeStopAtIndex` to know a
+   * bounded window has finished. `undefined` for an ordinary unbounded
+   * replay/live/scrub.
+   */
+  rangeStopAtIndex: number | undefined;
 }
 
 export type PlaybackListener = (snapshot: PlaybackSnapshot) => void;
@@ -100,6 +111,8 @@ export class PlaybackEngine {
   private advanceTimer: unknown = null;
   private liveQueue: QueuedLiveScene[] = [];
   private disposed = false;
+  /** See `PlaybackSnapshot.rangeStopAtIndex`'s doc comment. */
+  private rangeStopAtIndex: number | undefined;
 
   constructor(session: MatchSessionHandle, options: PlaybackEngineOptions) {
     this.session = session;
@@ -143,6 +156,7 @@ export class PlaybackEngine {
       headRevision: session.headRevision,
       projectionGeneration: session.projectionGeneration,
       frameCount: session.frames.length,
+      rangeStopAtIndex: this.rangeStopAtIndex,
     };
   }
 
@@ -150,6 +164,7 @@ export class PlaybackEngine {
   play(): void {
     this.resetScheduling();
     this.mode = 'live';
+    this.rangeStopAtIndex = undefined;
     this.primeLiveAtHead();
     this.emit();
   }
@@ -157,6 +172,7 @@ export class PlaybackEngine {
   pause(): void {
     this.clearAdvanceTimer();
     this.mode = 'paused';
+    this.rangeStopAtIndex = undefined;
     this.emit();
   }
 
@@ -164,6 +180,7 @@ export class PlaybackEngine {
   scrubTo(index: number): void {
     this.resetScheduling();
     this.mode = 'scrubbing';
+    this.rangeStopAtIndex = undefined;
     if (this.timeline.length === 0) {
       this.playheadIndex = -1;
       this.activeSceneWindow = undefined;
@@ -182,18 +199,32 @@ export class PlaybackEngine {
    * Play the paced timeline from an explicit scene. This is the same replay
    * scheduler as `startReplay`, exposed for the future seek bar so navigation
    * never needs a second timer or fixture-specific playback path.
+   *
+   * `options.stopAtIndex`, when given, bounds this replay to a clip: the
+   * engine advances scene-by-scene exactly as an unbounded replay does, but
+   * once the playhead reaches `stopAtIndex` it plays that scene's own window
+   * and then halts -- `scheduleReplayAdvance` simply does not re-arm past it.
+   * This is the minimal, additive mechanism checkpoint clips (item 8) and the
+   * highlights sequencer (item 13) build on: callers watch
+   * `PlaybackSnapshot.rangeStopAtIndex`/`playheadIndex` to know when the
+   * bounded window has finished (see `hasPlaybackReachedRangeStop`).
    */
-  startReplayAt(index: number): void {
+  startReplayAt(index: number, options?: { stopAtIndex?: number }): void {
     this.resetScheduling();
     this.mode = 'replay';
     if (this.session.getSnapshot().status === 'loading' || this.timeline.length === 0) {
       this.playheadIndex = -1;
       this.activeSceneWindow = undefined;
+      this.rangeStopAtIndex = undefined;
       this.emit();
       return;
     }
 
-    this.setActiveScene(clamp(index, 0, this.timeline.length - 1), 'replay');
+    const clampedIndex = clamp(index, 0, this.timeline.length - 1);
+    this.rangeStopAtIndex = options?.stopAtIndex === undefined
+      ? undefined
+      : clamp(options.stopAtIndex, clampedIndex, this.timeline.length - 1);
+    this.setActiveScene(clampedIndex, 'replay');
     this.emit();
     this.scheduleReplayAdvance();
   }
@@ -255,6 +286,7 @@ export class PlaybackEngine {
       // Loading can settle without changing the final page's frame count or
       // head revision. That status transition still releases replay.
       if (this.mode === 'replay' && wasLoading && this.timeline.length > 0) {
+        this.rangeStopAtIndex = undefined;
         this.setActiveScene(0, 'replay');
         this.scheduleReplayAdvance();
       }
@@ -268,6 +300,7 @@ export class PlaybackEngine {
         this.primeLiveAtHead();
       } else if (this.mode === 'replay') {
         if (this.timeline.length > 0) {
+          this.rangeStopAtIndex = undefined;
           this.setActiveScene(0, 'replay');
           this.scheduleReplayAdvance();
         } else {
@@ -325,6 +358,7 @@ export class PlaybackEngine {
         // A correction can announce a new projection generation with an
         // empty loading snapshot, then repopulate that same generation.
         // Re-enter replay at scene zero when those corrected frames arrive.
+        this.rangeStopAtIndex = undefined;
         this.setActiveScene(0, 'replay');
         this.scheduleReplayAdvance();
       } else {
@@ -429,6 +463,12 @@ export class PlaybackEngine {
   private scheduleReplayAdvance() {
     this.clearAdvanceTimer();
     if (this.disposed || this.mode !== 'replay' || !this.activeSceneWindow) return;
+    // A bounded clip/range plays its stop scene's own window in full, then
+    // halts -- no further advance timer is armed once the playhead is
+    // sitting on `rangeStopAtIndex`. Mode intentionally stays 'replay' (not
+    // 'paused') so `refreshReplayWindow` keeps tracking a paginated backfill
+    // the same way an unbounded replay would.
+    if (this.rangeStopAtIndex !== undefined && this.playheadIndex >= this.rangeStopAtIndex) return;
 
     const dueAt = this.activeSceneWindow.startedAtMs + this.activeSceneWindow.durationMs;
     this.advanceTimer = this.clock.setTimer(() => {

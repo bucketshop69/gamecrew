@@ -381,7 +381,12 @@ export const GAME_VIEW_STATE_COPY: Record<'loading' | 'empty' | 'error' | 'stale
     title: 'Building Game View.',
   },
   empty: {
-    title: 'Game View will appear when TxLINE has enough match signal.',
+    // Fix round item 4: dropped the "TxLINE" internal-system reference --
+    // no user-facing copy anywhere should name it. This state covers both
+    // an upcoming/hosted fixture that hasn't kicked off yet (the common
+    // case) and the rarer live/finished fixture with no scenes at all, so
+    // the copy stays generic rather than committing to either framing.
+    title: 'Game View opens when the match starts.',
   },
   error: {
     title: 'Game View is unavailable.',

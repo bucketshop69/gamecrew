@@ -8,9 +8,13 @@ import {
   mapSourceActionToSetPieceVariant,
   resolveMatchParticipants,
   resolveGameViewLoadState,
+  resolveGameViewPlaybackActive,
   resolvePresentationScene,
   resolveScoreRailScore,
   selectPlaybackModeForMatchStatus,
+  shouldForceParkForFullTimeLanding,
+  shouldHeaderShowFullTimeTruth,
+  shouldLandAtFullTime,
   shouldSetPieceUseFullVignette,
   shouldTakeoverOnCompleteAdvancePlayback,
 } from '../src/screens/game-view/game-view-screen-logic.ts';
@@ -88,6 +92,129 @@ test('isLiveMatchStatus: true only for live', () => {
   assert.equal(isLiveMatchStatus('upcoming'), false);
   assert.equal(isLiveMatchStatus('hosted'), false);
   assert.equal(isLiveMatchStatus('replayable'), false);
+});
+
+// ---------------------------------------------------------------------------
+// Completed-match end-state landing (item 3)
+// ---------------------------------------------------------------------------
+
+test('shouldLandAtFullTime: true only for a genuinely completed match', () => {
+  assert.equal(shouldLandAtFullTime('finished'), true);
+  assert.equal(shouldLandAtFullTime('replayable'), true);
+});
+
+test('shouldLandAtFullTime: false for live, upcoming, and hosted -- no completed match to land on', () => {
+  assert.equal(shouldLandAtFullTime('live'), false);
+  assert.equal(shouldLandAtFullTime('upcoming'), false);
+  assert.equal(shouldLandAtFullTime('hosted'), false);
+});
+
+// ---------------------------------------------------------------------------
+// Force-park landing guard (round 5/item 5)
+// ---------------------------------------------------------------------------
+
+test('shouldForceParkForFullTimeLanding parks a finished match whose engine reports live', () => {
+  assert.equal(shouldForceParkForFullTimeLanding(true, 'live'), true);
+});
+
+test('shouldForceParkForFullTimeLanding parks a finished match whose engine reports replay', () => {
+  assert.equal(shouldForceParkForFullTimeLanding(true, 'replay'), true);
+});
+
+test('shouldForceParkForFullTimeLanding does not re-park an already-paused engine', () => {
+  assert.equal(shouldForceParkForFullTimeLanding(true, 'paused'), false);
+});
+
+test('shouldForceParkForFullTimeLanding does not disturb an in-progress scrub', () => {
+  assert.equal(shouldForceParkForFullTimeLanding(true, 'scrubbing'), false);
+});
+
+test('shouldForceParkForFullTimeLanding never parks when the fixture does not land at full time', () => {
+  assert.equal(shouldForceParkForFullTimeLanding(false, 'live'), false);
+  assert.equal(shouldForceParkForFullTimeLanding(false, 'replay'), false);
+  assert.equal(shouldForceParkForFullTimeLanding(false, 'paused'), false);
+});
+
+// ---------------------------------------------------------------------------
+// Header truth while the full-time board is parked (fix round item 1)
+// ---------------------------------------------------------------------------
+
+test('shouldHeaderShowFullTimeTruth: true for a completed match once the board settles to idle', () => {
+  assert.equal(shouldHeaderShowFullTimeTruth('finished', 'idle'), true);
+  assert.equal(shouldHeaderShowFullTimeTruth('replayable', 'idle'), true);
+});
+
+test('shouldHeaderShowFullTimeTruth: false for a completed match while a clip/highlights/full replay is actively playing', () => {
+  assert.equal(shouldHeaderShowFullTimeTruth('finished', 'clip'), false);
+  assert.equal(shouldHeaderShowFullTimeTruth('finished', 'highlights'), false);
+  assert.equal(shouldHeaderShowFullTimeTruth('finished', 'full'), false);
+});
+
+test('shouldHeaderShowFullTimeTruth: false for live/upcoming/hosted -- no full-time board exists to force truth for', () => {
+  assert.equal(shouldHeaderShowFullTimeTruth('live', 'idle'), false);
+  assert.equal(shouldHeaderShowFullTimeTruth('upcoming', 'idle'), false);
+  assert.equal(shouldHeaderShowFullTimeTruth('hosted', 'idle'), false);
+});
+
+// ---------------------------------------------------------------------------
+// Playback-activity sound gate (fix round item 3)
+// ---------------------------------------------------------------------------
+
+test('resolveGameViewPlaybackActive: a parked finished match is silent even with sound remembered on', () => {
+  assert.equal(resolveGameViewPlaybackActive({
+    gameViewIntent: 'idle',
+    matchStatus: 'finished',
+    playbackMode: 'paused',
+  }), false);
+  assert.equal(resolveGameViewPlaybackActive({
+    gameViewIntent: 'idle',
+    matchStatus: 'replayable',
+    playbackMode: 'paused',
+  }), false);
+});
+
+test('resolveGameViewPlaybackActive: a finished match playing a checkpoint clip, highlights, or the full replay is active', () => {
+  assert.equal(resolveGameViewPlaybackActive({
+    gameViewIntent: 'clip',
+    matchStatus: 'finished',
+    playbackMode: 'replay',
+  }), true);
+  assert.equal(resolveGameViewPlaybackActive({
+    gameViewIntent: 'highlights',
+    matchStatus: 'finished',
+    playbackMode: 'replay',
+  }), true);
+  assert.equal(resolveGameViewPlaybackActive({
+    gameViewIntent: 'full',
+    matchStatus: 'finished',
+    playbackMode: 'replay',
+  }), true);
+});
+
+test('resolveGameViewPlaybackActive: pausing mid-replay is treated as inactive (silent ambient is the simplest, accepted default)', () => {
+  assert.equal(resolveGameViewPlaybackActive({
+    gameViewIntent: 'clip',
+    matchStatus: 'finished',
+    playbackMode: 'paused',
+  }), false);
+  assert.equal(resolveGameViewPlaybackActive({
+    gameViewIntent: 'full',
+    matchStatus: 'finished',
+    playbackMode: 'scrubbing',
+  }), false);
+});
+
+test('resolveGameViewPlaybackActive: a live match is always active regardless of gameViewIntent or engine mode', () => {
+  assert.equal(resolveGameViewPlaybackActive({
+    gameViewIntent: 'idle',
+    matchStatus: 'live',
+    playbackMode: 'live',
+  }), true);
+  assert.equal(resolveGameViewPlaybackActive({
+    gameViewIntent: 'idle',
+    matchStatus: 'live',
+    playbackMode: 'paused',
+  }), true);
 });
 
 // ---------------------------------------------------------------------------

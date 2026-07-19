@@ -12,6 +12,7 @@ import {
   GAME_VIEW_EFFECT_VOLUME,
   canPlayGameViewSoundEffect,
   gameViewSoundEventKey,
+  resolveGameViewAmbientDuckedVolume,
   resolveGameViewSoundPlan,
   type GameViewSoundEffect,
   type GameViewSoundGoalBeat,
@@ -33,13 +34,19 @@ const lastEffectAtMs: Partial<Record<GameViewSoundEffect, number>> = {};
 export function useGameViewSoundscape({
   enabled,
   goalBeat,
+  isSpeaking = false,
   isStale,
+  playbackActive = true,
   scene,
   sceneWindowKey,
 }: {
   enabled: boolean;
   goalBeat: GameViewSoundGoalBeat;
+  /** Commentary voice is currently speaking a clip -- ducks the ambient bed (see use-commentary-voice.ts's isSpeaking). */
+  isSpeaking?: boolean;
   isStale: boolean;
+  /** Fix round item 3: gates the whole plan to silence (no ambient, no effects) while playback is not genuinely active -- e.g. a parked finished match's full-time board. See resolveGameViewPlaybackActive in game-view-screen-logic.ts. Defaults to true so every other existing caller (live matches, active replay) is unaffected. */
+  playbackActive?: boolean;
   scene: GameViewScene | null | undefined;
   sceneWindowKey: string | undefined;
 }) {
@@ -65,19 +72,24 @@ export function useGameViewSoundscape({
   );
 
   const plan = useMemo(
-    () => resolveGameViewSoundPlan(scene, goalBeat, isStale),
-    [goalBeat, isStale, scene],
+    () => resolveGameViewSoundPlan(scene, goalBeat, isStale, playbackActive),
+    [goalBeat, isStale, playbackActive, scene],
   );
   const eventKey = useMemo(
     () => gameViewSoundEventKey(sceneWindowKey, scene, goalBeat, plan),
     [goalBeat, plan, scene, sceneWindowKey],
   );
 
-  const ambientTargetRef = useRef(GAME_VIEW_AMBIENT_VOLUME[plan.ambientLevel]);
+  const ambientTargetRef = useRef(
+    resolveGameViewAmbientDuckedVolume(GAME_VIEW_AMBIENT_VOLUME[plan.ambientLevel], isSpeaking),
+  );
   const appIsActiveRef = useRef(AppState.currentState === 'active');
   const enabledRef = useRef(enabled);
   const fadeTimerRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
-  ambientTargetRef.current = GAME_VIEW_AMBIENT_VOLUME[plan.ambientLevel];
+  ambientTargetRef.current = resolveGameViewAmbientDuckedVolume(
+    GAME_VIEW_AMBIENT_VOLUME[plan.ambientLevel],
+    isSpeaking,
+  );
   enabledRef.current = enabled;
 
   const clearAmbientFade = useCallback(() => {
@@ -136,8 +148,11 @@ export function useGameViewSoundscape({
       return;
     }
     if (!ambiencePlayer.playing) ambiencePlayer.play();
-    fadeAmbience(GAME_VIEW_AMBIENT_VOLUME[plan.ambientLevel], AMBIENT_FADE_MS);
-  }, [ambiencePlayer, enabled, fadeAmbience, plan.ambientLevel]);
+    fadeAmbience(
+      resolveGameViewAmbientDuckedVolume(GAME_VIEW_AMBIENT_VOLUME[plan.ambientLevel], isSpeaking),
+      AMBIENT_FADE_MS,
+    );
+  }, [ambiencePlayer, enabled, fadeAmbience, isSpeaking, plan.ambientLevel]);
 
   useEffect(() => {
     if (!enabled || !appIsActiveRef.current || !eventKey) return;

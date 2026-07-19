@@ -22,6 +22,7 @@ const EMPTY_SNAPSHOT: PlaybackSnapshot = {
   headRevision: 0,
   projectionGeneration: 0,
   frameCount: 0,
+  rangeStopAtIndex: undefined,
 };
 
 /** Product-selected acceleration for complete historical match playback. */
@@ -50,6 +51,13 @@ export interface PlaybackEngineControls {
   pause: () => void;
   startReplay: () => void;
   startReplayAt: (index: number) => void;
+  /**
+   * Bounded clip playback (item 8/13): plays from `index` and halts once the
+   * playhead reaches `stopAtIndex`, instead of continuing to the end of the
+   * timeline. See `PlaybackEngine.startReplayAt`'s `options.stopAtIndex` and
+   * `PlaybackSnapshot.rangeStopAtIndex`.
+   */
+  startReplayRange: (index: number, stopAtIndex: number) => void;
   scrubTo: (index: number) => void;
 }
 
@@ -58,6 +66,7 @@ const NOOP_CONTROLS: PlaybackEngineControls = {
   pause: () => {},
   startReplay: () => {},
   startReplayAt: () => {},
+  startReplayRange: () => {},
   scrubTo: () => {},
 };
 
@@ -103,6 +112,8 @@ export function usePlaybackEngine(
       pause: () => engine.pause(),
       startReplay: () => engine.startReplay(),
       startReplayAt: (index: number) => engine.startReplayAt(index),
+      startReplayRange: (index: number, stopAtIndex: number) =>
+        engine.startReplayAt(index, { stopAtIndex }),
       scrubTo: (index: number) => engine.scrubTo(index),
     });
 

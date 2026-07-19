@@ -36,6 +36,43 @@ export async function fetchGameCrewMatches({
   return parsed.matches;
 }
 
+// -- Commentary voice audio (see apps/api/src/tts/commentary-audio-routes.ts,
+// mounted at the app root by apps/api/src/app.ts) ---------------------------
+
+export interface CommentaryAudioManifestEntry {
+  entryId: string;
+  voiceId: string;
+  speed: number;
+  textHash: string;
+  byteLength: number;
+}
+
+export interface CommentaryAudioManifestResponse {
+  fixtureId: string;
+  entries: readonly CommentaryAudioManifestEntry[];
+}
+
+/** GET /matches/:fixtureId/pulse/commentary/audio -- entries with generated voice for this fixture. */
+export async function fetchCommentaryAudioManifest(
+  fixtureId: string,
+  {
+    signal,
+  }: {
+    signal?: AbortSignal;
+  } = {},
+): Promise<CommentaryAudioManifestResponse> {
+  const response = await fetch(
+    `${gameCrewApiUrl}/matches/${encodeURIComponent(fixtureId)}/pulse/commentary/audio`,
+    { signal },
+  );
+  return readGameCrewResponse<CommentaryAudioManifestResponse>(response);
+}
+
+/** URL for GET /matches/:fixtureId/pulse/commentary/audio/:entryId -- the clip's audio/mpeg body. */
+export function resolveCommentaryAudioClipUrl(fixtureId: string, entryId: string): string {
+  return `${gameCrewApiUrl}/matches/${encodeURIComponent(fixtureId)}/pulse/commentary/audio/${encodeURIComponent(entryId)}`;
+}
+
 export async function fetchMatchPulseCommentary(
   fixtureId: string,
   {

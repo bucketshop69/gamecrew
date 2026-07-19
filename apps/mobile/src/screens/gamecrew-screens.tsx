@@ -3,6 +3,7 @@ import {
   type EconomyItemId,
   type GameCrewMatch,
   type LeaderboardRow,
+  type MatchEngineParticipant,
   type MatchPulseCommentaryEntry,
   gameCrewTokens,
   getEconomyItemDefinition,
@@ -23,7 +24,6 @@ import {
   Animated,
   findNodeHandle,
   FlatList,
-  Keyboard,
   type LayoutChangeEvent,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -39,28 +39,63 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { useGameCrewMatches } from '../hooks/use-gamecrew-matches';
 import { useMatchPulse } from '../hooks/use-match-pulse';
-import { useEconomy, useLeaderboard } from '../state/use-economy';
+import {
+  buildListeningSessionLabel,
+  enterListeningSession,
+  pauseListeningSession,
+  resumeListeningSession,
+  useAttachListeningSessionEngine,
+  useListeningSessionState,
+  useNowListeningBarVisible,
+} from '../state/commentary-listening-session';
+import { useEconomy, useLeaderboard, useUserPile } from '../state/use-economy';
 import { usePlaybackEngine } from '../state/use-playback-engine';
 import { useWallet } from '../state/use-wallet';
 import { EconomyLeaderboardSheet } from './economy-leaderboard-sheet';
 import { EconomyPileSheet } from './economy-pile-sheet';
 import { PrivyLoginBridge } from './economy-privy-login-bridge';
-import { GameViewDebugToggle } from './game-view-debug-panel';
 import { GameViewCheckpointRail } from './game-view/game-view-checkpoint-rail';
 import {
   buildGameViewCheckpointRail,
+  buildGameViewHighlightsSequence,
+  buildGameViewScorerTimeline,
   findGameViewCheckpointCommentaryEntryId,
+  resolveGameViewCheckpointClipWindow,
   resolveGameViewCheckpointReplayStartIndex,
+  resolveGameViewHighlightsAdvance,
+  type GameViewCheckpointClipWindow,
 } from './game-view/game-view-checkpoint-logic';
-import { GameViewScreen, type GameViewPresentationState } from './game-view/game-view-screen';
+import { GameViewFullTimeBoard } from './game-view/game-view-fulltime-board';
+import {
+  GameViewScreen,
+  type GameViewPresentationState,
+  useGoalSequenceScoreHold,
+  useReduceMotionPreference,
+} from './game-view/game-view-screen';
+import {
+  resolveGameViewLoadState,
+  resolveGameViewPlaybackActive,
+  resolvePresentationScene,
+  shouldHeaderShowFullTimeTruth,
+  shouldLandAtFullTime,
+} from './game-view/game-view-screen-logic';
+import {
+  setGameViewSoundEnabled,
+  setGameViewVoiceEnabled,
+  useGameViewSoundPreference,
+  useGameViewVoicePreference,
+} from './game-view/game-view-sound-preference';
+import { stopCommentaryVoiceImmediately, useCommentaryVoiceSpeaking } from './game-view/use-commentary-voice';
+import { useGameViewSoundscape } from './game-view/use-game-view-soundscape';
 import { GiftRevealTakeover } from './game-view-takeovers/gift-reveal-takeover';
-import { GlobalChatComposer } from './global-chat-composer';
-import { GlobalChatFeed, type ChatTeamIdentity } from './global-chat-feed';
+import { FloatingChatButton } from './floating-chat-button';
+import type { ChatTeamIdentity } from './global-chat-feed';
 import {
   buildGlobalChatStreamRows,
   buildPileRows,
   latestGiftRevealItems,
   poolChipText,
+  truncateWalletAddress,
   type GlobalChatRow,
 } from './global-chat-logic';
 import {
@@ -68,6 +103,21 @@ import {
   resolveHomeSection,
   type HomeSection,
 } from './home-screen-state';
+import { MatchChatSheet } from './match-chat-sheet';
+import {
+  buildPinnedChallengeStrip,
+  countUnseenOpenChallenges,
+} from './match-chat-sheet-logic';
+import { MatchTransportStrip } from './match-transport-strip';
+import {
+  resolveTransportButtonAction,
+  resolveTransportStripButtonDisabled,
+  resolveTransportStripIsPaused,
+  resolveTransportStripLabel,
+  shouldShowBackToFullTime,
+} from './match-transport-strip-logic';
+import { NowListeningBar } from './now-listening-bar';
+import { ProfileSheet } from './profile-sheet';
 
 /** Set at build time (EXPO_PUBLIC_PRIVY_APP_ID/CLIENT_ID) -- mirrors app/_layout.tsx's gate exactly, so the claim UI's "unavailable" state and the actual PrivyProvider mount agree on whether Privy is configured. */
 const PRIVY_AVAILABLE = Boolean(
@@ -77,7 +127,7 @@ const PRIVY_AVAILABLE = Boolean(
 const tokens = gameCrewTokens;
 
 type PulseTone = 'major' | 'danger' | 'building' | 'quiet';
-type MatchDetailMode = 'pulse' | 'game' | 'chat';
+export type MatchDetailMode = 'pulse' | 'game' | 'chat';
 
 interface PulseFeedItem {
   id: string;
@@ -106,13 +156,86 @@ const PULSE_JUMP_RETRY_MS = 80;
 const PULSE_JUMP_MAX_RETRIES = 4;
 const PULSE_ROW_FALLBACK_HEIGHT = 112;
 
-export function HomeScreen({ onOpenMatch }: { onOpenMatch: (match: GameCrewMatch) => void }) {
+export function HomeScreen({
+  onOpenFixture,
+  onOpenMatch,
+}: {
+  /** Item 2: tapping the now-listening bar jumps back into that fixture, which may not be in `loadState.matches` (e.g. a recent match scrolled out of the list) -- navigated by id alone, same route MatchDetailRoute already resolves fixtureId against. Fix round item 4: an optional tab hint ('game') so the bar can land directly on Game View instead of the default Match Pulse tab. */
+  onOpenFixture: (fixtureId: string, tab?: MatchDetailMode) => void;
+  onOpenMatch: (match: GameCrewMatch) => void;
+}) {
   const insets = useSafeAreaInsets();
   const { height, width } = useWindowDimensions();
   const [activeIndex, setActiveIndex] = useState(0);
   const [activeSection, setActiveSection] = useState<HomeSection>('featured');
   const [jumpInProgress, setJumpInProgress] = useState(false);
+  const [profileVisible, setProfileVisible] = useState(false);
+  // Item 3a: Stash re-homed to the profile sheet -- "Your Stash" opens this
+  // same EconomyPileSheet MatchDetailScreen already uses, mounted here at
+  // the Home level since Stash access no longer requires being inside a
+  // specific match.
+  const [pileSheetVisible, setPileSheetVisible] = useState(false);
   const { loadState, reload } = useGameCrewMatches();
+  // Items 5+6: cross-match identity for the profile sheet -- useUserPile is
+  // fixture-independent (folds every fixture's cached economy log) and
+  // useWallet's claims are already cross-fixture too (the same hook the
+  // Stash uses inside a match), so neither needs a MatchSession/fixtureId.
+  const userPile = useUserPile();
+  const profileWallet = useWallet();
+  const profileWalletAddress = profileWallet.walletAddress
+    ? truncateWalletAddress(profileWallet.walletAddress)
+    : null;
+  const profileHeldItemCount = userPile.pile.filter((entry) => entry.quantity > 0).length;
+  const profileClaimedItemCount = useMemo(
+    () => new Set(
+      profileWallet.claims.filter((claim) => claim.status === 'minted').map((claim) => claim.itemId),
+    ).size,
+    [profileWallet.claims],
+  );
+  const profilePileRows = useMemo(
+    () => buildPileRows(userPile.pile, getEconomyItemDefinition),
+    [userPile.pile],
+  );
+  // Item 3a narrowing: a cross-match Stash claim has no single owning
+  // fixture in the current data model (useUserPile folds quantities across
+  // every fixture's cached economy log without retaining which fixture each
+  // unit came from) -- claiming from Home therefore can't carry a real
+  // per-fixture provenance the backend would otherwise get from a match
+  // screen's claim. Rather than inventing new cross-fixture tracking in
+  // packages/core (out of scope for this round), claims initiated from the
+  // profile Stash are tagged with this explicit sentinel fixtureId so the
+  // claim still round-trips through the exact same `wallet.claimItem` path
+  // (and its idempotency/sourceEventId guarantees) a match-scoped claim
+  // uses, just without a real fixture attached.
+  const handleProfileClaimItem = useCallback(
+    (itemId: EconomyItemId, quantity: number) => {
+      profileWallet.claimItem({
+        fixtureId: 'profile',
+        itemId,
+        quantity,
+        sourceEventId: `pile:${itemId}`,
+      });
+    },
+    [profileWallet],
+  );
+  const profilePrivyLoginRef = useRef<((provider: 'google' | 'apple') => Promise<string | undefined>) | null>(null);
+  const handleProfilePrivyReady = useCallback((login: (provider: 'google' | 'apple') => Promise<string | undefined>) => {
+    profilePrivyLoginRef.current = login;
+  }, []);
+  const handleProfileStartLogin = useCallback(
+    async (provider: 'google' | 'apple'): Promise<boolean> => {
+      const login = profilePrivyLoginRef.current;
+      if (!login) return false;
+      const address = await login(provider);
+      if (!address) return false;
+      profileWallet.setWalletAddress(address);
+      return true;
+    },
+    [profileWallet],
+  );
+  const handleProfileCancelLogin = useCallback(() => {
+    profileWallet.cancelLogin();
+  }, [profileWallet]);
   const reduceMotion = useReducedMotionPreference();
   const scrollRef = useRef<ScrollView>(null);
   const featuredFocusRef = useRef<View>(null);
@@ -264,7 +387,7 @@ export function HomeScreen({ onOpenMatch }: { onOpenMatch: (match: GameCrewMatch
         showsVerticalScrollIndicator={false}
         style={styles.homeScroll}
       >
-        <HomeHeader />
+        <HomeHeader onOpenProfile={() => setProfileVisible(true)} />
 
         {loadState.status === 'error' && loadState.matches.length > 0 ? (
           <StateMessage
@@ -356,7 +479,72 @@ export function HomeScreen({ onOpenMatch }: { onOpenMatch: (match: GameCrewMatch
           section={activeSection}
         />
       ) : null}
+
+      <HomeNowListeningBar bottomInset={insets.bottom} onOpenFixture={onOpenFixture} />
+
+      <ProfileSheet
+        claimedItemCount={profileClaimedItemCount}
+        coolness={userPile.coolness}
+        heldItemCount={profileHeldItemCount}
+        onClose={() => setProfileVisible(false)}
+        onOpenStash={() => setPileSheetVisible(true)}
+        visible={profileVisible}
+        walletAddress={profileWalletAddress}
+      />
+
+      {/* PrivyLoginBridge is only ever mounted when Privy is configured --
+          calling its hooks unconditionally would throw with no PrivyProvider
+          in the tree (see app/_layout.tsx and economy-privy-login-bridge.tsx). */}
+      {PRIVY_AVAILABLE ? <PrivyLoginBridge onReady={handleProfilePrivyReady} /> : null}
+
+      <EconomyPileSheet
+        claims={profileWallet.claims}
+        coolness={userPile.coolness}
+        onCancelLogin={handleProfileCancelLogin}
+        onClaimItem={handleProfileClaimItem}
+        onClose={() => setPileSheetVisible(false)}
+        onStartLogin={handleProfileStartLogin}
+        pileRows={profilePileRows}
+        privyAvailable={PRIVY_AVAILABLE}
+        visible={pileSheetVisible}
+        walletAddress={profileWallet.walletAddress}
+        walletStatus={profileWallet.walletStatus}
+      />
     </View>
+  );
+}
+
+/**
+ * Item 2: thin wrapper so HomeScreen's own render doesn't need to
+ * conditionally subscribe to the listening-session store -- this always
+ * subscribes (useNowListeningBarVisible/useListeningSessionState are cheap,
+ * module-level useSyncExternalStore reads) and renders nothing when there's
+ * no active/playing off-screen session. `viewingFixtureId` is always
+ * undefined here since HomeScreen is never a match's own screen.
+ */
+function HomeNowListeningBar({
+  bottomInset,
+  onOpenFixture,
+}: {
+  bottomInset: number;
+  onOpenFixture: (fixtureId: string, tab?: MatchDetailMode) => void;
+}) {
+  const visible = useNowListeningBarVisible(undefined);
+  const session = useListeningSessionState();
+
+  if (!visible || !session.active) return null;
+
+  return (
+    <NowListeningBar
+      bottomInset={bottomInset}
+      isLive={session.active.isLive}
+      isPlaying={session.isPlaying}
+      matchLabel={session.active.label}
+      onPause={pauseListeningSession}
+      onResume={resumeListeningSession}
+      // Fix round item 4: land directly on Game View, same running session.
+      onTap={() => onOpenFixture(session.active!.fixtureId, 'game')}
+    />
   );
 }
 
@@ -404,10 +592,20 @@ function RecentMatchTile({
   match: GameCrewMatch;
   onPress: () => void;
 }) {
-  const scoreLabel = match.score ? `${match.score.home} - ${match.score.away}` : 'FT';
+  // Item 9b: the "recent games" grid is reused for a not-yet-played
+  // fixture too (e.g. an upcoming match scrolled in alongside real recent
+  // results) -- a match with no score yet must never read as a scoreless
+  // "FT 0-0", it must show its kickoff time instead, same as the hero
+  // carousel's own upcoming treatment.
+  const isUpcomingMatch = match.status === 'upcoming' || match.status === 'hosted';
+  const scoreLabel = match.score
+    ? `${match.score.home} - ${match.score.away}`
+    : isUpcomingMatch ? formatKickoffTime(match.kickoffUtc) : 'FT';
   const label = match.score
     ? `${getMatchTitle(match)}, final score ${match.score.home} to ${match.score.away}`
-    : `${getMatchTitle(match)}, final`;
+    : isUpcomingMatch
+      ? `${getMatchTitle(match)}, kicks off ${formatKickoff(match.kickoffUtc)}`
+      : `${getMatchTitle(match)}, final`;
 
   return (
     <Pressable
@@ -424,7 +622,7 @@ function RecentMatchTile({
             countryCode={match.homeTeam.countryCode}
             size="recent"
           />
-          <Text numberOfLines={2} selectable style={styles.recentTeamName}>
+          <Text ellipsizeMode="tail" numberOfLines={1} selectable style={styles.recentTeamName}>
             {match.homeTeam.name}
           </Text>
         </View>
@@ -434,7 +632,7 @@ function RecentMatchTile({
             countryCode={match.awayTeam.countryCode}
             size="recent"
           />
-          <Text numberOfLines={2} selectable style={styles.recentTeamName}>
+          <Text ellipsizeMode="tail" numberOfLines={1} selectable style={styles.recentTeamName}>
             {match.awayTeam.name}
           </Text>
         </View>
@@ -538,14 +736,19 @@ function useReducedMotionPreference(): boolean {
   return reduceMotion;
 }
 
-function HomeHeader() {
+function HomeHeader({ onOpenProfile }: { onOpenProfile: () => void }) {
   return (
     <View style={styles.header}>
       <View style={styles.headerSide} />
       <Text style={styles.wordmark} selectable>
         GameCrew
       </Text>
-      <Pressable accessibilityRole="button" style={styles.accountButton}>
+      <Pressable
+        accessibilityLabel="Open profile"
+        accessibilityRole="button"
+        onPress={onOpenProfile}
+        style={styles.accountButton}
+      >
         <Text style={styles.accountText}>GC</Text>
       </Pressable>
     </View>
@@ -804,16 +1007,55 @@ function StateMessage({
 }
 
 export function MatchDetailScreen({
+  initialMode = 'pulse',
   match,
   onBack,
 }: {
+  /** Item 4 (fix round): which tab this screen lands on when it mounts -- the now-listening bar passes 'game' so tapping it opens directly on Game View instead of the default Match Pulse. Every other entry path omits this and keeps the 'pulse' default. */
+  initialMode?: MatchDetailMode;
   match: GameCrewMatch;
   onBack: () => void;
 }) {
-  const [activeMode, setActiveMode] = useState<MatchDetailMode>('pulse');
+  const [activeMode, setActiveMode] = useState<MatchDetailMode>(initialMode);
   const [gamePresentation, setGamePresentation] = useState<GameViewPresentationState | null>(null);
+  // Item 5 (fix round): "takeovers own the stage" -- while a Game View
+  // takeover (goal sequence, card, VAR, a full-vignette set-piece, phase
+  // break, etc, see GameViewScreen's `onTakeoverActiveChange`) or the Gift
+  // Reveal takeover is up, the Match Pulse mini-overlay (handled inside
+  // GameViewScreen itself, see its `commentaryOverlay` gating) and the
+  // FloatingChatButton (handled here) both hide, restoring once the
+  // takeover clears.
+  const [gameViewTakeoverActive, setGameViewTakeoverActive] = useState(false);
   const [pileSheetVisible, setPileSheetVisible] = useState(false);
   const [leaderboardVisible, setLeaderboardVisible] = useState(false);
+  // Item 4: chat is now a slide-up sheet over either tab rather than its own
+  // tab -- MatchDetailMode keeps the 'chat' union member (simpler than
+  // narrowing every switch/branch below that already handles it) but it is
+  // never set anymore; the tab bar only offers 'pulse'/'game' (see the tab
+  // list below), so this state is effectively unreachable dead weight kept
+  // for diff minimality.
+  const [chatSheetVisible, setChatSheetVisible] = useState(false);
+  const reduceMotionPreference = useReducedMotionPreference();
+  // Measured heights of the checkpoint dock, the transport strip (item 7),
+  // and the bottom tab bar so the floating chat button (itself absolutely
+  // positioned against the whole screen, a sibling of all three) can float
+  // just above them (spec item 4: "sits above the checkpoint dock on both
+  // tabs") -- all three sit in normal flex flow below the tab content, so
+  // the button's `bottom` offset must clear all their heights, not just the
+  // dock's. Fall back to reasonable defaults before the first onLayout
+  // fires on each.
+  const [checkpointDockHeight, setCheckpointDockHeight] = useState(96);
+  const [transportStripHeight, setTransportStripHeight] = useState(48);
+  const [bottomNavigationHeight, setBottomNavigationHeight] = useState(64);
+  const handleCheckpointDockLayout = useCallback((event: LayoutChangeEvent) => {
+    setCheckpointDockHeight(event.nativeEvent.layout.height);
+  }, []);
+  const handleTransportStripLayout = useCallback((event: LayoutChangeEvent) => {
+    setTransportStripHeight(event.nativeEvent.layout.height);
+  }, []);
+  const handleBottomNavigationLayout = useCallback((event: LayoutChangeEvent) => {
+    setBottomNavigationHeight(event.nativeEvent.layout.height);
+  }, []);
   // UX review should-fix ("Leaderboard snapshot-at-open"): the sheet must
   // render the leaderboard as of the moment it was opened, not live re-sort
   // while the user is reading it -- captured once, on the same tap that
@@ -876,12 +1118,143 @@ export function MatchDetailScreen({
     () => buildGameViewCheckpointRail(playback.snapshot.timeline),
     [playback.snapshot.timeline],
   );
-  const visibleGamePresentation = activeMode === 'game' ? gamePresentation : null;
+
+  // Item 3/8/12/13: for a completed match, Game View lands on the full-time
+  // board's end state instead of auto-replaying from kickoff (see
+  // GameViewScreen's replaced auto-startReplay effect). `gameViewIntent`
+  // tracks what the shared playback engine is currently doing on behalf of
+  // that board so it knows when to show itself (idle) versus stay hidden
+  // (a clip/highlights/the full replay is actively running) -- see the
+  // "reappearing when playback settles" requirement. Irrelevant for live
+  // matches, which never render the board at all (see the `showFullTimeBoard`
+  // computation below).
+  const [gameViewIntent, setGameViewIntent] = useState<'idle' | 'clip' | 'highlights' | 'full'>('idle');
+  const highlightsSequenceRef = useRef<readonly GameViewCheckpointClipWindow[]>([]);
+  const highlightsIndexRef = useRef(-1);
+  const gameViewLoadState = resolveGameViewLoadState(
+    playback.snapshot.sessionStatus,
+    playback.snapshot.timeline.length > 0,
+  );
+  const showFullTimeBoard = shouldLandAtFullTime(match.status)
+    && gameViewIntent === 'idle'
+    && gameViewLoadState.status === 'ready';
+  const scorerTimeline = useMemo(
+    () => buildGameViewScorerTimeline(playback.snapshot.timeline, checkpointRail.checkpoints, pulseLoadState.entries),
+    [checkpointRail.checkpoints, playback.snapshot.timeline, pulseLoadState.entries],
+  );
+
+  // Item 1 (round four): the "fire newest commentary entry -> play clip"
+  // loop that used to live entirely in this component (useCommentaryVoiceSession
+  // + a local firing effect) is now owned by the module-level headless
+  // listening session (state/commentary-listening-session.ts), which
+  // duplicates the exact same selector (selectVisibleGameViewCommentary) and
+  // queue policy so in-match behavior is unchanged. Entering this screen
+  // hands control to that session (adopts it if it's already running for
+  // this fixture, e.g. the user came back from Home mid-playback; starts
+  // fresh otherwise), then attaches THIS screen's own `playback` engine
+  // (from usePlaybackEngine above) as the session's snapshot source --
+  // critical so checkpoint/highlights/full-replay seeks (which move
+  // `playback`, not a second independent engine) stay in lockstep with
+  // voice exactly as before the lift. Leaving this screen does NOT stop the
+  // session -- it detaches (hands off to a headless engine) instead, see
+  // enterListeningSession/useAttachListeningSessionEngine's doc comments.
+  // Owner's rule: a COMPLETED match always opens in the default state --
+  // nothing active, nothing speaking (sound off is the app-wide default;
+  // the commentary flag back to its default too), even when the user
+  // enabled sound in a previous match this session. A LIVE match stays
+  // seamless across back-and-forth, so its remembered toggles are left
+  // untouched. Declared BEFORE the enter/attach effects below so the reset
+  // runs first on entry and a stale ON preference can never voice the
+  // parked full-time board. Keyed once per fixture entry (the ref), so a
+  // live match finishing mid-view does not yank the user's toggles.
+  const lastPreferenceResetFixtureRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (lastPreferenceResetFixtureRef.current === match.txline.fixtureId) return;
+    lastPreferenceResetFixtureRef.current = match.txline.fixtureId;
+    if (!shouldLandAtFullTime(match.status)) return;
+    setGameViewSoundEnabled(false);
+    setGameViewVoiceEnabled(true);
+  }, [match.status, match.txline.fixtureId]);
+  const listeningSessionMatchInfo = useMemo(
+    () => ({
+      fixtureId: match.txline.fixtureId,
+      label: buildListeningSessionLabel(match.homeTeam.name, match.awayTeam.name),
+      isLive: match.status === 'live',
+    }),
+    [match.awayTeam.name, match.homeTeam.name, match.status, match.txline.fixtureId],
+  );
+  useEffect(() => {
+    enterListeningSession(listeningSessionMatchInfo);
+  }, [listeningSessionMatchInfo]);
+  // Bug fix: `listeningSessionMatchInfo` is also passed to the attach hook
+  // below so that if something kills the driver while this screen is still
+  // mounted (belt-and-braces -- the specific kill-on-preference-disable path
+  // is already fixed at its source, see shouldPreferenceDisableStopSession),
+  // the very next render rebuilds it instead of leaving commentary dead for
+  // the rest of the visit.
+  useAttachListeningSessionEngine(match.txline.fixtureId, playback.snapshot, listeningSessionMatchInfo);
+
+  // Item 1 (fix round): once the full-time board is the thing actually
+  // showing, the header must tell the truth regardless of whatever
+  // presentation a now-parked clip/replay last reported -- see
+  // `shouldHeaderShowFullTimeTruth`'s doc comment for the root cause
+  // (`onPresentationChange` has no "settled back to idle" clear hook).
+  // `DetailTeamScore`/`DetailMatchClock` already fall back to the match's
+  // own FT label/score whenever no presentation is supplied, so forcing
+  // `null` here is sufficient -- no separate FT-specific presentation needs
+  // to be constructed.
+  const visibleGamePresentation = activeMode === 'game' && !shouldHeaderShowFullTimeTruth(match.status, gameViewIntent)
+    ? gamePresentation
+    : null;
   const chatListRef = useRef<FlatList<GlobalChatRow> | null>(null);
   const chatRows = useMemo(
-    () => buildGlobalChatStreamRows(economy.streamRows, economy.openPrompts, economy.pile, getEconomyItemDefinition),
+    // Item 12: the real per-call stake cost, not a hardcoded placeholder --
+    // same ECONOMY_FIXED_STAKE_COOLNESS constant already imported above for
+    // MatchChatSheet's `stakeCoolness` prop.
+    () => buildGlobalChatStreamRows(
+      economy.streamRows,
+      economy.openPrompts,
+      economy.pile,
+      getEconomyItemDefinition,
+      ECONOMY_FIXED_STAKE_COOLNESS,
+    ),
     [economy.streamRows, economy.openPrompts, economy.pile],
   );
+  // Item 2: the feed's "always scroll to bottom on MY OWN send" rule needs to
+  // know the row id of whatever `user_chat` row a send actually produced --
+  // `economy.sendMessage` itself only returns a boolean (no id), and its
+  // effect on `economy.streamRows` lands one render later (it goes through
+  // `setChatMessages`, ordinary React state), so the id can't be read
+  // synchronously right after calling it. Instead: a successful send arms
+  // `awaitingOwnMessageRef`; the effect below watches `chatRows` (recomputed
+  // whenever `economy.streamRows` changes) and, once armed, treats the
+  // newest `user_chat` row as the one that was just sent. `knownUserChatRowIdsRef`
+  // seeds from the very first render so an already-existing message (e.g.
+  // restored from persistence) is never mistaken for a fresh send.
+  const knownUserChatRowIdsRef = useRef<ReadonlySet<string> | undefined>(undefined);
+  const awaitingOwnMessageRef = useRef(false);
+  const [lastOwnMessageId, setLastOwnMessageId] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    const currentUserChatRows = chatRows.filter((row) => row.kind === 'user_chat');
+    const currentIds = new Set(currentUserChatRows.map((row) => row.id));
+    if (knownUserChatRowIdsRef.current === undefined) {
+      knownUserChatRowIdsRef.current = currentIds;
+      return;
+    }
+    if (awaitingOwnMessageRef.current) {
+      const newlySent = currentUserChatRows.find((row) => !knownUserChatRowIdsRef.current!.has(row.id));
+      if (newlySent) {
+        awaitingOwnMessageRef.current = false;
+        setLastOwnMessageId(newlySent.id);
+      }
+    }
+    knownUserChatRowIdsRef.current = currentIds;
+  }, [chatRows]);
+  const handleChatSend = useCallback((text: string): boolean => {
+    const sent = economy.sendMessage(text);
+    if (sent) awaitingOwnMessageRef.current = true;
+    return sent;
+  }, [economy]);
   // Team identity for the who-scores-next team-pick card (QA HIGH fix): a
   // single representative color per team, sourced directly from the match's
   // own team colors -- MatchDetailScreen is a match-owned surface, so team
@@ -908,6 +1281,37 @@ export function MatchDetailScreen({
     () => poolChipText(economy.poolSeed, getEconomyItemDefinition),
     [economy.poolSeed],
   );
+  // Item 11: the pinned challenges strip reuses the same 'prompt'-kind rows
+  // the feed already renders (buildPinnedChallengeStrip filters/derives from
+  // chatRows), so the strip and the feed can never disagree about a prompt's
+  // open/taken/closed state.
+  const pinnedChips = useMemo(() => buildPinnedChallengeStrip(chatRows), [chatRows]);
+
+  // Item 1/4: the floating chat button's count badge -- tracks which row
+  // ids have been "seen" (as of the last sheet open) in plain component
+  // state, no persistence needed per spec. Upgraded from a bare unread dot
+  // (`hasUnreadSignal`) to the number of open challenges not yet seen
+  // (`countUnseenOpenChallenges`) now that the challenge drop-in card is
+  // gone and this button is the only out-of-sheet challenge signal.
+  const [seenChatRowIds, setSeenChatRowIds] = useState<ReadonlySet<string>>(new Set());
+  const unseenOpenChallengeCount = useMemo(
+    () => countUnseenOpenChallenges(chatRows, seenChatRowIds),
+    [chatRows, seenChatRowIds],
+  );
+  const handleOpenChatSheet = useCallback(() => {
+    setChatSheetVisible(true);
+    setSeenChatRowIds(new Set(chatRows.map((row) => row.id)));
+  }, [chatRows]);
+  const handleCloseChatSheet = useCallback(() => {
+    setChatSheetVisible(false);
+  }, []);
+
+  const handlePickPinnedChip = useCallback((promptId: string) => {
+    const index = chatRows.findIndex((row) => row.kind === 'prompt' && row.promptId === promptId);
+    if (index < 0) return;
+    chatListRef.current?.scrollToIndex({ animated: true, index, viewPosition: 0.3 });
+  }, [chatRows]);
+
   const jumpToPulseIndex = useCallback((index: number) => {
     if (pulseJumpRetryTimerRef.current) {
       clearTimeout(pulseJumpRetryTimerRef.current);
@@ -947,7 +1351,40 @@ export function MatchDetailScreen({
     if (pulseJumpRetryTimerRef.current) clearTimeout(pulseJumpRetryTimerRef.current);
   }, []);
   const handleCheckpointSelect = useCallback((sceneIndex: number) => {
-    playback.controls.startReplayAt(resolveGameViewCheckpointReplayStartIndex(sceneIndex));
+    // Any seek must silence whatever voice clip is mid-sentence before
+    // entries start firing again from the new position -- otherwise a clip
+    // grounded in the old position keeps talking over the newly jumped-to
+    // moment.
+    stopCommentaryVoiceImmediately();
+    highlightsSequenceRef.current = [];
+    highlightsIndexRef.current = -1;
+
+    if (match.status === 'live') {
+      // Item 8: live matches keep today's behavior -- jump and keep playing,
+      // no bounded clip.
+      setGameViewIntent('idle');
+      playback.controls.startReplayAt(resolveGameViewCheckpointReplayStartIndex(sceneIndex));
+    } else {
+      // Item 8: a completed match plays exactly the checkpoint's bounded
+      // clip window, then stops and settles back to the full-time board --
+      // see the `rangeStopAtIndex` watcher effect below for the "settle"
+      // half of this.
+      const checkpoint = checkpointRail.checkpoints.find((candidate) => candidate.sceneIndex === sceneIndex);
+      const window = checkpoint
+        ? resolveGameViewCheckpointClipWindow(playback.snapshot.timeline, checkpoint)
+        : undefined;
+      setGameViewIntent('clip');
+      if (window) {
+        playback.controls.startReplayRange(window.startSceneIndex, window.endSceneIndex);
+      } else {
+        // No checkpoint metadata for this scene index (defensive only --
+        // every call site sources sceneIndex from the rail itself): fall
+        // back to the pre-item-8 lead-in jump rather than stalling on an
+        // undefined window.
+        playback.controls.startReplayAt(resolveGameViewCheckpointReplayStartIndex(sceneIndex));
+      }
+    }
+
     if (activeMode !== 'pulse') return;
 
     const commentaryId = findGameViewCheckpointCommentaryEntryId(
@@ -962,7 +1399,205 @@ export function MatchDetailScreen({
     if (itemIndex >= 0) {
       jumpToPulseIndex(itemIndex);
     }
-  }, [activeMode, jumpToPulseIndex, playback, pulseItems, pulseLoadState.entries]);
+  }, [activeMode, checkpointRail.checkpoints, jumpToPulseIndex, match.status, playback, pulseItems, pulseLoadState.entries]);
+
+  const handleWatchFullMatch = useCallback(() => {
+    stopCommentaryVoiceImmediately();
+    highlightsSequenceRef.current = [];
+    highlightsIndexRef.current = -1;
+    setGameViewIntent('full');
+    playback.controls.startReplay();
+  }, [playback]);
+
+  const handlePlayHighlights = useCallback(() => {
+    const sequence = buildGameViewHighlightsSequence(playback.snapshot.timeline, checkpointRail.checkpoints);
+    highlightsSequenceRef.current = sequence;
+    const firstWindow = sequence[0];
+    if (!firstWindow) return; // No checkpoints to highlight -- nothing to chain, stay on the full-time board.
+
+    stopCommentaryVoiceImmediately();
+    highlightsIndexRef.current = 0;
+    setGameViewIntent('highlights');
+    playback.controls.startReplayRange(firstWindow.startSceneIndex, firstWindow.endSceneIndex);
+  }, [checkpointRail.checkpoints, playback]);
+
+  // Item 13: the highlights sequencer's driving effect -- watches the shared
+  // playback snapshot for the current bounded window (clip or highlights
+  // clip-in-sequence) reaching its stop scene, then either advances to the
+  // next highlight clip or settles back to the full-time board. A lone
+  // checkpoint clip (`gameViewIntent === 'clip'`) also settles here once its
+  // single window ends, since it uses the same `rangeStopAtIndex` mechanism
+  // and has no "next" to advance to.
+  useEffect(() => {
+    if (gameViewIntent !== 'clip' && gameViewIntent !== 'highlights') return;
+    const { rangeStopAtIndex, playheadIndex } = playback.snapshot;
+    if (rangeStopAtIndex === undefined || playheadIndex !== rangeStopAtIndex) return;
+
+    if (gameViewIntent === 'clip') {
+      setGameViewIntent('idle');
+      return;
+    }
+
+    const decision = resolveGameViewHighlightsAdvance(highlightsSequenceRef.current, highlightsIndexRef.current);
+    if (decision.kind === 'settle') {
+      highlightsIndexRef.current = -1;
+      setGameViewIntent('idle');
+      return;
+    }
+
+    // Every jump -- manual checkpoint or sequencer-driven -- goes through the
+    // same stop-voice-first path so a clip's narration never talks over the
+    // next one's opening moment.
+    stopCommentaryVoiceImmediately();
+    highlightsIndexRef.current = decision.nextIndex;
+    playback.controls.startReplayRange(decision.window.startSceneIndex, decision.window.endSceneIndex);
+  }, [gameViewIntent, playback.controls, playback.snapshot]);
+
+  // Item 7: the transport strip's play/pause button. `isPausedByStrip` is
+  // tracked here (not derived from `playback.snapshot.mode === 'paused'`
+  // alone) because `PlaybackEngine.pause()` also discards `rangeStopAtIndex`
+  // (see playback-engine.ts's `pause()`) -- resuming a paused clip/highlight
+  // needs to restart the SAME bounded window it was paused on, which this
+  // ref captures at pause time (`pausedRangeRef`) so `resolveTransportButtonAction`'s
+  // 'resume' case can replay it via `startReplayRange`/`startReplayAt`
+  // exactly where the user left off, rather than jumping back to the live
+  // head (`play()`) or restarting the whole replay from scene 0.
+  const [isPausedByStrip, setIsPausedByStrip] = useState(false);
+  const pausedRangeRef = useRef<{ index: number; stopAtIndex: number | undefined } | undefined>(undefined);
+  useEffect(() => {
+    // Any engine-driven settle back to 'idle' (highlights/clip finishing on
+    // their own, a fresh checkpoint jump, Watch full match, etc.) clears the
+    // strip's own paused flag so it never shows "paused" over content that
+    // is no longer the thing it paused.
+    setIsPausedByStrip(false);
+    pausedRangeRef.current = undefined;
+  }, [gameViewIntent]);
+  const currentMinute = playback.snapshot.currentScene?.clockSeconds !== undefined
+    ? Math.max(1, Math.ceil(playback.snapshot.currentScene.clockSeconds / 60))
+    : undefined;
+  const transportStripLabel = resolveTransportStripLabel({
+    currentMinute,
+    gameViewIntent,
+    kickoffLabel: formatKickoffShort(match.kickoffUtc),
+    matchStatus: match.status,
+    playbackMode: playback.snapshot.mode,
+  });
+  const showBackToFullTime = shouldShowBackToFullTime(match.status, gameViewIntent);
+  const handleTransportPress = useCallback(() => {
+    const action = resolveTransportButtonAction({
+      gameViewIntent,
+      isPaused: isPausedByStrip,
+      matchStatus: match.status,
+    });
+    switch (action.kind) {
+      case 'start_full_replay':
+        handleWatchFullMatch();
+        return;
+      case 'pause':
+        pausedRangeRef.current = {
+          index: playback.snapshot.playheadIndex,
+          stopAtIndex: playback.snapshot.rangeStopAtIndex,
+        };
+        setIsPausedByStrip(true);
+        stopCommentaryVoiceImmediately();
+        playback.controls.pause();
+        return;
+      case 'resume': {
+        const paused = pausedRangeRef.current;
+        setIsPausedByStrip(false);
+        if (!paused) {
+          // Defensive only -- 'resume' is only reachable via 'pause' having
+          // run first, which always sets pausedRangeRef.
+          return;
+        }
+        if (paused.stopAtIndex === undefined) {
+          playback.controls.startReplayAt(paused.index);
+        } else {
+          playback.controls.startReplayRange(paused.index, paused.stopAtIndex);
+        }
+        return;
+      }
+      case 'return_to_live':
+        setIsPausedByStrip(false);
+        playback.controls.play();
+        return;
+      case 'none':
+        // Item 4: upcoming/hosted -- nothing to play yet, the button is
+        // disabled (see resolveTransportStripButtonDisabled) so this should
+        // be unreachable via a real tap, but stays a no-op defensively.
+        return;
+    }
+  }, [gameViewIntent, handleWatchFullMatch, isPausedByStrip, match.status, playback]);
+  const handleTransportStop = useCallback(() => {
+    stopCommentaryVoiceImmediately();
+    highlightsSequenceRef.current = [];
+    highlightsIndexRef.current = -1;
+    setIsPausedByStrip(false);
+    pausedRangeRef.current = undefined;
+    setGameViewIntent('idle');
+    playback.controls.pause();
+  }, [playback.controls]);
+
+  // Fix round (controls to transport strip): the sound/commentary toggles and
+  // the ambient soundscape player lifted out of GameViewScreen, so the strip
+  // (visible on BOTH tabs) owns the buttons and the crowd bed survives tab
+  // switches. The inputs below mirror exactly what GameViewScreen computed
+  // locally for its own soundscape call before the lift.
+  const reduceMotion = useReduceMotionPreference();
+  const [soundEnabled, setSoundEnabled] = useGameViewSoundPreference();
+  const [voiceEnabled, setVoiceEnabled] = useGameViewVoicePreference();
+  const voiceIsSpeaking = useCommentaryVoiceSpeaking();
+  const soundScene = useMemo(
+    () => resolvePresentationScene(
+      playback.snapshot.currentScene,
+      playback.snapshot.activeSceneWindow,
+    ) ?? undefined,
+    [playback.snapshot],
+  );
+  const { activeBeatIndex: soundGoalBeatIndex } = useGoalSequenceScoreHold(
+    soundScene,
+    reduceMotion,
+    playback.snapshot.activeSceneWindow?.instanceKey,
+  );
+  const soundGoalBeat = soundScene?.kind === 'goal_sequence' && soundScene.beats?.length
+    ? soundScene.beats[Math.min(soundGoalBeatIndex, soundScene.beats.length - 1)]?.kind
+    : undefined;
+  const soundPlaybackActive = resolveGameViewPlaybackActive({
+    gameViewIntent,
+    matchStatus: match.status,
+    playbackMode: playback.snapshot.mode,
+  });
+  const soundscape = useGameViewSoundscape({
+    enabled: soundEnabled,
+    goalBeat: soundGoalBeat,
+    isSpeaking: voiceIsSpeaking,
+    isStale: gameViewLoadState.isStale,
+    playbackActive: soundPlaybackActive,
+    scene: soundScene,
+    sceneWindowKey: playback.snapshot.activeSceneWindow?.instanceKey,
+  });
+  const handleToggleSound = useCallback(() => {
+    if (soundEnabled) {
+      setSoundEnabled(false);
+      soundscape.deactivate();
+      return;
+    }
+    // Order matters: the audio-session unlock must run synchronously inside
+    // the user gesture (browser/iOS autoplay policy), before state flips.
+    soundscape.activateFromGesture();
+    setSoundEnabled(true);
+  }, [setSoundEnabled, soundEnabled, soundscape]);
+  const handleToggleVoice = useCallback(() => {
+    if (voiceEnabled) stopCommentaryVoiceImmediately();
+    setVoiceEnabled(!voiceEnabled);
+  }, [setVoiceEnabled, voiceEnabled]);
+
+  // Item 4 (fix round): an upcoming/hosted match has no saved story to
+  // "refresh and check the archive" for -- that copy only makes sense for a
+  // completed match TxLINE might not have picked up yet. A match that
+  // simply hasn't kicked off gets its own honest empty state instead, with
+  // the kickoff time when the match model has one.
+  const isUpcomingMatch = match.status === 'upcoming' || match.status === 'hosted';
   const pulseEmptyState = pulseLoadState.status === 'loading' ? (
     <PulseStatePanel title="Loading Match Pulse" body="Loading the saved match story." />
   ) : pulseLoadState.status === 'error' ? (
@@ -970,6 +1605,13 @@ export function MatchDetailScreen({
       title="Match Pulse unavailable"
       body={getPulseErrorCopy(pulseLoadState.message)}
       actionLabel="Retry"
+      onAction={reload}
+    />
+  ) : isUpcomingMatch ? (
+    <PulseStatePanel
+      title="Match Pulse begins at kickoff"
+      body={`Kickoff ${formatKickoffShort(match.kickoffUtc)}.`}
+      actionLabel="Refresh"
       onAction={reload}
     />
   ) : (
@@ -1020,28 +1662,6 @@ export function MatchDetailScreen({
           />
         </View>
 
-        {activeMode === 'chat' ? (
-          <View style={styles.chatHeaderRow}>
-            <Text style={styles.chatCoolnessLabel}>Coolness {economy.coolness}</Text>
-            <Text numberOfLines={1} style={styles.poolChipText}>{poolChipLabel}</Text>
-            <Pressable
-              accessibilityLabel="Open the board"
-              accessibilityRole="button"
-              onPress={handleOpenLeaderboard}
-              style={styles.pileButton}
-            >
-              <Text style={styles.pileButtonText}>Board</Text>
-            </Pressable>
-            <Pressable
-              accessibilityLabel="Open your stash"
-              accessibilityRole="button"
-              onPress={() => setPileSheetVisible(true)}
-              style={styles.pileButton}
-            >
-              <Text style={styles.pileButtonText}>Stash</Text>
-            </Pressable>
-          </View>
-        ) : null}
       </View>
 
       {activeMode === 'pulse' ? (
@@ -1070,52 +1690,78 @@ export function MatchDetailScreen({
           )}
           windowSize={9}
         />
-      ) : activeMode === 'game' ? (
+      ) : (
         <View style={styles.gameViewContent}>
           <GameViewScreen
             commentaryEntries={pulseLoadState.entries}
             commentaryProjectionGeneration={pulseLoadState.projectionGeneration}
+            gameViewIntent={gameViewIntent}
             match={match}
             onPresentationChange={setGamePresentation}
+            onTakeoverActiveChange={setGameViewTakeoverActive}
             playback={playback}
           />
-          {__DEV__ ? (
-            <GameViewDebugToggle fixtureId={match.txline.fixtureId} isLive={match.status === 'live'} />
+          {showFullTimeBoard ? (
+            <View style={StyleSheet.absoluteFill}>
+              <GameViewFullTimeBoard
+                awayTeam={chatAwayTeam}
+                homeTeam={chatHomeTeam}
+                onPlayHighlights={handlePlayHighlights}
+                onWatchFullMatch={handleWatchFullMatch}
+                score={{
+                  home: match.score?.home ?? gamePresentation?.score.home ?? 0,
+                  away: match.score?.away ?? gamePresentation?.score.away ?? 0,
+                }}
+                scorerTimeline={scorerTimeline}
+              />
+            </View>
           ) : null}
         </View>
-      ) : (
-        <>
-          <GlobalChatFeed
-            awayTeam={chatAwayTeam}
-            emptyLabel="The room is quiet -- check back once the match gets going."
-            homeTeam={chatHomeTeam}
-            listRef={chatListRef}
-            onScrollBeginDrag={Keyboard.dismiss}
-            onStake={economy.takeBet}
-            rows={chatRows}
-            stakeCoolness={ECONOMY_FIXED_STAKE_COOLNESS}
-          />
-          <GlobalChatComposer onSend={economy.sendMessage} />
-        </>
       )}
 
-      {activeMode !== 'chat' ? (
-        <View style={styles.checkpointDock}>
-          <GameViewCheckpointRail
-            currentClockSeconds={playback.snapshot.currentScene?.clockSeconds}
-            model={checkpointRail}
-            onSelect={handleCheckpointSelect}
-            playheadIndex={playback.snapshot.playheadIndex}
-          />
-        </View>
-      ) : null}
+      <View onLayout={handleCheckpointDockLayout} style={styles.checkpointDock}>
+        <GameViewCheckpointRail
+          currentClockSeconds={playback.snapshot.currentScene?.clockSeconds}
+          model={checkpointRail}
+          onSelect={handleCheckpointSelect}
+          playheadIndex={playback.snapshot.playheadIndex}
+        />
+      </View>
 
-      <View style={styles.detailBottomNavigation}>
+      <View onLayout={handleTransportStripLayout}>
+        <MatchTransportStrip
+          disabled={resolveTransportStripButtonDisabled(match.status)}
+          isPaused={resolveTransportStripIsPaused({
+            gameViewIntent,
+            isPausedByStrip,
+            matchStatus: match.status,
+          })}
+          label={transportStripLabel}
+          onPress={handleTransportPress}
+          onStop={handleTransportStop}
+          onToggleSound={handleToggleSound}
+          onToggleVoice={handleToggleVoice}
+          showBackToFullTime={showBackToFullTime}
+          soundEnabled={soundEnabled}
+          voiceEnabled={voiceEnabled}
+        />
+      </View>
+
+      {/* Item 5: hidden while a Game View takeover or the Gift Reveal
+          takeover owns the stage -- restored the instant either clears. */}
+      {gameViewTakeoverActive || economy.pendingGift ? null : (
+        <FloatingChatButton
+          bottomOffset={checkpointDockHeight + transportStripHeight + bottomNavigationHeight + tokens.spacing.sm}
+          onPress={handleOpenChatSheet}
+          unseenOpenChallengeCount={unseenOpenChallengeCount}
+        />
+      )}
+
+      <View onLayout={handleBottomNavigationLayout} style={styles.detailBottomNavigation}>
         <View accessibilityRole="tablist" style={styles.detailTabs}>
           {([
             { accessibilityLabel: 'Show Match Pulse', label: 'Match Pulse', mode: 'pulse' },
             { accessibilityLabel: 'Show Game View', label: 'Game View', mode: 'game' },
-            { accessibilityLabel: 'Show Global Chat', label: 'Chat', mode: 'chat' },
           ] as const).map((tab) => {
             const selected = activeMode === tab.mode;
             return (
@@ -1172,6 +1818,23 @@ export function MatchDetailScreen({
         rows={leaderboardSnapshot}
         status="ready"
         visible={leaderboardVisible}
+      />
+
+      <MatchChatSheet
+        awayTeam={chatAwayTeam}
+        chatListRef={chatListRef}
+        coolness={economy.coolness}
+        homeTeam={chatHomeTeam}
+        lastOwnMessageId={lastOwnMessageId}
+        onClose={handleCloseChatSheet}
+        onPickPinnedChip={handlePickPinnedChip}
+        onSend={handleChatSend}
+        onStake={economy.takeBet}
+        pinnedChips={pinnedChips}
+        poolChipLabel={poolChipLabel}
+        rows={chatRows}
+        stakeCoolness={ECONOMY_FIXED_STAKE_COOLNESS}
+        visible={chatSheetVisible}
       />
     </SafeAreaView>
   );
@@ -1514,6 +2177,16 @@ function formatKickoff(kickoffUtc: string): string {
   }).format(new Date(kickoffUtc));
 }
 
+/** Item 4: compact "Mon 00:30" form (weekday + 24-hour time, no timezone suffix) for the Match Pulse empty state and the transport strip's kickoff label. */
+function formatKickoffShort(kickoffUtc: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date(kickoffUtc));
+}
+
 function formatKickoffDate(kickoffUtc: string): string {
   return new Intl.DateTimeFormat(undefined, {
     weekday: 'short',
@@ -1841,15 +2514,16 @@ const styles = StyleSheet.create({
   },
   recentTeam: {
     alignItems: 'center',
+    flexShrink: 1,
     gap: tokens.spacing.xs,
-    width: 68,
+    minWidth: 68,
   },
   recentTeamName: {
     color: tokens.shell.textMuted,
     fontSize: tokens.typography.size.caption,
     fontWeight: tokens.typography.weight.medium,
     lineHeight: tokens.typography.lineHeight.caption,
-    minHeight: tokens.typography.lineHeight.caption * 2,
+    maxWidth: 84,
     textAlign: 'center',
   },
   recentFlag: {
@@ -2165,39 +2839,6 @@ const styles = StyleSheet.create({
     fontSize: tokens.typography.size.label,
     fontWeight: tokens.typography.weight.bold,
     lineHeight: tokens.typography.lineHeight.caption,
-  },
-  chatHeaderRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    gap: tokens.spacing.sm,
-    justifyContent: 'space-between',
-    marginTop: tokens.spacing.sm,
-  },
-  chatCoolnessLabel: {
-    color: tokens.shell.textMuted,
-    fontSize: tokens.typography.size.label,
-    fontVariant: ['tabular-nums'],
-    fontWeight: tokens.typography.weight.bold,
-  },
-  poolChipText: {
-    color: tokens.shell.textMuted,
-    flex: 1,
-    fontSize: tokens.typography.size.label,
-    fontWeight: tokens.typography.weight.bold,
-    textAlign: 'right',
-  },
-  pileButton: {
-    borderColor: tokens.shell.divider,
-    borderRadius: tokens.radii.pill,
-    borderWidth: 1,
-    flexShrink: 0,
-    paddingHorizontal: tokens.spacing.md,
-    paddingVertical: tokens.spacing.xs,
-  },
-  pileButtonText: {
-    color: tokens.shell.text,
-    fontSize: tokens.typography.size.caption,
-    fontWeight: tokens.typography.weight.bold,
   },
   pulseStack: {
     gap: tokens.spacing.sm,

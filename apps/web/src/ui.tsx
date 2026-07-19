@@ -15,11 +15,8 @@ export function useReducedMotion(): boolean {
   return reduced;
 }
 
-export function AndroidGlyph() {
-  return <span className="android-glyph" aria-hidden="true" />;
-}
 
-export function TeamFlag({ team }: { team: 'mexico' | 'ecuador' }) {
+export function TeamFlag({ team }: { team: 'england' | 'argentina' }) {
   return (
     <span className={`flag flag-${team}`} aria-hidden="true">
       <span />

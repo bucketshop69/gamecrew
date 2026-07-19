@@ -183,7 +183,7 @@ export function App() {
         </div>
         <nav className="footer-links" aria-label="GameCrew links">
           <a href="https://x.com/bs_dev_" target="_blank" rel="noopener noreferrer">X</a>
-          <a href="#">GitHub</a>
+          <a href="https://github.com/bucketshop69/gamecrew" target="_blank" rel="noopener noreferrer">GitHub</a>
         </nav>
       </footer>
     </>

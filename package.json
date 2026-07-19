@@ -11,6 +11,8 @@
     "mobile:web": "pnpm --filter mobile web",
     "web": "pnpm --filter @gamecrew/web dev",
     "web:build": "pnpm --filter @gamecrew/web build",
+    "web:docs": "pnpm --filter @gamecrew/docs dev",
+    "docs:build": "pnpm --filter @gamecrew/docs build",
     "typecheck": "pnpm -r --if-present typecheck",
     "build": "pnpm -r --if-present build"
   },

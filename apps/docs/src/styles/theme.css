@@ -1,0 +1,103 @@
+/* GameCrew theme — matches apps/web/src/styles.css: near-black, monochrome,
+   condensed display headings. Dark-only: both Starlight theme scopes get the
+   same palette so the site never renders light. */
+
+:root,
+:root[data-theme='light'] {
+  --sl-color-white: #f7f7f7;
+  --sl-color-gray-1: #dcdcdc;
+  --sl-color-gray-2: #a6a6a6;
+  --sl-color-gray-3: #6e6e6e;
+  --sl-color-gray-4: #3c3c3c;
+  --sl-color-gray-5: #2a2a2a;
+  --sl-color-gray-6: #151515;
+  --sl-color-gray-7: #0d0d0d;
+  --sl-color-black: #050505;
+
+  /* Monochrome accent: links read as text, the active sidebar item and the
+     primary hero button become the landing page's white pill. */
+  --sl-color-accent-low: #202020;
+  --sl-color-accent: #a6a6a6;
+  --sl-color-accent-high: #f7f7f7;
+
+  --sl-color-bg: #050505;
+
+  --sl-font: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont,
+    'Segoe UI', sans-serif;
+  --gc-display: 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* Both modes are identical, so the theme picker is noise. */
+starlight-theme-select {
+  display: none;
+}
+
+/* Broadcast-board headings, same treatment as the landing page. */
+h1#_top,
+.hero h1 {
+  font-family: var(--gc-display);
+  font-weight: 950;
+  letter-spacing: -0.05em;
+  line-height: 0.95;
+}
+
+.hero h1 {
+  font-size: clamp(3.5rem, 8vw, 6.5rem);
+  letter-spacing: -0.075em;
+  line-height: 0.87;
+}
+
+.hero .tagline {
+  color: var(--sl-color-gray-2);
+}
+
+.sl-markdown-content h2 {
+  font-family: var(--gc-display);
+  font-weight: 950;
+  letter-spacing: -0.02em;
+}
+
+/* Starlight cycles card icon chips through brand-foreign hues — pin them to
+   the gray scale. */
+article.card .title svg.icon {
+  background-color: var(--sl-color-gray-6);
+  border-color: var(--sl-color-gray-4);
+  color: var(--sl-color-white);
+}
+
+/* Note asides are blue by default; keep them monochrome. */
+.starlight-aside--note {
+  --sl-color-asides-text-accent: var(--sl-color-white);
+  --sl-color-asides-border: var(--sl-color-gray-4);
+  background-color: var(--sl-color-gray-6);
+}
+
+/* App screenshots and clips render as centered phone frames. */
+.sl-markdown-content img,
+.sl-markdown-content video {
+  max-width: min(320px, 100%);
+  display: block;
+  margin-inline: auto;
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 18px;
+}
+
+.gc-screens {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 1rem;
+}
+
+.gc-screens > * {
+  flex: 1 1 240px;
+  max-width: 300px;
+}
+
+/* Site title as the landing wordmark. */
+.site-title {
+  font-family: var(--gc-display);
+  font-weight: 950;
+  letter-spacing: -0.04em;
+  color: var(--sl-color-white);
+}

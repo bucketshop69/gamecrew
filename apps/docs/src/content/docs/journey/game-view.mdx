@@ -1,0 +1,73 @@
+---
+title: Game View — watch the play
+description: A stylized top-down broadcast board that animates the real match from live data.
+sidebar:
+  label: Game View
+---
+
+import { Steps } from '@astrojs/starlight/components';
+
+No stream? No problem. **Game View turns live match data into a stylized
+top-down broadcast** on your phone — where is the play, who is pushing, and
+what just happened.
+
+<video autoplay loop muted playsInline controls src="/media/game-view-goal.mp4" aria-label="Game View clip — the board builds pressure and erupts into a goal, with the soundscape reacting" />
+
+<div class="gc-screens">
+  ![The Game View board mid-play — two stickman formation blocks on a top-down pitch, with the synced Match Pulse caption overlay](/screens/game-view.png)
+
+  ![A goal takeover — the board flips to full-screen ENGLAND GOAL 0-1 typography](/screens/goal-takeover.png)
+</div>
+
+## What you're seeing
+
+- **A full tactical board** — two 11-figure formation blocks of stickmen, like
+  a stylized Football Manager broadcast. The team in possession pushes toward
+  the ball's zone; the defending block compresses goal-side of it.
+- **The ball moves on facts** — possession changes, zone changes, set pieces,
+  shots, goals. A turnover plays out as an interception because the possession
+  change itself is real.
+- **Takeovers for the big moments** — goals, cards, VAR reviews and
+  substitutions take over the screen as full choreographed sequences.
+- **A living soundscape** — crowd atmosphere that swells with pressure, plus
+  optional **voice commentary** calling the moments.
+
+## The honesty rule
+
+This is the part we're proudest of. The data source provides sparse semantic
+events, not player tracking — so Game View never pretends otherwise:
+
+> **Game View illustrates what the data says. Staging may dramatize inside the
+> truth; it never contradicts or outruns it.**
+
+- Formations are cosmetic defaults, never claimed lineups.
+- No real player name ever appears on an invented figure — player identity
+  shows up only in takeover typography when the source provides it.
+- The ball never crosses a zone boundary without a real cue.
+- Every visible state change traces back to a semantic frame fact.
+
+Honest theater: the drama is staged, the facts are real.
+
+## How a goal feels
+
+<Steps>
+
+1. Pressure builds — the attacking block pushes into the danger zone, the
+   soundscape rises.
+
+2. The shot lands — a goal sequence takes over the screen: the strike, the
+   celebration, the score commit.
+
+3. If VAR takes it back, Game View plays a retraction treatment — because the
+   truth changed, and the board follows the truth.
+
+4. Play restarts, the board settles, and the room in
+   [Global Chat](/journey/global-chat/) loses its mind.
+
+</Steps>
+
+## Live and replay
+
+Game View plays live matches as they happen — and replays finished matches
+**as if they were live**, using the same recorded frame stream. Checkpoints
+let you jump between the key moments of the match.

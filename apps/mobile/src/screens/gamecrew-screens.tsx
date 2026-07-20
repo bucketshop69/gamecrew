@@ -1749,7 +1749,7 @@ export function MatchDetailScreen({
 
       {/* Item 5: hidden while a Game View takeover or the Gift Reveal
           takeover owns the stage -- restored the instant either clears. */}
-      {gameViewTakeoverActive || economy.pendingGift ? null : (
+      {gameViewTakeoverActive || (economy.pendingGift && !shouldLandAtFullTime(match.status)) ? null : (
         <FloatingChatButton
           bottomOffset={checkpointDockHeight + transportStripHeight + bottomNavigationHeight + tokens.spacing.sm}
           onPress={handleOpenChatSheet}
@@ -1791,7 +1791,11 @@ export function MatchDetailScreen({
           in the tree (see app/_layout.tsx and economy-privy-login-bridge.tsx). */}
       {PRIVY_AVAILABLE ? <PrivyLoginBridge onReady={handlePrivyReady} /> : null}
 
-      {economy.pendingGift ? (
+      {/* Demo decision (2026-07-20): the welcome-gift reveal only shows on
+          matches that haven't finished (upcoming/hosted/live) -- a finished
+          match opens clean, and the gift stays pending for the next
+          not-yet-finished game the user enters. */}
+      {economy.pendingGift && !shouldLandAtFullTime(match.status) ? (
         <GiftRevealTakeover
           items={giftRevealItems}
           onClaim={economy.claimGift}

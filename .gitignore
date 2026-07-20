@@ -32,6 +32,9 @@ pnpm-debug.log*
 # Local captures and exported social media clips
 artifacts/
 
+# Local Remotion trailer project
+tools/trailer/
+
 # macOS
 .DS_Store
 *.pem
@@ -40,9 +43,11 @@ artifacts/
 .env
 .env.*
 !.env.example
+!apps/mobile/.env.development
 
 # Solana economy mint payer keypair (never commit)
 apps/api/.economy-payer.json
 
 # TypeScript
 *.tsbuildinfo
+.claude/

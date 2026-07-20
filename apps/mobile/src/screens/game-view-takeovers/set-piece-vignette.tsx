@@ -1,6 +1,6 @@
 import type { GameViewScene } from '@gamecrew/core';
-import { useRef } from 'react';
-import { Animated, Easing, Platform, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
+import Reanimated, { Easing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 
 import { resolveSetPieceVariant, setPieceLabel, type SetPieceVariant } from './game-view-takeover-logic';
 import {
@@ -58,25 +58,22 @@ export function SetPieceVignette({
 }
 
 function PictogramEntrance({ children, reduceMotion }: { children: React.ReactNode; reduceMotion: boolean }) {
-  const entrance = useRef(new Animated.Value(reduceMotion ? 1 : 0)).current;
+  const entrance = useSharedValue(reduceMotion ? 1 : 0);
 
   useMountedOnce(() => {
     if (reduceMotion) return;
-    Animated.timing(entrance, {
-      duration: 220,
-      easing: Easing.out(Easing.cubic),
-      isInteraction: false,
-      toValue: 1,
-      useNativeDriver: Platform.OS !== 'web',
-    }).start();
+    entrance.value = withTiming(1, { duration: 220, easing: Easing.out(Easing.cubic) });
   });
 
-  const translateY = entrance.interpolate({ inputRange: [0, 1], outputRange: [10, 0] });
+  const style = useAnimatedStyle(() => ({
+    opacity: entrance.value,
+    transform: [{ translateY: 10 - entrance.value * 10 }],
+  }));
 
   return (
-    <Animated.View style={{ alignItems: 'center', opacity: entrance, transform: [{ translateY }] }}>
+    <Reanimated.View style={[{ alignItems: 'center' }, style]}>
       {children}
-    </Animated.View>
+    </Reanimated.View>
   );
 }
 

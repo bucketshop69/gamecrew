@@ -1,6 +1,15 @@
 import type { GameViewScene } from '@gamecrew/core';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Platform, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
+import Reanimated, {
+  cancelAnimation,
+  Easing,
+  makeMutable,
+  useAnimatedStyle,
+  withSequence,
+  withTiming,
+  type SharedValue,
+} from 'react-native-reanimated';
 
 import type { BoardDirection, BoardTeamInfo } from '../game-view/game-view-board-logic';
 import {
@@ -42,6 +51,12 @@ const BALL_LATERAL_OFFSET_PX = -(STICK_FIGURE_SIZE_PX * 0.1);
  * Reduce-motion: no loops, no travel -- arrangements snap, and a staged plan
  * shows its final (most informative) keyframe, matching the takeovers'
  * reduce-motion treatment.
+ *
+ * Animation runtime: Reanimated 4 shared values driven imperatively from the
+ * choreography effect below (an engine-callback-driven timeline, not
+ * component state) -- style updates for all 22 figures + the ball run on the
+ * UI thread via `useAnimatedStyle`, matching the SKILL.md guidance to avoid
+ * the legacy `Animated` API for the app's hottest animation path.
  */
 export function GameViewActionCluster({
   awayTeam,
@@ -106,11 +121,17 @@ export function GameViewActionCluster({
   }, [movingKeys.size, reduceMotion]);
 
   const animsRef = useRef(createSnappedFigureAnims(initialHoldFrame?.figures ?? []));
-  const ballAnim = useRef({
-    x: new Animated.Value(initialHoldFrame?.ball.x ?? 0.5),
-    y: new Animated.Value(initialHoldFrame?.ball.y ?? 0.5),
-    scale: new Animated.Value(1),
-    opacity: new Animated.Value(
+  // makeMutable (not the useSharedValue hook) is used here and throughout
+  // this file's plumbing below: these values are created imperatively --
+  // per dynamic figure key, outside of a component render -- mirroring how
+  // the legacy code constructed `new Animated.Value(...)` on demand. It
+  // returns the same Mutable/SharedValue shape useSharedValue produces, so
+  // withTiming/useAnimatedStyle consume it identically.
+  const ballAnim = useRef<BallAnim>({
+    x: makeMutable(initialHoldFrame?.ball.x ?? 0.5),
+    y: makeMutable(initialHoldFrame?.ball.y ?? 0.5),
+    scale: makeMutable(1),
+    opacity: makeMutable(
       initialHoldFrame ? (initialHoldFrame.ball.visible === false ? 0 : 1) : 0,
     ),
   }).current;
@@ -142,15 +163,12 @@ export function GameViewActionCluster({
     if (plan.kind === 'none') {
       setFigures([]);
       holderRef.current = undefined;
-      // stopAnimation before setValue: on the JS driver a running timing is
-      // NOT cancelled by setValue and would keep driving the value each
-      // frame, silently overriding the snap (same rule everywhere below).
-      ballAnim.opacity.stopAnimation();
-      ballAnim.opacity.setValue(0);
+      cancelAnimation(ballAnim.opacity);
+      ballAnim.opacity.value = 0;
       for (const anim of animsRef.current.values()) {
-        anim.x.stopAnimation();
-        anim.y.stopAnimation();
-        anim.opacity.stopAnimation();
+        cancelAnimation(anim.x);
+        cancelAnimation(anim.y);
+        cancelAnimation(anim.opacity);
       }
       return undefined;
     }
@@ -189,10 +207,12 @@ export function GameViewActionCluster({
         return settled;
       });
       setMovingKeys(new Set());
+      // Freeze in place: cancel in-flight motion, leaving each value at
+      // wherever it currently sits (mirrors the legacy stopAnimation() calls).
       for (const anim of animsRef.current.values()) {
-        anim.x.stopAnimation();
-        anim.y.stopAnimation();
-        anim.opacity.stopAnimation();
+        cancelAnimation(anim.x);
+        cancelAnimation(anim.y);
+        cancelAnimation(anim.opacity);
       }
       stopBall(ballAnim);
       return cleanupMotion(timersRef, animsRef.current, ballAnim);
@@ -275,60 +295,93 @@ export function GameViewActionCluster({
           ? runTick % 2 === 0 ? 'run_a' : 'run_b'
           : poses[figure.key] ?? figure.pose;
         return (
-          <Animated.View
+          <ClusterFigureView
             key={figure.key}
-            style={[
-              styles.slot,
-              {
-                opacity: anim.opacity,
-                transform: [
-                  { translateX: anim.x.interpolate(PCT) },
-                  { translateY: anim.y.interpolate(PCT) },
-                ],
-              },
-            ]}
-          >
-            <View
-              style={[
-                styles.figureContent,
-                figure.focus === 'engaged' ? styles.engagedFigure : styles.formationFigure,
-                moving && !reduceMotion ? { transform: [{ translateY: runTick % 2 === 0 ? -1 : 0 }] } : undefined,
-              ]}
-            >
-              <GameViewStickPlayer
-                animateRunCycle={false}
-                facing={figure.facing}
-                pose={renderedPose}
-                reduceMotion={reduceMotion}
-                shirtColor={figure.shirtColor}
-                shortsColor={figure.shortsColor}
-                size={STICK_FIGURE_SIZE_PX}
-                teamColor={figure.color}
-                trimColor={figure.trimColor}
-              />
-            </View>
-          </Animated.View>
+            anim={anim}
+            figure={figure}
+            moving={moving}
+            reduceMotion={reduceMotion}
+            renderedPose={renderedPose}
+            runTick={runTick}
+          />
         );
       })}
 
-      <Animated.View
+      <ClusterBallView ball={ballAnim} />
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Per-figure / ball render components (own the useAnimatedStyle worklets)
+// ---------------------------------------------------------------------------
+
+function ClusterFigureView({
+  anim,
+  figure,
+  moving,
+  reduceMotion,
+  renderedPose,
+  runTick,
+}: {
+  anim: FigureAnim;
+  figure: ClusterFigure;
+  moving: boolean;
+  reduceMotion: boolean;
+  renderedPose: PlayerPose;
+  runTick: number;
+}) {
+  const style = useAnimatedStyle(() => ({
+    opacity: anim.opacity.value,
+    transform: [
+      { translateX: `${anim.x.value * 100}%` },
+      { translateY: `${anim.y.value * 100}%` },
+    ],
+  }));
+
+  return (
+    <Reanimated.View style={[styles.slot, style]}>
+      <View
         style={[
-          styles.slot,
-          styles.ballSlot,
-          {
-            opacity: ballAnim.opacity,
-            transform: [
-              { translateX: ballAnim.x.interpolate(PCT) },
-              { translateY: ballAnim.y.interpolate(PCT) },
-            ],
-          },
+          styles.figureContent,
+          figure.focus === 'engaged' ? styles.engagedFigure : styles.formationFigure,
+          moving && !reduceMotion ? { transform: [{ translateY: runTick % 2 === 0 ? -1 : 0 }] } : undefined,
         ]}
       >
-        <Animated.View style={[styles.ballContent, { transform: [{ scale: ballAnim.scale }] }]}>
-          <GameViewBall size={BALL_RENDER_SIZE_PX} />
-        </Animated.View>
-      </Animated.View>
-    </View>
+        <GameViewStickPlayer
+          animateRunCycle={false}
+          facing={figure.facing}
+          pose={renderedPose}
+          reduceMotion={reduceMotion}
+          shirtColor={figure.shirtColor}
+          shortsColor={figure.shortsColor}
+          size={STICK_FIGURE_SIZE_PX}
+          teamColor={figure.color}
+          trimColor={figure.trimColor}
+        />
+      </View>
+    </Reanimated.View>
+  );
+}
+
+function ClusterBallView({ ball }: { ball: BallAnim }) {
+  const slotStyle = useAnimatedStyle(() => ({
+    opacity: ball.opacity.value,
+    transform: [
+      { translateX: `${ball.x.value * 100}%` },
+      { translateY: `${ball.y.value * 100}%` },
+    ],
+  }));
+  const scaleStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: ball.scale.value }],
+  }));
+
+  return (
+    <Reanimated.View style={[styles.slot, styles.ballSlot, slotStyle]}>
+      <Reanimated.View style={[styles.ballContent, scaleStyle]}>
+        <GameViewBall size={BALL_RENDER_SIZE_PX} />
+      </Reanimated.View>
+    </Reanimated.View>
   );
 }
 
@@ -337,9 +390,16 @@ export function GameViewActionCluster({
 // ---------------------------------------------------------------------------
 
 interface FigureAnim {
-  x: Animated.Value;
-  y: Animated.Value;
-  opacity: Animated.Value;
+  x: SharedValue<number>;
+  y: SharedValue<number>;
+  opacity: SharedValue<number>;
+}
+
+interface BallAnim {
+  x: SharedValue<number>;
+  y: SharedValue<number>;
+  scale: SharedValue<number>;
+  opacity: SharedValue<number>;
 }
 
 function posesForFigures(figures: readonly ClusterFigure[]): Record<string, PlayerPose> {
@@ -352,15 +412,12 @@ function createSnappedFigureAnims(figures: readonly ClusterFigure[]): Map<string
   return new Map(figures.map((figure) => [
     figure.key,
     {
-      x: new Animated.Value(figure.x),
-      y: new Animated.Value(figure.y),
-      opacity: new Animated.Value(1),
+      x: makeMutable(figure.x),
+      y: makeMutable(figure.y),
+      opacity: makeMutable(1),
     },
   ]));
 }
-
-const PCT: Animated.InterpolationConfigType = { inputRange: [0, 1], outputRange: ['0%', '100%'] };
-const NATIVE = Platform.OS !== 'web';
 
 /** Relocation timing: flow reads as play traveling; turnover is snappier because the ball leads it. */
 const FLOW_MOVE_MS = 640;
@@ -375,7 +432,7 @@ const PASS_WINDUP_MS = 150;
 
 interface FrameContext {
   anims: Map<string, FigureAnim>;
-  ball: { x: Animated.Value; y: Animated.Value; scale: Animated.Value; opacity: Animated.Value };
+  ball: BallAnim;
   holderRef: { current: string | undefined };
   reduceMotion?: boolean;
   sceneDurationMs: number;
@@ -409,21 +466,21 @@ function figureMoveTiming(
   return { delayMs, durationMs: Math.max(0, motionBudgetMs - delayMs) };
 }
 
-/** Stops all in-flight ball animations so a subsequent setValue actually sticks (see the JS-driver note in applyFrame). */
-function stopBall(ball: FrameContext['ball']): void {
-  ball.x.stopAnimation();
-  ball.y.stopAnimation();
-  ball.scale.stopAnimation();
-  ball.opacity.stopAnimation();
+/** Cancels any in-flight animation on the ball's shared values (Reanimated equivalent of stopAnimation()) so a subsequent .value assignment actually sticks. */
+function stopBall(ball: BallAnim): void {
+  cancelAnimation(ball.x);
+  cancelAnimation(ball.y);
+  cancelAnimation(ball.scale);
+  cancelAnimation(ball.opacity);
 }
 
 function ensureAnim(anims: Map<string, FigureAnim>, figure: ClusterFigure): { anim: FigureAnim; isNew: boolean } {
   const existing = anims.get(figure.key);
   if (existing) return { anim: existing, isNew: false };
   const created: FigureAnim = {
-    x: new Animated.Value(figure.x),
-    y: new Animated.Value(figure.y),
-    opacity: new Animated.Value(0),
+    x: makeMutable(figure.x),
+    y: makeMutable(figure.y),
+    opacity: makeMutable(0),
   };
   anims.set(figure.key, created);
   return { anim: created, isNew: true };
@@ -462,29 +519,26 @@ function applyFrame(
   if (transition === 'cut') {
     for (const figure of frame.figures) {
       const { anim } = ensureAnim(anims, figure);
-      // A previous scene's in-flight timing would override setValue every
-      // frame on the JS driver -- stop before snapping.
-      anim.x.stopAnimation();
-      anim.y.stopAnimation();
-      anim.x.setValue(figure.x);
-      anim.y.setValue(figure.y);
-      anim.opacity.stopAnimation();
+      // Snap position immediately (a plain `.value =` assignment already
+      // cancels any in-flight animation on that shared value).
+      anim.x.value = figure.x;
+      anim.y.value = figure.y;
       if (context.reduceMotion) {
-        anim.opacity.setValue(1);
+        anim.opacity.value = 1;
       } else {
         const fadeMs = cappedMotionMs(220, sceneDurationMs || Number.POSITIVE_INFINITY);
         if (fadeMs <= 0) {
-          anim.opacity.setValue(1);
+          anim.opacity.value = 1;
         } else {
-          Animated.timing(anim.opacity, { toValue: 1, duration: fadeMs, easing: Easing.out(Easing.quad), isInteraction: false, useNativeDriver: NATIVE }).start();
+          anim.opacity.value = withTiming(1, { duration: fadeMs, easing: Easing.out(Easing.quad) });
         }
       }
     }
     stopBall(ball);
-    ball.x.setValue(frame.ball.x);
-    ball.y.setValue(frame.ball.y);
-    ball.scale.setValue(1);
-    ball.opacity.setValue(frame.ball.visible === false ? 0 : 1);
+    ball.x.value = frame.ball.x;
+    ball.y.value = frame.ball.y;
+    ball.scale.value = 1;
+    ball.opacity.value = frame.ball.visible === false ? 0 : 1;
     holderRef.current = frame.ball.visible === false ? undefined : frame.ball.holderKey;
     setFigures(frame.figures);
     setPoses(settledPoses);
@@ -505,18 +559,13 @@ function applyFrame(
     // Compressed replay churns ambient scenes quickly; a figure already in
     // (or virtually in) position must not flicker into a run cycle for a
     // zero-distance move. Snap it and leave it settled.
-    // eslint-disable-next-line no-underscore-dangle
-    const currentX = (anim.x as unknown as { __getValue?: () => number }).__getValue?.() ?? figure.x;
-    // eslint-disable-next-line no-underscore-dangle
-    const currentY = (anim.y as unknown as { __getValue?: () => number }).__getValue?.() ?? figure.y;
+    const currentX = anim.x.value;
+    const currentY = anim.y.value;
     const distance = Math.hypot(figure.x - currentX, figure.y - currentY);
     if (!isNew && distance < 0.015) {
-      anim.x.stopAnimation();
-      anim.y.stopAnimation();
-      anim.opacity.stopAnimation();
-      anim.x.setValue(figure.x);
-      anim.y.setValue(figure.y);
-      anim.opacity.setValue(1);
+      anim.x.value = figure.x;
+      anim.y.value = figure.y;
+      anim.opacity.value = 1;
       return;
     }
 
@@ -525,19 +574,30 @@ function applyFrame(
       frame.figures.length,
       moveBudgetMs,
     );
-    anim.x.stopAnimation();
-    anim.y.stopAnimation();
-    anim.opacity.stopAnimation();
     if (durationMs <= 0) {
-      anim.x.setValue(figure.x);
-      anim.y.setValue(figure.y);
-      anim.opacity.setValue(1);
+      anim.x.value = figure.x;
+      anim.y.value = figure.y;
+      anim.opacity.value = 1;
     } else {
-      Animated.parallel([
-        Animated.timing(anim.x, { toValue: figure.x, duration: durationMs, delay: delayMs, easing: Easing.out(Easing.cubic), isInteraction: false, useNativeDriver: NATIVE }),
-        Animated.timing(anim.y, { toValue: figure.y, duration: durationMs, delay: delayMs, easing: Easing.out(Easing.cubic), isInteraction: false, useNativeDriver: NATIVE }),
-        Animated.timing(anim.opacity, { toValue: 1, duration: Math.min(isNew ? 240 : durationMs, durationMs), delay: delayMs, easing: Easing.out(Easing.quad), isInteraction: false, useNativeDriver: NATIVE }),
-      ]).start();
+      // The legacy version scheduled these via Animated's own `delay` timing
+      // option; here the same stagger is achieved by scheduling the whole
+      // per-figure kick-off with `schedule` (JS-thread setTimeout), same as
+      // every other staggered move in this file already does for its
+      // follow-through callback below -- keeps every figure's x/y/opacity
+      // starting in the same tick rather than needing withDelay per value.
+      const startMove = () => {
+        anim.x.value = withTiming(figure.x, { duration: durationMs, easing: Easing.out(Easing.cubic) });
+        anim.y.value = withTiming(figure.y, { duration: durationMs, easing: Easing.out(Easing.cubic) });
+        anim.opacity.value = withTiming(1, {
+          duration: Math.min(isNew ? 240 : durationMs, durationMs),
+          easing: Easing.out(Easing.quad),
+        });
+      };
+      if (delayMs <= 0) {
+        startMove();
+      } else {
+        schedule(delayMs, startMove);
+      }
     }
     moving.add(figure.key);
     // Follow-through: bodies settle into the frame's pose once they arrive.
@@ -558,23 +618,21 @@ function applyFrame(
     sceneDurationMs || Number.POSITIVE_INFINITY,
   );
   stopBall(ball);
-  ball.scale.setValue(1);
+  ball.scale.value = 1;
   const ballVisible = frame.ball.visible !== false;
   if (!ballVisible) {
-    ball.x.setValue(frame.ball.x);
-    ball.y.setValue(frame.ball.y);
-    ball.opacity.setValue(0);
+    ball.x.value = frame.ball.x;
+    ball.y.value = frame.ball.y;
+    ball.opacity.value = 0;
     holderRef.current = undefined;
   } else if (ballMs <= 0) {
-    ball.x.setValue(frame.ball.x);
-    ball.y.setValue(frame.ball.y);
-    ball.opacity.setValue(1);
+    ball.x.value = frame.ball.x;
+    ball.y.value = frame.ball.y;
+    ball.opacity.value = 1;
   } else {
-    Animated.parallel([
-      Animated.timing(ball.x, { toValue: frame.ball.x, duration: ballMs, easing: Easing.out(Easing.quad), isInteraction: false, useNativeDriver: NATIVE }),
-      Animated.timing(ball.y, { toValue: frame.ball.y, duration: ballMs, easing: Easing.out(Easing.quad), isInteraction: false, useNativeDriver: NATIVE }),
-      Animated.timing(ball.opacity, { toValue: 1, duration: Math.min(200, ballMs), isInteraction: false, useNativeDriver: NATIVE }),
-    ]).start();
+    ball.x.value = withTiming(frame.ball.x, { duration: ballMs, easing: Easing.out(Easing.quad) });
+    ball.y.value = withTiming(frame.ball.y, { duration: ballMs, easing: Easing.out(Easing.quad) });
+    ball.opacity.value = withTiming(1, { duration: Math.min(200, ballMs) });
   }
   holderRef.current = ballVisible ? frame.ball.holderKey : undefined;
 
@@ -618,12 +676,10 @@ function runPassLoop(
     setPoses((previous) => ({ ...previous, [fromKey]: 'strike' }));
     schedule(PASS_WINDUP_MS, () => {
       stopBall(ball);
-      ball.opacity.setValue(1);
-      ball.scale.setValue(1);
-      Animated.parallel([
-        Animated.timing(ball.x, { toValue: receiver.x, duration: PASS_FLIGHT_MS, easing: Easing.out(Easing.quad), isInteraction: false, useNativeDriver: NATIVE }),
-        Animated.timing(ball.y, { toValue: receiver.y, duration: PASS_FLIGHT_MS, easing: Easing.out(Easing.quad), isInteraction: false, useNativeDriver: NATIVE }),
-      ]).start();
+      ball.opacity.value = 1;
+      ball.scale.value = 1;
+      ball.x.value = withTiming(receiver.x, { duration: PASS_FLIGHT_MS, easing: Easing.out(Easing.quad) });
+      ball.y.value = withTiming(receiver.y, { duration: PASS_FLIGHT_MS, easing: Easing.out(Easing.quad) });
       holderRef.current = toKey;
     });
     schedule(PASS_WINDUP_MS + PASS_FLIGHT_MS, () => {
@@ -666,16 +722,19 @@ function runStagedKeyframes(
           keyframe.figures.length,
           moveBudgetMs,
         );
-        anim.x.stopAnimation();
-        anim.y.stopAnimation();
         if (durationMs <= 0) {
-          anim.x.setValue(figure.x);
-          anim.y.setValue(figure.y);
+          anim.x.value = figure.x;
+          anim.y.value = figure.y;
         } else {
-          Animated.parallel([
-            Animated.timing(anim.x, { toValue: figure.x, duration: durationMs, delay: delayMs, easing: Easing.out(Easing.cubic), isInteraction: false, useNativeDriver: NATIVE }),
-            Animated.timing(anim.y, { toValue: figure.y, duration: durationMs, delay: delayMs, easing: Easing.out(Easing.cubic), isInteraction: false, useNativeDriver: NATIVE }),
-          ]).start();
+          const startMove = () => {
+            anim.x.value = withTiming(figure.x, { duration: durationMs, easing: Easing.out(Easing.cubic) });
+            anim.y.value = withTiming(figure.y, { duration: durationMs, easing: Easing.out(Easing.cubic) });
+          };
+          if (delayMs <= 0) {
+            startMove();
+          } else {
+            schedule(delayMs, startMove);
+          }
         }
       });
 
@@ -688,26 +747,23 @@ function runStagedKeyframes(
       const leg = ballLegFor(plan.label);
       const ballMoveMs = cappedMotionMs(leg.durationMs, legWindowMs);
       stopBall(ball);
-      ball.opacity.setValue(1);
-      ball.scale.setValue(1);
+      ball.opacity.value = 1;
+      ball.scale.value = 1;
       if (ballMoveMs <= 0) {
-        ball.x.setValue(keyframe.ball.x);
-        ball.y.setValue(keyframe.ball.y);
-        ball.scale.setValue(1);
+        ball.x.value = keyframe.ball.x;
+        ball.y.value = keyframe.ball.y;
+        ball.scale.value = 1;
         holderRef.current = keyframe.ball.holderKey;
         return;
       }
-      const moves = [
-        Animated.timing(ball.x, { toValue: keyframe.ball.x, duration: ballMoveMs, easing: leg.easing, isInteraction: false, useNativeDriver: NATIVE }),
-        Animated.timing(ball.y, { toValue: keyframe.ball.y, duration: ballMoveMs, easing: leg.easing, isInteraction: false, useNativeDriver: NATIVE }),
-      ];
+      ball.x.value = withTiming(keyframe.ball.x, { duration: ballMoveMs, easing: leg.easing });
+      ball.y.value = withTiming(keyframe.ball.y, { duration: ballMoveMs, easing: leg.easing });
       if (leg.loft) {
-        moves.push(Animated.sequence([
-          Animated.timing(ball.scale, { toValue: 1.45, duration: ballMoveMs * 0.5, easing: Easing.out(Easing.quad), isInteraction: false, useNativeDriver: NATIVE }),
-          Animated.timing(ball.scale, { toValue: 1, duration: ballMoveMs * 0.5, easing: Easing.in(Easing.quad), isInteraction: false, useNativeDriver: NATIVE }),
-        ]));
+        ball.scale.value = withSequence(
+          withTiming(1.45, { duration: ballMoveMs * 0.5, easing: Easing.out(Easing.quad) }),
+          withTiming(1, { duration: ballMoveMs * 0.5, easing: Easing.in(Easing.quad) }),
+        );
       }
-      Animated.parallel(moves).start();
       holderRef.current = keyframe.ball.holderKey;
     });
   });
@@ -737,15 +793,15 @@ function ballLegFor(label: Extract<ClusterPlan, { kind: 'staged' }>['label']): {
 function cleanupMotion(
   timersRef: { current: ReturnType<typeof setTimeout>[] },
   anims: Map<string, FigureAnim>,
-  ball: FrameContext['ball'],
+  ball: BallAnim,
 ): () => void {
   return () => {
     timersRef.current.forEach(clearTimeout);
     timersRef.current = [];
     for (const anim of anims.values()) {
-      anim.x.stopAnimation();
-      anim.y.stopAnimation();
-      anim.opacity.stopAnimation();
+      cancelAnimation(anim.x);
+      cancelAnimation(anim.y);
+      cancelAnimation(anim.opacity);
     }
     stopBall(ball);
   };

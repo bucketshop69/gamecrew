@@ -34,7 +34,8 @@ let activeFixtureId: string | undefined;
 let sessionRefCount = 0;
 
 const speakingListeners = new Set<() => void>();
-const prefetchedUrls = new Set<string>();
+/** Maps a prefetched clip URL to the AbortController for its still-pending fetch (or is a no-op marker once it settles). Scoped per fixture -- cleared/aborted alongside `activeFixtureId` changes so a stale fixture's prefetches never keep running (or leak) into the next one. */
+const prefetchControllers = new Map<string, AbortController>();
 
 function notifySpeakingListeners() {
   speakingListeners.forEach((listener) => listener());
@@ -82,7 +83,7 @@ function ensurePlayer(): AudioPlayer {
 export function startCommentaryVoiceSession(fixtureId: string): void {
   if (activeFixtureId !== fixtureId) {
     stopCommentaryVoiceImmediately();
-    prefetchedUrls.clear();
+    abortPendingPrefetches();
     activeFixtureId = fixtureId;
   }
   sessionRefCount += 1;
@@ -109,7 +110,7 @@ export function stopCommentaryVoiceSession(): void {
   appStateSubscription?.remove();
   appStateSubscription = undefined;
   activeFixtureId = undefined;
-  prefetchedUrls.clear();
+  abortPendingPrefetches();
 }
 
 /** Stops whatever is speaking right now with no fade -- for checkpoint jumps, seeks, and tab/screen exits. */
@@ -144,13 +145,30 @@ export function playCommentaryVoiceClip(clip: CommentaryVoiceClip, clipUrl: stri
   }
 }
 
-/** Warms the given clip URLs with a plain fetch(); failures are silently ignored. */
+/** Warms the given clip URLs with an abortable fetch(); failures (including aborts) are silently ignored -- prefetch must never surface an error to the caller. */
 export function prefetchCommentaryVoiceClips(clipUrls: readonly string[]): void {
   for (const url of clipUrls) {
-    if (prefetchedUrls.has(url)) continue;
-    prefetchedUrls.add(url);
-    fetch(url).catch(() => undefined);
+    if (prefetchControllers.has(url)) continue;
+    const controller = new AbortController();
+    prefetchControllers.set(url, controller);
+    fetch(url, { signal: controller.signal })
+      .catch(() => undefined)
+      .finally(() => {
+        // Only clear this URL's own entry -- a fixture change may have
+        // already replaced it with a fresh controller for the same URL.
+        if (prefetchControllers.get(url) === controller) {
+          prefetchControllers.delete(url);
+        }
+      });
   }
+}
+
+/** Aborts every still-pending prefetch and clears the per-fixture bookkeeping -- called on fixture change and on session stop so a stale fixture's prefetches never keep running or leak into the next one. */
+function abortPendingPrefetches(): void {
+  for (const controller of prefetchControllers.values()) {
+    controller.abort();
+  }
+  prefetchControllers.clear();
 }
 
 function subscribeSpeaking(listener: () => void) {

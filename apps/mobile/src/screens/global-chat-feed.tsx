@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import Reanimated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 
+import { hapticTap } from '../lib/haptics';
 import { CelebrationParticleBurst } from './game-view-takeovers/celebration-particles';
 import { useReducedMotionPreference } from './game-view-takeovers/takeover-shared';
 import {
@@ -298,7 +299,10 @@ function ChatRow({
             <Pressable
               accessibilityLabel={`Stake ${STAKE_EMOJI[row.stakeItemId]} and ${stakeCoolness} coolness on: ${row.copy}`}
               accessibilityRole="button"
-              onPress={() => onStake(row.promptId, row.stakeItemId)}
+              onPress={() => {
+                hapticTap();
+                onStake(row.promptId, row.stakeItemId);
+              }}
               style={({ pressed }) => [styles.stakeButton, pressed && styles.stakeButtonPressed]}
             >
               <Text style={styles.stakeButtonText}>
@@ -369,7 +373,10 @@ function TeamPickButtons({
           accessibilityLabel={`Stake ${stakeEmoji} and ${stakeCoolness} coolness on ${team.name} to score next`}
           accessibilityRole="button"
           key={team.participant}
-          onPress={() => onPick(team.participant)}
+          onPress={() => {
+            hapticTap();
+            onPick(team.participant);
+          }}
           style={({ pressed }) => [styles.teamPickButton, { borderColor: team.color }, pressed && styles.stakeButtonPressed]}
         >
           {/* Item 12: the button shows its real cost, not just the team --
@@ -497,13 +504,10 @@ const styles = StyleSheet.create({
     backgroundColor: tokens.shell.text,
     borderRadius: tokens.radii.pill,
     bottom: tokens.spacing.md,
+    boxShadow: '0 2px 4px rgba(0, 0, 0, 0.3)',
     paddingHorizontal: tokens.spacing.lg,
     paddingVertical: tokens.spacing.sm,
     position: 'absolute',
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
   },
   newMessagesPillText: {
     color: tokens.shell.inverseText,

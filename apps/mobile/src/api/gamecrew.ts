@@ -1,11 +1,47 @@
 import type { GameCrewMatch, MatchPulseCommentaryEntry, SemanticFrame } from '@gamecrew/core';
 
-const gameCrewApiUrl = process.env.EXPO_PUBLIC_GAMECREW_API_URL ?? 'http://localhost:8787';
+/**
+ * Resolves the GameCrew API base URL at call time (not module load), so a
+ * missing env var fails loudly with a clear message instead of silently
+ * pointing a production build at localhost. `__DEV__` builds fall back to
+ * the local API for convenience; non-dev builds must have
+ * EXPO_PUBLIC_GAMECREW_API_URL baked in at build time (see .env.development
+ * / .env.example).
+ */
+function getGameCrewApiUrl(): string {
+  const configured = process.env.EXPO_PUBLIC_GAMECREW_API_URL;
+  if (configured) return configured;
+
+  if (__DEV__) return 'http://localhost:8787';
+
+  throw new Error(
+    'EXPO_PUBLIC_GAMECREW_API_URL is not set. This must be provided at build time ' +
+      '(e.g. via an EAS build profile env var or apps/mobile/.env.production) -- ' +
+      'production builds do not fall back to localhost.',
+  );
+}
 
 export const matchRefreshIntervalMs = 10_000;
 
 /** Poll cadence for the Game View engine frames stream while a fixture is live. */
 export const engineFramesPollIntervalMs = 10_000;
+
+/**
+ * Exponential-backoff config shared by the hand-rolled pollers
+ * (use-gamecrew-matches.ts, use-match-pulse.ts, match-session.ts) so
+ * consecutive failures back off instead of hammering at a fixed cadence
+ * forever. Mirrors the pollBackoffCapMs/pollMaxAttempts style already used
+ * by wallet-store.ts's claim polling.
+ */
+export const pollBackoffCapMs = 60_000;
+export const pollMaxBackoffAttempts = 6;
+
+/** delayMs for the nth consecutive poll failure (0-indexed), doubling from `baseIntervalMs` up to `pollBackoffCapMs`. */
+export function resolvePollBackoffDelayMs(baseIntervalMs: number, consecutiveFailures: number): number {
+  if (consecutiveFailures <= 0) return baseIntervalMs;
+  const attempt = Math.min(consecutiveFailures, pollMaxBackoffAttempts);
+  return Math.min(baseIntervalMs * 2 ** attempt, pollBackoffCapMs);
+}
 
 interface MatchesResponse {
   source: 'txline' | 'engine' | 'combined' | 'sample' | 'sample-fallback';
@@ -30,7 +66,7 @@ export async function fetchGameCrewMatches({
 }: {
   signal?: AbortSignal;
 } = {}): Promise<readonly GameCrewMatch[]> {
-  const response = await fetch(`${gameCrewApiUrl}/matches`, { signal });
+  const response = await fetch(`${getGameCrewApiUrl()}/matches`, { signal });
   const parsed = await readGameCrewResponse<MatchesResponse>(response);
 
   return parsed.matches;
@@ -62,7 +98,7 @@ export async function fetchCommentaryAudioManifest(
   } = {},
 ): Promise<CommentaryAudioManifestResponse> {
   const response = await fetch(
-    `${gameCrewApiUrl}/matches/${encodeURIComponent(fixtureId)}/pulse/commentary/audio`,
+    `${getGameCrewApiUrl()}/matches/${encodeURIComponent(fixtureId)}/pulse/commentary/audio`,
     { signal },
   );
   return readGameCrewResponse<CommentaryAudioManifestResponse>(response);
@@ -70,7 +106,7 @@ export async function fetchCommentaryAudioManifest(
 
 /** URL for GET /matches/:fixtureId/pulse/commentary/audio/:entryId -- the clip's audio/mpeg body. */
 export function resolveCommentaryAudioClipUrl(fixtureId: string, entryId: string): string {
-  return `${gameCrewApiUrl}/matches/${encodeURIComponent(fixtureId)}/pulse/commentary/audio/${encodeURIComponent(entryId)}`;
+  return `${getGameCrewApiUrl()}/matches/${encodeURIComponent(fixtureId)}/pulse/commentary/audio/${encodeURIComponent(entryId)}`;
 }
 
 export async function fetchMatchPulseCommentary(
@@ -82,7 +118,7 @@ export async function fetchMatchPulseCommentary(
   } = {},
 ): Promise<MatchPulseCommentaryResponse> {
   const response = await fetch(
-    `${gameCrewApiUrl}/matches/${encodeURIComponent(fixtureId)}/pulse/commentary`,
+    `${getGameCrewApiUrl()}/matches/${encodeURIComponent(fixtureId)}/pulse/commentary`,
     { signal },
   );
   const parsed = await readGameCrewResponse<MatchPulseCommentaryResponse>(response);
@@ -146,7 +182,7 @@ export async function fetchEngineFrames(
   }
 
   const response = await fetch(
-    `${gameCrewApiUrl}/matches/${encodeURIComponent(fixtureId)}/engine/frames?${params.toString()}`,
+    `${getGameCrewApiUrl()}/matches/${encodeURIComponent(fixtureId)}/engine/frames?${params.toString()}`,
     { signal },
   );
 
@@ -163,7 +199,7 @@ export async function fetchEngineState(
   } = {},
 ): Promise<EngineStateResponse> {
   const response = await fetch(
-    `${gameCrewApiUrl}/matches/${encodeURIComponent(fixtureId)}/engine/state`,
+    `${getGameCrewApiUrl()}/matches/${encodeURIComponent(fixtureId)}/engine/state`,
     { signal },
   );
 
@@ -221,7 +257,7 @@ export async function createEconomyClaim(
   input: CreateEconomyClaimInput,
   { signal }: { signal?: AbortSignal } = {},
 ): Promise<EconomyClaimResponse> {
-  const response = await fetch(`${gameCrewApiUrl}/economy/claims`, {
+  const response = await fetch(`${getGameCrewApiUrl()}/economy/claims`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(input),
@@ -235,7 +271,7 @@ export async function fetchEconomyClaim(
   claimId: string,
   { signal }: { signal?: AbortSignal } = {},
 ): Promise<EconomyClaimResponse> {
-  const response = await fetch(`${gameCrewApiUrl}/economy/claims/${encodeURIComponent(claimId)}`, { signal });
+  const response = await fetch(`${getGameCrewApiUrl()}/economy/claims/${encodeURIComponent(claimId)}`, { signal });
   return readGameCrewResponse<EconomyClaimResponse>(response);
 }
 
@@ -245,7 +281,7 @@ export async function fetchEconomyWalletClaims(
   { signal }: { signal?: AbortSignal } = {},
 ): Promise<readonly EconomyClaimResponse[]> {
   const response = await fetch(
-    `${gameCrewApiUrl}/economy/wallets/${encodeURIComponent(walletAddress)}/claims`,
+    `${getGameCrewApiUrl()}/economy/wallets/${encodeURIComponent(walletAddress)}/claims`,
     { signal },
   );
   return readGameCrewResponse<readonly EconomyClaimResponse[]>(response);

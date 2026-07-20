@@ -1,6 +1,14 @@
 import type { GameViewScene } from '@gamecrew/core';
-import { useRef } from 'react';
-import { Animated, Easing, Platform, StyleSheet } from 'react-native';
+import { StyleSheet } from 'react-native';
+import Reanimated, {
+  Easing,
+  cancelAnimation,
+  useAnimatedStyle,
+  useSharedValue,
+  withRepeat,
+  withSequence,
+  withTiming,
+} from 'react-native-reanimated';
 
 import {
   TakeoverEyebrow,
@@ -69,41 +77,31 @@ function resolveVarDecision(scene: GameViewScene): { label: string; announcement
 }
 
 function PulsingBadge({ reduceMotion }: { reduceMotion: boolean }) {
-  const pulse = useRef(new Animated.Value(0)).current;
-  const loopRef = useRef<Animated.CompositeAnimation | null>(null);
+  const pulse = useSharedValue(0);
 
   useMountedOnce(() => {
     if (reduceMotion) return undefined;
-    loopRef.current = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulse, {
-          duration: 620,
-          easing: Easing.inOut(Easing.sin),
-          isInteraction: false,
-          toValue: 1,
-          useNativeDriver: Platform.OS !== 'web',
-        }),
-        Animated.timing(pulse, {
-          duration: 620,
-          easing: Easing.inOut(Easing.sin),
-          isInteraction: false,
-          toValue: 0,
-          useNativeDriver: Platform.OS !== 'web',
-        }),
-      ]),
+    pulse.value = withRepeat(
+      withSequence(
+        withTiming(1, { duration: 620, easing: Easing.inOut(Easing.sin) }),
+        withTiming(0, { duration: 620, easing: Easing.inOut(Easing.sin) }),
+      ),
+      -1,
     );
-    loopRef.current.start();
-    return () => loopRef.current?.stop();
+    return () => cancelAnimation(pulse);
   });
 
-  const opacity = reduceMotion ? 0.6 : pulse.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.75] });
-  const scale = reduceMotion ? 1 : pulse.interpolate({ inputRange: [0, 1], outputRange: [0.92, 1.08] });
+  const style = useAnimatedStyle(() => {
+    if (reduceMotion) {
+      return { opacity: 0.6, transform: [{ scale: 1 }] };
+    }
+    return {
+      opacity: 0.3 + pulse.value * 0.45,
+      transform: [{ scale: 0.92 + pulse.value * 0.16 }],
+    };
+  });
 
-  return (
-    <Animated.View
-      style={[styles.badge, { opacity, transform: [{ scale }] }]}
-    />
-  );
+  return <Reanimated.View style={[styles.badge, style]} />;
 }
 
 const styles = StyleSheet.create({

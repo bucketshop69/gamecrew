@@ -1,8 +1,6 @@
 import { gameCrewTokens, type GameViewScene } from '@gamecrew/core';
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Animated,
-  Easing,
   Image,
   StyleSheet,
   Text,
@@ -13,10 +11,12 @@ import Reanimated, {
   cancelAnimation,
   Easing as ReanimatedEasing,
   FadeIn,
+  interpolate,
   type SharedValue,
   useAnimatedStyle,
   useSharedValue,
   withRepeat,
+  withSequence,
   withTiming,
 } from 'react-native-reanimated';
 
@@ -777,14 +777,12 @@ function PossessionPresence({
   presence: BoardPresenceState;
   reduceMotion: boolean;
 }) {
-  const position = useRef(new Animated.Value(presence.position)).current;
+  const position = useSharedValue(presence.position);
   // The ring color must follow the CURRENT possession team; pinning it at
   // mount left the glow in the first team's color while the label flipped.
   const color = presence.color;
-  const pulse = useRef(new Animated.Value(0)).current;
-  const drift = useRef(new Animated.Value(0)).current;
-  const pulseLoop = useRef<Animated.CompositeAnimation | null>(null);
-  const driftLoop = useRef<Animated.CompositeAnimation | null>(null);
+  const pulse = useSharedValue(0);
+  const drift = useSharedValue(0);
   // Fix #4: a held (last-known/neutral) presence never pulses or drifts --
   // it's a static "this is where play last was" marker, not an active
   // possession reading.
@@ -795,111 +793,119 @@ function PossessionPresence({
   // without motion (per the PRD's reduce-motion rule).
   useEffect(() => {
     if (reduceMotion) {
-      position.setValue(presence.position);
+      position.value = presence.position;
       return;
     }
-    Animated.timing(position, {
-      toValue: presence.position,
+    position.value = withTiming(presence.position, {
       duration: 420,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
+      easing: ReanimatedEasing.out(ReanimatedEasing.cubic),
+    });
   }, [position, presence.position, reduceMotion]);
 
   // Pulse + drift loops: presentation only, disabled under reduce-motion
   // ("no drift/pulse, instant state changes") and also for a held presence
   // (fix #4's dimmed, static "last known position" treatment).
   useEffect(() => {
-    pulseLoop.current?.stop();
-    driftLoop.current?.stop();
+    cancelAnimation(pulse);
+    cancelAnimation(drift);
 
     if (suppressMotion) {
-      pulse.setValue(0);
-      drift.setValue(0);
+      pulse.value = 0;
+      drift.value = 0;
       return;
     }
 
-    pulse.setValue(0);
-    pulseLoop.current = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulse, {
-          toValue: 1,
+    pulse.value = 0;
+    pulse.value = withRepeat(
+      withSequence(
+        withTiming(1, {
           duration: presence.intensity.pulseDurationMs,
-          easing: Easing.inOut(Easing.sin),
-          useNativeDriver: true,
+          easing: ReanimatedEasing.inOut(ReanimatedEasing.sin),
         }),
-        Animated.timing(pulse, {
-          toValue: 0,
+        withTiming(0, {
           duration: presence.intensity.pulseDurationMs,
-          easing: Easing.inOut(Easing.sin),
-          useNativeDriver: true,
+          easing: ReanimatedEasing.inOut(ReanimatedEasing.sin),
         }),
-      ]),
+      ),
+      -1,
+      false,
     );
-    pulseLoop.current.start();
 
-    drift.setValue(0);
-    driftLoop.current = Animated.loop(
-      Animated.sequence([
-        Animated.timing(drift, {
-          toValue: 1,
+    drift.value = 0;
+    drift.value = withRepeat(
+      withSequence(
+        withTiming(1, {
           duration: presence.intensity.pulseDurationMs * 1.6,
-          easing: Easing.inOut(Easing.sin),
-          useNativeDriver: true,
+          easing: ReanimatedEasing.inOut(ReanimatedEasing.sin),
         }),
-        Animated.timing(drift, {
-          toValue: -1,
+        withTiming(-1, {
           duration: presence.intensity.pulseDurationMs * 3.2,
-          easing: Easing.inOut(Easing.sin),
-          useNativeDriver: true,
+          easing: ReanimatedEasing.inOut(ReanimatedEasing.sin),
         }),
-        Animated.timing(drift, {
-          toValue: 0,
+        withTiming(0, {
           duration: presence.intensity.pulseDurationMs * 1.6,
-          easing: Easing.inOut(Easing.sin),
-          useNativeDriver: true,
+          easing: ReanimatedEasing.inOut(ReanimatedEasing.sin),
         }),
-      ]),
+      ),
+      -1,
+      false,
     );
-    driftLoop.current.start();
 
     return () => {
-      pulseLoop.current?.stop();
-      driftLoop.current?.stop();
+      cancelAnimation(pulse);
+      cancelAnimation(drift);
     };
   }, [drift, presence.intensity.pulseDurationMs, pulse, suppressMotion]);
 
-  const translateY = position.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0%', '100%'],
+  // Cancel in-flight looping/position animations on unmount so they don't
+  // keep running on the UI thread once this presence is torn down (e.g. the
+  // action cluster takes over and this component unmounts mid-loop).
+  useEffect(() => {
+    return () => {
+      cancelAnimation(position);
+      cancelAnimation(pulse);
+      cancelAnimation(drift);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const anchorStyle = useAnimatedStyle(() => {
+    const translateY = interpolate(position.value, [0, 1], [0, 100]);
+    const driftTranslateX = interpolate(
+      drift.value,
+      [-1, 1],
+      [-DRIFT_RANGE * 100, DRIFT_RANGE * 100],
+    );
+    return {
+      transform: [
+        { translateY: `${translateY}%` },
+        { translateX: `${driftTranslateX}%` },
+      ],
+    };
   });
-  const driftTranslateX = drift.interpolate({
-    inputRange: [-1, 1],
-    outputRange: [`-${DRIFT_RANGE * 100}%`, `${DRIFT_RANGE * 100}%`],
-  });
-  const pulseScale = pulse.interpolate({
-    inputRange: [0, 1],
-    outputRange: [1, 1 + PULSE_SCALE_DELTA],
+
+  const outerRingStyle = useAnimatedStyle(() => {
+    const pulseScale = interpolate(pulse.value, [0, 1], [1, 1 + PULSE_SCALE_DELTA]);
+    return {
+      transform: [{ scale: presence.intensity.scale * pulseScale }],
+    };
   });
 
   return (
-    <Animated.View
+    <Reanimated.View
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
-      style={[
-        styles.presenceAnchor,
-        { transform: [{ translateY }, { translateX: driftTranslateX }] },
-      ]}
+      style={[styles.presenceAnchor, anchorStyle]}
     >
-      <Animated.View
+      <Reanimated.View
         style={[
           styles.presenceRing,
           styles.presenceRingOuter,
           {
             backgroundColor: color,
             opacity: presence.intensity.outerOpacity,
-            transform: [{ scale: Animated.multiply(presence.intensity.scale, pulseScale) }],
           },
+          outerRingStyle,
         ]}
       />
       <View
@@ -911,7 +917,7 @@ function PossessionPresence({
       />
       <View style={[styles.presenceCore, { backgroundColor: color }]} />
       <PresenceTeamLabel presence={presence} />
-    </Animated.View>
+    </Reanimated.View>
   );
 }
 

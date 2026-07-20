@@ -42,6 +42,14 @@ export interface MatchSessionHandle {
   getSnapshot(): MatchSessionSnapshot;
   /** Re-evaluate `isLive` after the fixture changes phase without replacing this shared session. */
   syncLiveStatus(): void;
+  /**
+   * Pause polling (e.g. the app left the foreground). Cancels any pending
+   * poll timer; an in-flight request is left to settle on its own -- it
+   * simply won't schedule a follow-up poll while backgrounded.
+   */
+  notifyBackground(): void;
+  /** Resume polling (e.g. the app returned to the foreground): does an immediate poll, then resumes the normal cadence. */
+  notifyForeground(): void;
   /** Release this consumer's hold on the session. Disposes once refcount hits 0. */
   release(): void;
 }
@@ -54,6 +62,12 @@ export interface MatchSessionDeps {
   ) => Promise<EngineFramesResponse>;
   /** Returns whether the fixture should keep polling (live) or backfill once (finished). */
   isLive: () => boolean;
+  /**
+   * Returns whether the app is currently in the foreground. Polling pauses
+   * while this is false. Optional -- defaults to always-active so existing
+   * tests/deps that don't care about backgrounding are unaffected.
+   */
+  isAppActive?: () => boolean;
   /** setTimeout-alike, injectable for tests. */
   setTimer: (callback: () => void, delayMs: number) => unknown;
   clearTimer: (handle: unknown) => void;
@@ -61,6 +75,24 @@ export interface MatchSessionDeps {
   pollIntervalMs: number;
   /** A poll window past which, if no fresh data arrives, status flips to 'stale'. Live only. */
   staleAfterMs: number;
+  /** Cap for exponential backoff on consecutive poll failures. Optional -- defaults to pollBackoffCapMs from api/gamecrew.ts's shared config. */
+  pollBackoffCapMs?: number;
+  /** Attempt count at which backoff delay stops growing. Optional -- defaults to pollMaxBackoffAttempts. */
+  pollMaxBackoffAttempts?: number;
+}
+
+const DEFAULT_POLL_BACKOFF_CAP_MS = 60_000;
+const DEFAULT_POLL_MAX_BACKOFF_ATTEMPTS = 6;
+
+function resolveBackoffDelayMs(
+  baseIntervalMs: number,
+  consecutiveFailures: number,
+  capMs: number,
+  maxAttempts: number,
+): number {
+  if (consecutiveFailures <= 0) return baseIntervalMs;
+  const attempt = Math.min(consecutiveFailures, maxAttempts);
+  return Math.min(baseIntervalMs * 2 ** attempt, capMs);
 }
 
 function isAbortError(error: unknown): boolean {
@@ -90,6 +122,9 @@ class MatchSession {
   private staleTimerHandle: unknown = null;
   private inFlight: AbortController | null = null;
   private disposed = false;
+  private consecutiveFailures = 0;
+  /** Poll args to resume from once the app returns to the foreground; set whenever a poll is deferred/paused for backgrounding. */
+  private pendingResume: { afterRevision: number } | null = null;
 
   constructor(fixtureId: string, deps: MatchSessionDeps) {
     this.fixtureId = fixtureId;
@@ -108,12 +143,18 @@ class MatchSession {
       subscribe: (listener) => this.subscribe(listener),
       getSnapshot: () => this.getSnapshot(),
       syncLiveStatus: () => this.syncLiveStatus(),
+      notifyBackground: () => this.notifyBackground(),
+      notifyForeground: () => this.notifyForeground(),
       release: () => {
         if (released) return;
         released = true;
         this.releaseOne();
       },
     };
+  }
+
+  private isAppActive(): boolean {
+    return this.deps.isAppActive?.() ?? true;
   }
 
   private subscribe(listener: MatchSessionListener): () => void {
@@ -185,6 +226,27 @@ class MatchSession {
 
     if (this.inFlight !== null || this.timerHandle !== null) return;
     void this.poll(this.headRevision);
+  }
+
+  /** App left the foreground: cancel any pending poll timer rather than firing it while backgrounded. An in-flight request is left to settle; it just won't schedule a follow-up. */
+  private notifyBackground() {
+    if (this.disposed) return;
+    if (this.timerHandle !== null) {
+      this.deps.clearTimer(this.timerHandle);
+      this.timerHandle = null;
+      this.pendingResume = { afterRevision: this.headRevision };
+    }
+  }
+
+  /** App returned to the foreground: poll immediately, then resume the normal cadence. */
+  private notifyForeground() {
+    if (this.disposed) return;
+    if (!this.deps.isLive()) return;
+    if (this.inFlight !== null) return;
+
+    const resumeFrom = this.pendingResume?.afterRevision ?? this.headRevision;
+    this.pendingResume = null;
+    void this.poll(resumeFrom);
   }
 
   private dispose() {
@@ -274,11 +336,14 @@ class MatchSession {
       this.hasProjectionGeneration = true;
       this.lastUpdatedAtMs = this.deps.now();
       this.errorMessage = undefined;
+      this.consecutiveFailures = 0;
 
       const live = this.deps.isLive();
 
       if (response.hasMore) {
-        // Full backfill: keep paging immediately until caught up.
+        // Full backfill: keep paging immediately until caught up (not gated
+        // on foreground state -- a bounded catch-up sequence, not the
+        // steady-state poll loop).
         this.status = 'loading';
         this.emit();
         this.inFlight = null;
@@ -292,10 +357,15 @@ class MatchSession {
 
       if (live) {
         this.inFlight = null;
-        this.timerHandle = this.deps.setTimer(() => {
-          this.timerHandle = null;
-          void this.poll(response.nextAfterRevision);
-        }, this.deps.pollIntervalMs);
+        if (this.isAppActive()) {
+          this.timerHandle = this.deps.setTimer(() => {
+            this.timerHandle = null;
+            void this.poll(response.nextAfterRevision);
+          }, this.deps.pollIntervalMs);
+        } else {
+          // Backgrounded: don't schedule -- notifyForeground() will resume from here.
+          this.pendingResume = { afterRevision: response.nextAfterRevision };
+        }
       } else {
         this.inFlight = null;
       }
@@ -306,14 +376,28 @@ class MatchSession {
       this.inFlight = null;
       this.errorMessage = error instanceof Error ? error.message : 'Game View data is unavailable.';
       this.status = this.frames.length > 0 ? this.status : 'error';
+      this.consecutiveFailures += 1;
       this.emit();
 
-      // Back off and retry on the normal poll cadence rather than hammering.
+      // Back off on consecutive failures rather than hammering at a fixed cadence forever.
       if (this.deps.isLive()) {
-        this.timerHandle = this.deps.setTimer(() => {
-          this.timerHandle = null;
-          void this.poll(afterRevision);
-        }, this.deps.pollIntervalMs);
+        if (this.isAppActive()) {
+          const capMs = this.deps.pollBackoffCapMs ?? DEFAULT_POLL_BACKOFF_CAP_MS;
+          const maxAttempts = this.deps.pollMaxBackoffAttempts ?? DEFAULT_POLL_MAX_BACKOFF_ATTEMPTS;
+          const delayMs = resolveBackoffDelayMs(
+            this.deps.pollIntervalMs,
+            this.consecutiveFailures,
+            capMs,
+            maxAttempts,
+          );
+          this.timerHandle = this.deps.setTimer(() => {
+            this.timerHandle = null;
+            void this.poll(afterRevision);
+          }, delayMs);
+        } else {
+          // Backgrounded: don't schedule -- notifyForeground() will resume from here.
+          this.pendingResume = { afterRevision };
+        }
       }
     }
   }

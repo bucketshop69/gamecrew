@@ -2,10 +2,10 @@ import { gameCrewTokens, type EconomyItemId } from '@gamecrew/core';
 import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  FlatList,
   Linking,
   Modal,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -107,20 +107,23 @@ export function EconomyPileSheet({
           {pileRows.length === 0 ? (
             <Text style={styles.emptyText}>Nothing in the stash yet -- claim your gift to get started.</Text>
           ) : (
-            <ScrollView contentContainerStyle={styles.list}>
-              {pileRows.map((row) => (
+            <FlatList
+              contentContainerStyle={styles.list}
+              data={pileRows}
+              keyExtractor={(row) => row.itemId}
+              nestedScrollEnabled
+              renderItem={({ item }) => (
                 <PileItemRow
-                  claimStatus={itemClaimStatus(row.itemId, claims)}
-                  key={row.itemId}
+                  claimStatus={itemClaimStatus(item.itemId, claims)}
                   needsLogin={walletStatus === 'no_wallet'}
                   onCancelLogin={onCancelLogin}
-                  onClaim={() => onClaimItem(row.itemId, row.quantity)}
+                  onClaim={() => onClaimItem(item.itemId, item.quantity)}
                   onStartLogin={onStartLogin}
                   privyAvailable={privyAvailable}
-                  row={row}
+                  row={item}
                 />
-              ))}
-            </ScrollView>
+              )}
+            />
           )}
         </View>
       </View>

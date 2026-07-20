@@ -1,6 +1,6 @@
 import type { GameViewScene } from '@gamecrew/core';
-import { useRef } from 'react';
-import { Animated, Easing, Platform, StyleSheet } from 'react-native';
+import { StyleSheet } from 'react-native';
+import Reanimated, { Easing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 
 import { formatScoreline } from './game-view-takeover-logic';
 import {
@@ -57,27 +57,23 @@ export function GoalRetractedTakeover({
 
 /** A "GOAL" label with a strike-through bar wiping across it, then fading -- the visible takeback. */
 function StrikeThroughGoal({ reduceMotion }: { reduceMotion: boolean }) {
-  const wipe = useRef(new Animated.Value(reduceMotion ? 1 : 0)).current;
+  const wipe = useSharedValue(reduceMotion ? 1 : 0);
 
   useMountedOnce(() => {
     if (reduceMotion) return undefined;
-    Animated.timing(wipe, {
-      duration: 420,
-      easing: Easing.out(Easing.cubic),
-      isInteraction: false,
-      toValue: 1,
-      useNativeDriver: Platform.OS !== 'web',
-    }).start();
+    wipe.value = withTiming(1, { duration: 420, easing: Easing.out(Easing.cubic) });
     return undefined;
   });
 
-  const scaleX = wipe.interpolate({ inputRange: [0, 1], outputRange: [0, 1] });
+  const style = useAnimatedStyle(() => ({
+    transform: [{ scaleX: wipe.value }],
+  }));
 
   return (
-    <Animated.View style={styles.retractedRow}>
-      <Animated.Text style={styles.retractedGoalText}>GOAL</Animated.Text>
-      <Animated.View style={[styles.strike, { transform: [{ scaleX }] }]} />
-    </Animated.View>
+    <Reanimated.View style={styles.retractedRow}>
+      <Reanimated.Text style={styles.retractedGoalText}>GOAL</Reanimated.Text>
+      <Reanimated.View style={[styles.strike, style]} />
+    </Reanimated.View>
   );
 }
 

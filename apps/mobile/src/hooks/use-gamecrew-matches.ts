@@ -1,7 +1,13 @@
 import type { GameCrewMatch } from '@gamecrew/core';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { AppState } from 'react-native';
 
-import { fetchGameCrewMatches, isAbortError, matchRefreshIntervalMs } from '../api/gamecrew';
+import {
+  fetchGameCrewMatches,
+  isAbortError,
+  matchRefreshIntervalMs,
+  resolvePollBackoffDelayMs,
+} from '../api/gamecrew';
 
 export type MatchesLoadState =
   | { status: 'loading'; matches: readonly GameCrewMatch[] }
@@ -15,6 +21,8 @@ export function useGameCrewMatches() {
   });
   const activeRequestRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(false);
+  const consecutiveFailuresRef = useRef(0);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const loadMatches = useCallback((showLoading = false) => {
     activeRequestRef.current?.abort();
@@ -29,6 +37,7 @@ export function useGameCrewMatches() {
     fetchGameCrewMatches({ signal: controller.signal })
       .then((matches) => {
         if (mountedRef.current && activeRequestRef.current === controller) {
+          consecutiveFailuresRef.current = 0;
           setLoadState({ status: 'ready', matches });
         }
       })
@@ -37,6 +46,7 @@ export function useGameCrewMatches() {
           return;
         }
 
+        consecutiveFailuresRef.current += 1;
         setLoadState((current) => ({
           status: 'error',
           matches: current.matches,
@@ -52,13 +62,45 @@ export function useGameCrewMatches() {
 
   useEffect(() => {
     mountedRef.current = true;
-    loadMatches(true);
 
-    const intervalId = setInterval(() => loadMatches(false), matchRefreshIntervalMs);
+    // Backgrounded pollers should not keep hammering the API at a fixed
+    // 10s cadence (or hot-looping on a failure backoff) while the user
+    // isn't looking; pause while inactive and refresh immediately on return.
+    const scheduleNext = () => {
+      if (timerRef.current !== undefined) {
+        clearTimeout(timerRef.current);
+        timerRef.current = undefined;
+      }
+      if (AppState.currentState !== 'active') return;
+
+      const delayMs = resolvePollBackoffDelayMs(matchRefreshIntervalMs, consecutiveFailuresRef.current);
+      timerRef.current = setTimeout(() => {
+        loadMatches(false);
+        scheduleNext();
+      }, delayMs);
+    };
+
+    loadMatches(true);
+    scheduleNext();
+
+    const appStateSubscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        consecutiveFailuresRef.current = 0;
+        loadMatches(false);
+        scheduleNext();
+      } else if (timerRef.current !== undefined) {
+        clearTimeout(timerRef.current);
+        timerRef.current = undefined;
+      }
+    });
 
     return () => {
       mountedRef.current = false;
-      clearInterval(intervalId);
+      appStateSubscription.remove();
+      if (timerRef.current !== undefined) {
+        clearTimeout(timerRef.current);
+        timerRef.current = undefined;
+      }
       activeRequestRef.current?.abort();
       activeRequestRef.current = null;
     };

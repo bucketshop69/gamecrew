@@ -1,5 +1,5 @@
 import { gameCrewTokens, type LeaderboardRow } from '@gamecrew/core';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { FlatList, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 
 const tokens = gameCrewTokens;
 
@@ -61,11 +61,13 @@ export function EconomyLeaderboardSheet({
             <Text style={styles.emptyText}>Nobody's on the board yet</Text>
           ) : (
             <>
-              <ScrollView contentContainerStyle={styles.list}>
-                {rows.map((row) => (
-                  <LeaderboardRowItem key={row.id} row={row} />
-                ))}
-              </ScrollView>
+              <FlatList
+                contentContainerStyle={styles.list}
+                data={rows}
+                keyExtractor={(row) => row.id}
+                nestedScrollEnabled
+                renderItem={({ item }) => <LeaderboardRowItem row={item} />}
+              />
               {userRow ? (
                 <View style={styles.pinnedFooter}>
                   <Text style={styles.pinnedFooterText}>

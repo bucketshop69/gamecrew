@@ -1,5 +1,6 @@
 import { buildGameViewTimeline, type SemanticFrame } from '@gamecrew/core';
 import { useEffect, useRef, useState } from 'react';
+import { AppState } from 'react-native';
 
 import { createMatchSessionDefaultDeps } from './match-session-defaults';
 import { acquireMatchSession, type MatchSessionHandle } from './match-session';
@@ -125,6 +126,23 @@ export function usePlaybackEngine(
       setControls(NOOP_CONTROLS);
     };
   }, [fixtureId]);
+
+  // The session's own poll loop is app-state-agnostic (match-session.ts has
+  // no runtime react-native import so it stays unit-testable under plain
+  // Node -- see its header comment); this is the seam where the React layer
+  // owns the actual AppState subscription, same style as
+  // use-commentary-voice.ts / use-game-view-soundscape.ts.
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        sessionRef.current?.notifyForeground();
+      } else {
+        sessionRef.current?.notifyBackground();
+      }
+    });
+
+    return () => subscription.remove();
+  }, []);
 
   // A completed upcoming-fixture backfill has no timer left to observe the
   // kickoff transition. Nudge the existing shared session when live status

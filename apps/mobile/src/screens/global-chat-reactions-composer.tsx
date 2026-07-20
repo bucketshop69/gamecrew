@@ -2,6 +2,7 @@ import { gameCrewTokens } from '@gamecrew/core';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Pressable } from 'react-native';
 
+import { hapticSuccess, hapticTap } from '../lib/haptics';
 import { REACTION_CHIPS } from './match-chat-sheet-logic';
 
 const tokens = gameCrewTokens;
@@ -38,7 +39,10 @@ export function GlobalChatReactionsComposer({
             accessibilityLabel={`Send: ${chip.label}`}
             accessibilityRole="button"
             key={chip.id}
-            onPress={() => onSend(chip.label)}
+            onPress={() => {
+              hapticTap();
+              if (onSend(chip.label)) hapticSuccess();
+            }}
             style={({ pressed }) => [styles.chip, pressed && styles.chipPressed]}
           >
             <Text style={styles.chipText}>{chip.label}</Text>

@@ -198,12 +198,9 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(4, 7, 5, 0.88)',
     borderRadius: 8,
     borderWidth: 1,
+    boxShadow: '0 1px 2px rgba(0, 0, 0, 0.35)',
     height: 16,
     justifyContent: 'center',
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.35,
-    shadowRadius: 2,
     width: 16,
   },
   markerActive: {

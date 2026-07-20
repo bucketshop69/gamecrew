@@ -5,9 +5,12 @@ description: Watch GameCrew in motion, then take the screen-by-screen tour.
 
 There are three ways to experience GameCrew, from lightest to deepest.
 
-## 1. Watch it move
+## 1. Watch the demo
 
-Thirteen seconds of the real app — the Game View board playing a live attack:
+<iframe style="width: 100%; aspect-ratio: 16 / 9; border: 0; border-radius: 12px;" src="https://www.youtube-nocookie.com/embed/SuQjXCbAEII" title="GameCrew demo video" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+
+Prefer a quick taste? Thirteen seconds of the real app — the Game View board
+playing a live attack:
 
 <video autoplay loop muted playsInline controls src="/media/gamecrew-quick-look.mp4" aria-label="A quick look at GameCrew — the match screen in motion"></video>
 

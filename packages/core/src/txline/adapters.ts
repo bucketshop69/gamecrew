@@ -16,6 +16,7 @@ const HISTORICAL_FIXTURE_LOOKBACK_DAYS = 30;
 const ARCHIVAL_SCORE_CACHE_AGE_MS = MILLISECONDS_PER_DAY;
 const ARCHIVAL_SCORE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const SCORE_FETCH_CONCURRENCY = 20;
+const MATCH_LIST_CACHE_TTL_MS = 30_000;
 
 interface ScoreCacheEntry {
   cachedAt: number;
@@ -58,12 +59,39 @@ export class SampleTxlineMatchAdapter implements TxlineMatchAdapter {
 export class LiveTxlineMatchAdapter implements TxlineMatchAdapter {
   private readonly archivalScoreCache = new Map<string, ScoreCacheEntry>();
   private readonly scoreRequests = new Map<string, Promise<readonly TxlineScore[]>>();
+  private matchListCache?: { cachedAt: number; matches: readonly GameCrewMatch[] };
+  private matchListRequest?: Promise<readonly GameCrewMatch[]>;
 
   constructor(private readonly client: TxlineApiClient) {}
 
   async listMatches(query: TxlineMatchQuery = {}): Promise<readonly GameCrewMatch[]> {
-    const { jwt } = await this.client.startGuestSession();
+    const matches = await this.listAllMatches();
+    return applyMatchQuery(matches, query);
+  }
+
+  private async listAllMatches(): Promise<readonly GameCrewMatch[]> {
     const now = Date.now();
+    if (this.matchListCache && now - this.matchListCache.cachedAt < MATCH_LIST_CACHE_TTL_MS) {
+      return this.matchListCache.matches;
+    }
+    if (this.matchListRequest) {
+      return this.matchListRequest;
+    }
+
+    const request = this.fetchAllMatches(now)
+      .then((matches) => {
+        this.matchListCache = { cachedAt: now, matches };
+        return matches;
+      })
+      .finally(() => {
+        this.matchListRequest = undefined;
+      });
+    this.matchListRequest = request;
+    return request;
+  }
+
+  private async fetchAllMatches(now: number): Promise<readonly GameCrewMatch[]> {
+    const { jwt } = await this.client.startGuestSession();
     const currentEpochDay = Math.floor(now / MILLISECONDS_PER_DAY);
     const fixtures = await this.client.listFixtures(jwt, {
       startEpochDay: currentEpochDay - HISTORICAL_FIXTURE_LOOKBACK_DAYS,
@@ -75,11 +103,10 @@ export class LiveTxlineMatchAdapter implements TxlineMatchAdapter {
       SCORE_FETCH_CONCURRENCY,
       (fixture) => this.listMatchScores(fixture, jwt, now),
     );
-    const matches = sortedFixtures.map((fixture, index) =>
+
+    return sortedFixtures.map((fixture, index) =>
       mapTxlineFixtureToGameCrewMatch(fixture, scores[index] ?? []),
     );
-
-    return applyMatchQuery(matches, query);
   }
 
   async listMatchPulse(fixtureId: string | number): Promise<readonly MatchPulseEvent[]> {

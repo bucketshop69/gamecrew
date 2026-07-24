@@ -14,7 +14,8 @@
     "web:docs": "pnpm --filter @gamecrew/docs dev",
     "docs:build": "pnpm --filter @gamecrew/docs build",
     "typecheck": "pnpm -r --if-present typecheck",
-    "build": "pnpm -r --if-present build"
+    "build": "pnpm -r --if-present build",
+    "api:build": "pnpm --filter @gamecrew/core --filter @gamecrew/api build"
   },
   "devDependencies": {
     "typescript": "~6.0.3"

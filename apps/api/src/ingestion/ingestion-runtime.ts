@@ -10,6 +10,7 @@ import {
   type TxlineScore,
 } from '@gamecrew/core';
 import type { ApiConfig } from '../config.js';
+import { mapWithConcurrency } from '../concurrency.js';
 import {
   MatchPulseMaterializationStore,
   isMaterializationAvailable,
@@ -25,6 +26,8 @@ import { SemanticFrameHub } from './semantic-frame-hub.js';
 import { SqliteIngestionStore } from './sqlite-ingestion-store.js';
 import { TxlineAuthSession } from './txline-auth-session.js';
 import { TxlineFeedSource } from './txline-feed-source.js';
+
+const LIST_MATCHES_CONCURRENCY = 20;
 
 export function createIngestionRuntime(config: ApiConfig) {
   const client = new TxlineApiClient({ baseUrl: config.txlineBaseUrl, apiToken: config.txlineApiToken });
@@ -120,7 +123,7 @@ export function createIngestionRuntime(config: ApiConfig) {
       fixtureId, context, feed, store, projector,
       finalisationCorrectionWindowMs: correctionWindowMs,
     });
-  });
+  }, config.maxIngestionSessions);
 
   return {
     ensureFixture: (fixtureId: string) => supervisor.ensureFixture(fixtureId),
@@ -138,7 +141,7 @@ export function createIngestionRuntime(config: ApiConfig) {
       const materializationByFixture = new Map(
         materializationSnapshots.map((snapshot) => [snapshot.fixtureId, snapshot]),
       );
-      const matches = await Promise.all(fixtureIds.map(async (fixtureId) => {
+      const matches = await mapWithConcurrency(fixtureIds, LIST_MATCHES_CONCURRENCY, async (fixtureId) => {
         const materialization = materializationByFixture.get(fixtureId);
         if (!isMaterializationAvailable(materialization?.status)) return undefined;
         const [checkpoint, fixtureContext, raw] = await Promise.all([
@@ -163,7 +166,7 @@ export function createIngestionRuntime(config: ApiConfig) {
         }
         const mapped = mapTxlineFixtureToGameCrewMatch(fixture, scores);
         return withCanonicalCheckpoint(mapped, checkpoint, persistedParticipants);
-      }));
+      });
       return applyMatchQuery(matches.filter((match): match is GameCrewMatch => Boolean(match)), query);
     },
     subscribe: hub.subscribe.bind(hub),

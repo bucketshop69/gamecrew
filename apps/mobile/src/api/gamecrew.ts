@@ -21,7 +21,7 @@ function getGameCrewApiUrl(): string {
   );
 }
 
-export const matchRefreshIntervalMs = 10_000;
+export const matchRefreshIntervalMs = 30_000;
 
 /** Poll cadence for the Game View engine frames stream while a fixture is live. */
 export const engineFramesPollIntervalMs = 10_000;

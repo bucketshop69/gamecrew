@@ -4,12 +4,20 @@ export interface ManagedFixtureSession {
   isStopped?(): boolean;
 }
 
+const DEFAULT_MAX_SESSIONS = 500;
+
 export class IngestionSupervisor {
   private readonly sessions = new Map<string, Promise<ManagedFixtureSession>>();
+  private readonly maxSessions: number;
 
-  constructor(private readonly createSession: (
-    fixtureId: string,
-  ) => ManagedFixtureSession | Promise<ManagedFixtureSession>) {}
+  constructor(
+    private readonly createSession: (
+      fixtureId: string,
+    ) => ManagedFixtureSession | Promise<ManagedFixtureSession>,
+    maxSessions: number = DEFAULT_MAX_SESSIONS,
+  ) {
+    this.maxSessions = maxSessions;
+  }
 
   ensureFixture(fixtureId: string | number): Promise<ManagedFixtureSession> {
     const key = String(fixtureId);
@@ -20,6 +28,11 @@ export class IngestionSupervisor {
         if (this.sessions.get(key) === existing) this.sessions.delete(key);
         return this.ensureFixture(key);
       });
+    }
+    if (this.sessions.size >= this.maxSessions) {
+      return Promise.reject(
+        new Error(`Too many active ingestion sessions (limit ${this.maxSessions}).`),
+      );
     }
     const pending = Promise.resolve(this.createSession(key)).then(async (session) => {
       await session.start();

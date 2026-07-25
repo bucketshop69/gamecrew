@@ -12,11 +12,17 @@ import type { IngestionRuntime } from './ingestion/ingestion-runtime.js';
 import { ResponseCache } from './response-cache.js';
 import type { EconomyRuntime } from './economy/economy-runtime.js';
 import { createCommentaryAudioRoutes, type CommentaryAudioRoutesStore } from './tts/commentary-audio-routes.js';
+import { createRateLimitMiddleware } from './rate-limit.js';
 
 const DEFAULT_FRAMES_PAGE_LIMIT = 500;
 const MAX_FRAMES_PAGE_LIMIT = 2_000;
 const ENGINE_CACHE_TTL_MS = 5_000;
 const ENGINE_CACHE_MAX_ENTRIES = 500;
+const PULSE_CACHE_TTL_MS = 10_000;
+const PULSE_CACHE_MAX_ENTRIES = 500;
+const MOMENTS_CACHE_TTL_MS = 15_000;
+const MOMENTS_CACHE_MAX_ENTRIES = 500;
+const STATIC_CACHE_VERSION = 'v1';
 
 type StoredFrames = Awaited<ReturnType<IngestionRuntime['listFramesAfter']>>;
 
@@ -37,8 +43,19 @@ export function createApp(
     ttlMs: ENGINE_CACHE_TTL_MS,
     maxEntries: ENGINE_CACHE_MAX_ENTRIES,
   });
+  const pulseCache = new ResponseCache<unknown>({
+    ttlMs: PULSE_CACHE_TTL_MS,
+    maxEntries: PULSE_CACHE_MAX_ENTRIES,
+  });
+  const momentsCache = new ResponseCache<unknown>({
+    ttlMs: MOMENTS_CACHE_TTL_MS,
+    maxEntries: MOMENTS_CACHE_MAX_ENTRIES,
+  });
 
-  app.use('*', cors());
+  app.use('*', cors(
+    config.corsAllowedOrigins ? { origin: [...config.corsAllowedOrigins] } : undefined,
+  ));
+  app.use('*', createRateLimitMiddleware(config));
 
   if (commentaryAudio) {
     app.route('/', createCommentaryAudioRoutes(commentaryAudio));
@@ -154,9 +171,13 @@ export function createApp(
   });
 
   app.get('/matches/:fixtureId/pulse', async (context) => {
-    const fixtureId = context.req.param('fixtureId');
-    const result = await txline.listMatchPulse(fixtureId);
+    const fixtureId = normalizeFixtureId(context.req.param('fixtureId'));
+    const cacheKey = `pulse:${fixtureId}`;
+    const cached = pulseCache.get(cacheKey, STATIC_CACHE_VERSION);
+    if (cached) return context.json(cached);
 
+    const result = await txline.listMatchPulse(fixtureId);
+    pulseCache.set(cacheKey, STATIC_CACHE_VERSION, result);
     return context.json(result);
   });
 
@@ -177,15 +198,23 @@ export function createApp(
         },
       });
     }
-    const result = await txline.listMatchPulseCommentary(fixtureId);
+    const cacheKey = `pulse-commentary:${fixtureId}`;
+    const cached = pulseCache.get(cacheKey, STATIC_CACHE_VERSION);
+    if (cached) return context.json(cached);
 
+    const result = await txline.listMatchPulseCommentary(fixtureId);
+    pulseCache.set(cacheKey, STATIC_CACHE_VERSION, result);
     return context.json(result);
   });
 
   app.get('/matches/:fixtureId/pulse/moments', async (context) => {
-    const fixtureId = context.req.param('fixtureId');
-    const result = await txline.listMatchPulseMoments(fixtureId);
+    const fixtureId = normalizeFixtureId(context.req.param('fixtureId'));
+    const cacheKey = `pulse-moments:${fixtureId}`;
+    const cached = momentsCache.get(cacheKey, STATIC_CACHE_VERSION);
+    if (cached) return context.json(cached);
 
+    const result = await txline.listMatchPulseMoments(fixtureId);
+    momentsCache.set(cacheKey, STATIC_CACHE_VERSION, result);
     return context.json(result);
   });
 
@@ -233,14 +262,19 @@ export function createApp(
 
   app.notFound((context) => context.json({ error: 'Not found' }, 404));
 
-  app.onError((error, context) =>
-    context.json(
-      {
-        error: error instanceof Error ? error.message : String(error),
-      },
-      502,
-    ),
-  );
+  app.onError((error, context) => {
+    if (error instanceof InvalidFixtureIdError) {
+      return context.json({ error: 'Invalid fixtureId.' }, 400);
+    }
+
+    console.error(JSON.stringify({
+      event: 'api_request_failed',
+      path: context.req.path,
+      reason: error instanceof Error ? error.message : String(error),
+    }));
+
+    return context.json({ error: 'Internal server error.' }, 502);
+  });
 
   return app;
 }
@@ -291,8 +325,20 @@ function mergeRemoteTeamMetadata(local: MatchTeam, remoteMatch: GameCrewMatch): 
   return remote ? { ...remote, name: local.name, shortName: local.shortName } : local;
 }
 
-function normalizeFixtureId(value: string): string {
-  return value.startsWith('txline-') ? value.slice('txline-'.length) : value;
+const FIXTURE_ID_PATTERN = /^\d+$/;
+
+export class InvalidFixtureIdError extends Error {
+  constructor(value: string) {
+    super(`Invalid fixtureId: ${value}`);
+  }
+}
+
+export function normalizeFixtureId(value: string): string {
+  const stripped = value.startsWith('txline-') ? value.slice('txline-'.length) : value;
+  if (!FIXTURE_ID_PATTERN.test(stripped)) {
+    throw new InvalidFixtureIdError(value);
+  }
+  return stripped;
 }
 
 function parseFilter(value?: string): GameCrewMatchFilter | undefined {

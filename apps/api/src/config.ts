@@ -22,6 +22,10 @@ export interface ApiConfig {
   commentaryAudioSqlitePath: string;
   xaiApiKey?: string;
   xaiTtsBaseUrl?: string;
+  maxIngestionSessions: number;
+  corsAllowedOrigins?: readonly string[];
+  rateLimitMaxRequests: number;
+  rateLimitWindowMs: number;
 }
 
 export function loadConfig(): ApiConfig {
@@ -69,7 +73,26 @@ export function loadConfig(): ApiConfig {
       resolve(process.cwd(), '.data/commentary-audio.sqlite'),
     xaiApiKey: process.env.XAI_API_KEY ?? env.XAI_API_KEY,
     xaiTtsBaseUrl: normalizeOptionalUrl(process.env.XAI_TTS_BASE_URL ?? env.XAI_TTS_BASE_URL),
+    maxIngestionSessions: parseNonNegativeNumber(
+      process.env.MAX_INGESTION_SESSIONS ?? env.MAX_INGESTION_SESSIONS,
+      500,
+    ),
+    corsAllowedOrigins: parseOriginList(process.env.CORS_ALLOWED_ORIGINS ?? env.CORS_ALLOWED_ORIGINS),
+    rateLimitMaxRequests: parseNonNegativeNumber(
+      process.env.RATE_LIMIT_MAX_REQUESTS ?? env.RATE_LIMIT_MAX_REQUESTS,
+      60,
+    ),
+    rateLimitWindowMs: parseNonNegativeNumber(
+      process.env.RATE_LIMIT_WINDOW_MS ?? env.RATE_LIMIT_WINDOW_MS,
+      60_000,
+    ),
   };
+}
+
+function parseOriginList(value?: string): readonly string[] | undefined {
+  if (!value) return undefined;
+  const origins = value.split(',').map((origin) => origin.trim()).filter(Boolean);
+  return origins.length > 0 ? origins : undefined;
 }
 
 function parseBoolean(value?: string): boolean {

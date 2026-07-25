@@ -45,6 +45,13 @@ export default defineConfig({
             { label: 'The Solana Layer', slug: 'how-it-works/solana-layer' },
           ],
         },
+        {
+          label: 'Legal',
+          items: [
+            { label: 'Terms of Use', slug: 'legal/terms-of-use' },
+            { label: 'Privacy Policy', slug: 'legal/privacy-policy' },
+          ],
+        },
       ],
     }),
   ],

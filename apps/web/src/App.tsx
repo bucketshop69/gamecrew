@@ -184,6 +184,8 @@ export function App() {
         <nav className="footer-links" aria-label="GameCrew links">
           <a href="https://x.com/bs_dev_" target="_blank" rel="noopener noreferrer">X</a>
           <a href="https://github.com/bucketshop69/gamecrew" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href="https://gamecrew-docs.vercel.app/legal/terms-of-use/" target="_blank" rel="noopener noreferrer">Terms of Use</a>
+          <a href="https://gamecrew-docs.vercel.app/legal/privacy-policy/" target="_blank" rel="noopener noreferrer">Privacy Policy</a>
         </nav>
       </footer>
     </>
